@@ -99,6 +99,33 @@ Vendor pulled Nord Pool prices via cloud. HA already has Nordpool
 integrations; emaldo-local can consume prices via MQTT from HA if
 price-driven charging is wanted. Not a firmware concern in FW-1/2.
 
+### power saving / night low-power mode — FRESH, FW-2.1
+Measured on a stock Power Core 2.0 (5 kWh module): ~40 W continuous
+idle draw with the pack at 0 W (inverter standby + BMS + comms), i.e.
+~1 kWh/day ≈ 370 kWh/year just to stay online. The vendor firmware has
+no sleep concept — the e2e keepalive runs every 10 s and the power stage
+never idles below standby.
+
+emaldo-local should do better, within hard constraints:
+- **Never drop availability.** If a grid-rewards/backup dispatch or a
+  Modbus command arrives, the power stage must be live within a few
+  seconds. Comms (MQTT/e2e-bridge) and BMS stay awake at all times —
+  they are the half of the idle draw we cannot remove.
+- **Sleep the power stage, not the brain.** When no charge/discharge is
+  active: idle the DC bus, gate the PWM stage, park the fan. Target
+  total draw ~15–25 W (saves ~150–300 kWh/year per unit).
+- **Wake sources:** scheduled charge/discharge windows, Modbus register
+  writes from HA, MQTT commands, rising solar (resume PV conversion when
+  irradiance > threshold for N minutes — the "solar panels only make
+  sense in the sun" case), and any dispatch while a grid-services
+  contract is active (in which case the mode is simply disabled).
+- **Config:** web UI toggle + `power_save` block in config (enabled,
+  PV wake threshold, wake-ahead minutes before scheduled windows).
+- **Safety:** BMS stays fully active (cell balancing, protection); the
+  mode is inhibited while SoC guard/UPS reserve could be needed
+  instantaneously — wake latency must be validated on hardware before
+  enabling by default.
+
 ## Grid services
 
 ### frr / fcrctrl / fcr (FCR/mFRR balancing) — NO (default), FW-3 opt-in
@@ -186,6 +213,7 @@ Internal job queue. Our scheduler is trivial (poll loop + timers).
 | self-update | REPLACED (done, needs live test) | FW-1 |
 | BLE provisioning | FRESH | FW-1.1 |
 | powerctrl / limits / modes | FRESH | FW-2 |
+| power saving / night low-power | FRESH (design) | FW-2.1 |
 | schedules / manual selling | FRESH | FW-2 |
 | e2e-compat bridge | optional | FW-3 |
 | e-ink display | FW-1.2 (done, needs on-device tuning) | FW-1 |
