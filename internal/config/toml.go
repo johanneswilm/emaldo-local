@@ -69,6 +69,7 @@ func setField(cfg *Config, section, key, val string) error {
 	case "hardware.inverter_slave_id": intv(&cfg.Hardware.InverterSlaveID)
 	case "hardware.battery_slave_id": intv(&cfg.Hardware.BatterySlaveID)
 	case "hardware.poll_interval_secs": intv(&cfg.Hardware.PollIntervalSecs)
+	case "hardware.simulate": boolv(&cfg.Hardware.Simulate)
 	case "device.name": str(&cfg.Device.Name)
 	case "device.location": str(&cfg.Device.Location)
 	case "device.timezone": str(&cfg.Device.Timezone)
@@ -92,8 +93,8 @@ func writeTOML(b *strings.Builder, c *Config) {
 	b.WriteString("[web]\n")
 	fmt.Fprintf(b, "listen_addr = %s\ntls_cert = %s\ntls_key = %s\n\n", q(c.Web.ListenAddr), q(c.Web.TLSCert), q(c.Web.TLSKey))
 	b.WriteString("[hardware]\n")
-	fmt.Fprintf(b, "serial_port = %s\nserial_baud = %d\ninverter_slave_id = %d\nbattery_slave_id = %d\npoll_interval_secs = %d\n\n",
-		q(c.Hardware.SerialPort), c.Hardware.SerialBaud, c.Hardware.InverterSlaveID, c.Hardware.BatterySlaveID, c.Hardware.PollIntervalSecs)
+	fmt.Fprintf(b, "serial_port = %s\nserial_baud = %d\ninverter_slave_id = %d\nbattery_slave_id = %d\npoll_interval_secs = %d\nsimulate = %v\n\n",
+		q(c.Hardware.SerialPort), c.Hardware.SerialBaud, c.Hardware.InverterSlaveID, c.Hardware.BatterySlaveID, c.Hardware.PollIntervalSecs, c.Hardware.Simulate)
 	b.WriteString("[device]\n")
 	fmt.Fprintf(b, "name = %s\nlocation = %s\ntimezone = %s\n\n", q(c.Device.Name), q(c.Device.Location), q(c.Device.Timezone))
 	b.WriteString("[ota]\n")

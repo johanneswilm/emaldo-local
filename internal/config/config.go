@@ -36,6 +36,10 @@ type HardwareConfig struct {
 	InverterSlaveID  int `toml:"inverter_slave_id"`  // default: 1
 	BatterySlaveID   int `toml:"battery_slave_id"`   // default: 247 (BMS)
 	PollIntervalSecs int `toml:"poll_interval_secs"` // default: 5
+	// Simulate feeds synthetic telemetry (PV curve + SOC drift) instead of
+	// reading the serial bus. For demos/development only - never on a real
+	// installation.
+	Simulate bool `toml:"simulate"`
 }
 
 type DeviceConfig struct {

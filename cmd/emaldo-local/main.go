@@ -77,8 +77,16 @@ func main() {
 	}()
 	defer unsub()
 
-	hw := &hermes.Reader{Cfg: store.Get(), Telem: telem}
-	hw.Start()
+	cfg0 := store.Get()
+	var cmdHandler func(string, map[string]any)
+	if cfg0.Hardware.Simulate {
+		telem.AddEvent("warn", "hermes", "SIMULATE mode: synthetic telemetry, not the real battery")
+		(&hermes.Simulator{Telem: telem}).Start()
+	} else {
+		hw := &hermes.Reader{Cfg: store.Get(), Telem: telem}
+		hw.Start()
+		cmdHandler = hw.HandleCmd
+	}
 
 	disp := &display.Renderer{Cfg: store.Get(), Telem: telem}
 	disp.Start()
@@ -90,7 +98,7 @@ func main() {
 	otac.Start()
 
 	srv := web.New(store, telem)
-	srv.CmdHandler = hw.HandleCmd
+	srv.CmdHandler = cmdHandler
 	srv.OnConfigChange = func() {
 		telem.AddEvent("info", "config", "configuration updated")
 		startMQTT()
