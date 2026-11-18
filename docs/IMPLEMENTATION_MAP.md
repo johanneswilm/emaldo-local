@@ -100,11 +100,13 @@ integrations; emaldo-local can consume prices via MQTT from HA if
 price-driven charging is wanted. Not a firmware concern in FW-1/2.
 
 ### power saving / night low-power mode — FRESH, FW-2.1
-Measured on a stock Power Core 2.0 (5 kWh module): ~40 W continuous
-idle draw with the pack at 0 W (inverter standby + BMS + comms), i.e.
-~1 kWh/day ≈ 370 kWh/year just to stay online. The vendor firmware has
-no sleep concept — the e2e keepalive runs every 10 s and the power stage
-never idles below standby.
+Measured on a stock Power Core 2.0 (3 x 5 kWh modules, ~14.8 kWh
+usable): ~120 W continuous idle draw with the pack at 0 W (inverter
+standby + BMS + comms), i.e. ~2.9 kWh/day ≈ 1,050 kWh/year just to stay
+online. The vendor firmware has no sleep concept — the e2e keepalive runs
+every 10 s and the power stage never idles below standby. (An earlier
+revision of this note assumed a single 5 kWh module and quoted ~40 W —
+the per-unit draw is the same; only the pack size was wrong.)
 
 emaldo-local should do better, within hard constraints:
 - **Never drop availability.** If a grid-rewards/backup dispatch or a
