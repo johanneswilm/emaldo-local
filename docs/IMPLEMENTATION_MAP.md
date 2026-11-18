@@ -48,9 +48,16 @@ Validation requires the USB-RS485 dongle (checklist in REGISTERS.md).
 Per-model version dispatch. We support the models the community has
 (capture-driven); unknown models fail safe (read-only).
 
-### display / lcdsdk / backlight / sound — FW-3
-LCD on `/dev/fb0`, wav prompts in `/root/wav/`. Nice for wall-mounted
-status; not needed for automation. Optional framebuffer status page.
+### display / lcdsdk / backlight / sound — FW-1.2, e-ink
+The panel is an E-INK display (vendor strings "eink"/"ePD"): grayscale
+only, slow refresh, flash-averse. It currently shows charge state to
+everyone walking past, so leaving it dark is a visible regression —
+emaldo-local ships `internal/display`: direct /dev/fb0 rendering with a
+shadow buffer (only changed pixels are written), an 8x8 embedded font,
+a battery-glyph SOC visual (no colors on e-ink), best-effort flush via
+FBIOPUT_VSCREENINFO, content-change gating (15 s max cadence). Polarity
+and the exact refresh ioctl are marked for on-device tuning. Sound
+(/root/wav prompts) stays FW-3 optional.
 
 ## Telemetry & data pipeline
 
@@ -181,7 +188,7 @@ Internal job queue. Our scheduler is trivial (poll loop + timers).
 | powerctrl / limits / modes | FRESH | FW-2 |
 | schedules / manual selling | FRESH | FW-2 |
 | e2e-compat bridge | optional | FW-3 |
-| LCD / sound | optional | FW-3 |
+| e-ink display | FW-1.2 (done, needs on-device tuning) | FW-1 |
 | FCR/grid services | NO (opt-in later) | — |
 | themis cluster | NO (single device) | — |
 | cloud REST / WSS / log uploads | NO (vendor-bound) | — |

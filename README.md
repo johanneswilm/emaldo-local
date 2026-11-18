@@ -45,6 +45,8 @@ project.
 - [x] Modbus RTU polling skeleton for the inverter register block
       (see `docs/REGISTERS.md` — offsets need hardware validation)
 - [x] Signed self-update checker skeleton (ed25519 manifests)
+- [x] E-ink status display (direct /dev/fb0, shadow-buffer diffing,
+      battery-glyph SOC, 15 s cadence; polarity/flush tuning on-device)
 - [ ] BLE provisioning channel (FW-1.1)
 - [ ] Control: charge limits, modes, schedules (FW-2)
 - [ ] LCD/sound, cluster, FCR hooks (FW-3)

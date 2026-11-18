@@ -18,6 +18,7 @@ import (
 
 	"emaldo-local/internal/bled"
 	"emaldo-local/internal/config"
+	"emaldo-local/internal/display"
 	"emaldo-local/internal/hermes"
 	"emaldo-local/internal/mqtt"
 	"emaldo-local/internal/ota"
@@ -78,6 +79,9 @@ func main() {
 
 	hw := &hermes.Reader{Cfg: store.Get(), Telem: telem}
 	hw.Start()
+
+	disp := &display.Renderer{Cfg: store.Get(), Telem: telem}
+	disp.Start()
 
 	ble := &bled.Server{Telem: telem}
 	ble.Start()
