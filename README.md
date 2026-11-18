@@ -1,5 +1,24 @@
 # emaldo-local — community firmware for the Emaldo Power Core IoT module
 
+> **⚠ UNTESTED — DO NOT FLASH WHILE THE VENDOR IS ALIVE**
+>
+> This firmware is an early, **largely untested** skeleton. It has never
+> run on real hardware. Flashing it replaces the vendor's module app,
+> which is what keeps your battery registered with Emaldo's cloud —
+> including **grid-rewards programs that pay you** — so installing this
+> while Emaldo's servers still exist can cost you money and brick remote
+> manageability. It is built for the **post-bankruptcy world**: when the
+> vendor cloud is gone (or you have decided you no longer need it), this
+> is a path to a fully local battery. Until then, use the
+> [ha-emaldo-local](https://github.com/johanneswilm/ha-emaldo-local)
+> takeover stack, which keeps the stock firmware and the vendor's view of
+> your battery intact. Rollback to the vendor binary is possible via the
+> update channel (see `docs/OTA.md` in the takeover repo), but only if
+> the update path still works — treat every flash as potentially
+> unrecoverable without hardware access (UART console).
+
+License: MIT (see LICENSE).
+
 A free replacement for the vendor cloud binary on the Emaldo "Power Core"
 home battery's IoT module: fully local operation, a web UI to configure
 your own MQTT broker (URL + credentials) and other essentials, live data
