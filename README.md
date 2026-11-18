@@ -69,6 +69,20 @@ On first boot the wizard asks for an admin password and your MQTT broker
 reconfigurable in the Settings card. The API needs the bearer token from
 `POST /api/v1/login` (or the session cookie).
 
+## Original vendor firmware
+
+**Not included in this repository** (it is the vendor's copyrighted
+binary, ~31 MB). While Emaldo's file server is still up, the v2.35.3 IoT
+artifact can be downloaded from the vendor CDN:
+
+    https://files.oms.emaldo.com/new_firmware/iot/6102ea751f963eea.bin
+
+Verify its integrity (md5 must be `94d351b8f1857c79cd710f2f95347cf2`).
+Keep a copy — it is your rollback image and the baseline for building
+modified stock images (see `docs/OTA.md` in the takeover repo). Once the
+vendor's servers go dark, copies held by the community are the only
+source, so back it up offline.
+
 ## Install on the device (summary)
 
 1. Redirect the module's API traffic once using the stock firmware's BLE
