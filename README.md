@@ -31,6 +31,10 @@ Design goals and reverse-engineering background:
 `docs/CUSTOM_FIRMWARE.md`). This repo is the firmware half of that
 project.
 
+* [`docs/IMPLEMENTATION_MAP.md`](docs/IMPLEMENTATION_MAP.md) —
+  subsystem-by-subsystem walkthrough of the official firmware: what we
+  port, what we replace, what we deliberately skip, and in which phase.
+
 ## Status: FW-1 (read-only telemetry skeleton)
 
 - [x] Config store (`/root/config.toml`, atomic writes + backup)
