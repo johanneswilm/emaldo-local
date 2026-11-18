@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emaldo local</title>
+<style>
+  :root { --bg:#101418; --card:#1a2027; --fg:#e6edf3; --mut:#8b949e; --acc:#2f81f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; color: var(--mut); text-transform: uppercase; letter-spacing: .08em; }
+  .card { background: var(--card); border-radius: 10px; padding: 16px; margin: 12px 0; }
+  label { display:block; margin: 10px 0 4px; color: var(--mut); font-size: 13px; }
+  input { width:100%; padding:8px 10px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:var(--fg); }
+  button { margin-top:14px; padding:9px 16px; border:0; border-radius:6px; background:var(--acc); color:#fff; font-weight:600; cursor:pointer; }
+  button.ghost { background:#30363d; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:140px; }
+  .big { font-size:26px; font-weight:700; }
+  .mut { color: var(--mut); }
+  #msg { min-height: 20px; color:#3fb950; }
+  #msg.err { color:#f85149; }
+  .hidden { display:none; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; background:#30363d; font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Emaldo local firmware</h1>
+
+  <section id="setup" class="card hidden">
+    <h2>First-run setup</h2>
+    <p class="mut">Set an admin password and your MQTT broker. You can change everything later under Settings.</p>
+    <label>Admin password (min 8 chars)</label><input id="su_pw" type="password">
+    <label>Device name</label><input id="su_name" value="Power Core">
+    <label>MQTT broker URL</label><input id="su_url" placeholder="mqtt://192.168.1.10:1883">
+    <label>MQTT username</label><input id="su_user">
+    <label>MQTT password</label><input id="su_mpw" type="password">
+    <button onclick="doSetup()">Finish setup</button>
+    <p id="su_msg" class="mut"></p>
+  </section>
+
+  <section id="login" class="card hidden">
+    <h2>Log in</h2>
+    <label>Password</label><input id="li_pw" type="password">
+    <button onclick="doLogin()">Log in</button>
+    <p id="li_msg" class="mut"></p>
+  </section>
+
+  <div id="app" class="hidden">
+    <div class="row">
+      <div class="card"><h2>Battery SOC</h2><div class="big" id="st_soc">–</div></div>
+      <div class="card"><h2>Battery power</h2><div class="big" id="st_bat">–</div><div class="mut">W (+ = charging)</div></div>
+      <div class="card"><h2>Grid net</h2><div class="big" id="st_grid">–</div><div class="mut">W (+ = importing)</div></div>
+      <div class="card"><h2>PV</h2><div class="big" id="st_pv">–</div><div class="mut">W</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Live state</h2>
+      <pre id="st_raw" class="mut" style="white-space:pre-wrap;font-size:12px"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Settings</h2>
+      <div class="row">
+        <div><label>MQTT broker URL</label><input id="cf_url"></div>
+        <div><label>Username</label><input id="cf_user"></div>
+      </div>
+      <div class="row">
+        <div><label>MQTT password</label><input id="cf_mpw"></div>
+        <div><label>Topic prefix</label><input id="cf_prefix"></div>
+      </div>
+      <label><input type="checkbox" id="cf_ha" style="width:auto"> Home Assistant MQTT discovery</label>
+      <br><button onclick="saveConfig()">Save settings</button>
+      <span id="msg"></span>
+    </div>
+
+    <div class="card">
+      <h2>Commands</h2>
+      <div class="row">
+        <div><label>Command</label>
+          <select id="cmd_sel" style="width:100%;padding:8px;background:#0d1117;color:var(--fg);border:1px solid #30363d;border-radius:6px">
+            <option value="set_mode">set_mode</option>
+            <option value="set_charge_limit">set_charge_limit</option>
+            <option value="set_discharge_limit">set_discharge_limit</option>
+            <option value="rescan">rescan</option>
+            <option value="reboot">reboot</option>
+          </select></div>
+        <div><label>Value (set_mode: auto|charge|discharge|standby; limits: watts)</label><input id="cmd_val"></div>
+      </div>
+      <button onclick="sendCmd()">Send</button>
+    </div>
+  </div>
+</main>
+
+<script>
+let token = localStorage.getItem("emaldo_token") || "";
+async function api(path, opts={}) {
+  opts.headers = Object.assign({"Content-Type":"application/json", "Authorization":"Bearer "+token}, opts.headers||{});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
+  return r.json();
+}
+function show(el){ ["setup","login","app"].forEach(id=>document.getElementById(id).classList.add("hidden")); document.getElementById(el).classList.remove("hidden"); }
+function showLogin(){ show("login"); }
+
+async function init() {
+  try {
+    const st = await api("/api/v1/state");
+    if (st.setup_required) { show("setup"); return; }
+    show("app"); fillConfig(); startStream();
+  } catch(e) { showLogin(); }
+}
+async function doSetup() {
+  const body = {password: su_pw.value, device_name: su_name.value, broker_url: su_url.value,
+                username: su_user.value, mqtt_password: su_mpw.value};
+  const r = await fetch("/api/v1/setup", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const j = await r.json();
+  if (j.ok) { location.reload(); } else { su_msg.textContent = j.error || "failed"; }
+}
+async function doLogin() {
+  const r = await fetch("/api/v1/login", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({password: li_pw.value})});
+  const j = await r.json();
+  if (j.token) { token = j.token; localStorage.setItem("emaldo_token", token); init(); }
+  else { li_msg.textContent = j.error || "failed"; }
+}
+async function fillConfig() {
+  const c = await api("/api/v1/config");
+  cf_url.value = c.MQTT?.broker_url || ""; cf_user.value = c.MQTT?.username || "";
+  cf_mpw.value = c.MQTT?.password || ""; cf_prefix.value = c.MQTT?.topic_prefix || "";
+  cf_ha.checked = !!c.MQTT?.ha_discovery;
+}
+async function saveConfig() {
+  const c = await api("/api/v1/config");
+  c.MQTT.broker_url = cf_url.value; c.MQTT.username = cf_user.value;
+  c.MQTT.password = cf_mpw.value; c.MQTT.topic_prefix = cf_prefix.value;
+  c.MQTT.ha_discovery = cf_ha.checked;
+  const r = await api("/api/v1/config", {method:"PUT", body:JSON.stringify(c)});
+  msg.textContent = r.MQTT ? "saved ✓" : "error"; msg.className = "";
+  setTimeout(()=>msg.textContent="", 3000);
+}
+async function sendCmd() {
+  const args = {};
+  const v = cmd_val.value;
+  if (v !== "") { if (cmd_sel.value.endsWith("limit")) args.watts = Number(v); else args.mode = v; }
+  await api("/api/v1/cmd", {method:"POST", body:JSON.stringify({cmd: cmd_sel.value, args})});
+}
+function fmt(n, unit){ return (n===0||n) ? Math.round(n*10)/10 + " " + unit : "–"; }
+function startStream() {
+  const es = new EventSource("/api/v1/stream", {withCredentials:false});
+  // EventSource can't set headers; fall back to polling if no cookie.
+  es.onmessage = ev => render(JSON.parse(ev.data));
+  es.onerror = () => { es.close(); setInterval(poll, 5000); };
+}
+async function poll(){ render(await api("/api/v1/state")); }
+function render(st) {
+  st_soc.textContent = fmt(st.battery?.soc_percent, "%");
+  st_bat.textContent = fmt(st.battery?.power_w, "W");
+  st_grid.textContent = fmt(st.grid?.net_w, "W");
+  st_pv.textContent = fmt(st.pv?.power_w, "W");
+  st_raw.textContent = JSON.stringify(st, null, 1);
+}
+init();
+</script>
+</body>
+</html>
