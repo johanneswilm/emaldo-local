@@ -37,9 +37,11 @@ e2e compatibility is ever needed. **FW-3** (only if app-compat wanted).
 
 ### hermes (hal + peripherals) — PORT, the core of FW-1
 The hardware abstraction: battery BMS, inverter(s) up to 3, cabinets,
-EV gun, b-sensor, over Modbus RTU on `/dev/ttymxc2` plus vendor framing
-(XOR-checked battery frames). Starting map in `docs/REGISTERS.md`
-(0x3600–0x3660 LE block, control regs 0x3018/0x3021). **FW-1**:
+EV gun, b-sensor, over Modbus RTU on the CH9344 USB-UART channels
+(`/dev/ttyCH9344USB*`, 9600 baud; `/dev/ttymxc2` is the MCU link) plus
+vendor framing for `bst`/`bak` batteries. Map in `docs/REGISTERS.md`
+(INVT FC03 block 0x3600–0x3660 big-endian, power on/off 0x3018, model
+0x3021, Emaldo battery slave 2 at 0x1000). **FW-1**:
 read-only telemetry (SOC, power, temps, faults, inverter state).
 **FW-2**: control writes (charge/discharge limits, mode switches).
 Validation requires the USB-RS485 dongle (checklist in REGISTERS.md).
