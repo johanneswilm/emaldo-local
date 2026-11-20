@@ -109,10 +109,16 @@ revision of this note assumed a single 5 kWh module and quoted ~40 W —
 the per-unit draw is the same; only the pack size was wrong.)
 
 emaldo-local should do better, within hard constraints:
-- **Never drop availability.** If a grid-rewards/backup dispatch or a
-  Modbus command arrives, the power stage must be live within a few
-  seconds. Comms (MQTT/e2e-bridge) and BMS stay awake at all times —
-  they are the half of the idle draw we cannot remove.
+- **Availability depends on the contract type.** Guaranteed-rewards
+  contracts obligate availability: a dispatch or Modbus command must find
+  the power stage live within a few seconds. Flexible-rewards contracts
+  (participate as much or as little as you want, no breach on absence)
+  impose no such obligation — a sleeping battery can simply decline or
+  miss dispatches, so deep sleep remains available while enrolled. Make
+  this a config choice (`grid_contract: none|flexible|guaranteed`) that
+  gates how aggressively the power stage may sleep. Either way, comms
+  (MQTT/e2e-bridge) and BMS stay awake at all times — they are the part
+  of the idle draw we cannot remove.
 - **Sleep the power stage, not the brain.** When no charge/discharge is
   active: idle the DC bus, gate the PWM stage, park the fan. Target
   total draw ~15–25 W (saves ~150–300 kWh/year per unit).
