@@ -169,7 +169,12 @@ The entire cloud REST surface is replaced by local web/MQTT/BLE.
 The app↔device UDP protocol (PROTOCOL.md). emaldo-local doesn't speak
 e2e; HA talks MQTT. An e2e-compat bridge would let the stock HA
 integration (wertigpar's) work unmodified — only worth it if the MQTT
-path isn't acceptable to users. Documented, not planned.
+path isn't acceptable to users. Documented, not planned. PREFERRED
+ALTERNATIVE for cloud compatibility (grid-rewards eligibility, vendor
+app): the server-side vendor bridge in the takeover repo
+([ha-emaldo-local docs/VENDOR_BRIDGE.md](https://github.com/johanneswilm/ha-emaldo-local/blob/main/docs/VENDOR_BRIDGE.md))
+— emulation lives in Python on a home server and translates dispatches
+into this firmware's REST API, keeping the device 100 % vendor-free.
 
 ### MQTT (mqttcred provider, fcr topics) — PORT concept, FRESH code — FW-1
 Vendor connects to a cred-handed-out broker and publishes telemetry +
