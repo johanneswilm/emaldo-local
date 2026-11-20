@@ -40,6 +40,25 @@ with a 2 s read timeout. Several inverter types are supported, and the
 model is detected by reading INVT `0x3021` (`inverterutils.GetINVTHardwareVersion`,
 model strings `INVT10_1_0` / `INVT15_1_0`).
 
+### CAN (second control bus — not documented before)
+
+Besides Modbus RTU, the vendor firmware also drives a **CAN interface**. Static
+evidence from the same binary:
+
+| evidence | where |
+| --- | --- |
+| `can0` interface handling, `can0 restart-ms`, `can0 is continuously bus-off for 10 minutes, setting can0 restart-ms back to 0` | netlink/`netmonitor` code |
+| `socket.CanSetBaudRateSocket` (capability flag on the socket abstraction) | `hermes` socket layer |
+| config keys `can_restart_ms`, `can_check_interval` | `configs/confparser` struct tags |
+
+Interpretation (not yet verified on hardware): Modbus RTU carries the polled
+registers above, while CAN is used for the faster control paths — the
+FCR/mFRR balancing loop and battery power setpoints are the plausible users,
+since those strings sit next to `can0` handling in the binary.
+
+Not established: frame format, bitrate, node ids. That needs either a CAN
+capture from a live unit or disassembly of the `can0` call sites.
+
 ## INVT inverter — holding registers 0x3600–0x366B (FC03, slave 1)
 
 The table is `realtimecsv.parseINVTRegisterValues` plus the 108-name table at

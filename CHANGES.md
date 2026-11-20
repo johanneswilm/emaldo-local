@@ -1,3 +1,58 @@
+# Vendor BLE, config keys and the CAN bus
+
+Analysis additions from the same vendor image `docs/REGISTERS.md` was built
+from (`6102ea751f963eea.bin`). **Documentation only — no behaviour change, no
+code touched, nothing validated on hardware.**
+
+## New docs
+
+- `docs/BLE-GATT.md` — the vendor's BLE profile: one service + one write
+  characteristic (properties `0x0C`) + one notify characteristic (`0x10`),
+  nine UUID literals split between a per-model selector
+  (`providers.ProvideBluetooth`, models `INVT10_1_0` / `INVT15_1_0` /
+  `BST_1_0` / default) and advertising (`sockets/ble.buildOptions`), plus the
+  25 dispatcher verbs. Directly relevant to `internal/bled` (FW-1.1).
+- `docs/VENDOR-CONFIG.md` — the 155 TOML keys the stock firmware accepts.
+
+## Corrections / additions to existing docs
+
+- `docs/REGISTERS.md` — new § **CAN**: the vendor also drives `can0`
+  (`CanSetBaudRateSocket`, `can_restart_ms`, `can_check_interval`). Modbus RTU
+  covers the polled registers; CAN is the plausible fast-control path for FCR
+  and power setpoints. Frame format still unknown.
+- `docs/IMPLEMENTATION_MAP.md` — BLE section now records the recovered profile
+  shape and the two config keys (`ble_service_uuid`, `no_ble_crypto`) that
+  make "fixed key/IV" a default rather than a constant; FCR section notes the
+  CAN transport; OTA section records the vendor force semantics.
+
+## Two things worth knowing operationally
+
+1. **The API/OTA endpoints are config keys**: `base_url`, `data_url`,
+   `custom_check_update_url`, `custom_check_update_policy`. The strings
+   `http base url` / `http data url` in the binary are CLI help text, not TOML
+   keys — writing those into `config.toml` does nothing. `custom_check_update_url`
+   means OTA can be redirected without the BLE route.
+2. **Vendor OTA force flag**: retry limit 5, persisted `HasForceUpgraded`, and
+   an unfinished forced update blocks the module from reporting itself
+   registered.
+
+## Also recovered (reference only)
+
+- msct opcodes: `0xa093` = "get price setting", `0xa103` = "get all support
+  features" (the sibling repo's `APP_COMMANDS.md` labels `0xA103` as
+  `update_chips` — worth a joint check).
+- 1 033 `json:"…"` struct tags (payload field vocabulary) and BMS safety
+  thresholds the module enforces itself (`Cell voltage difference > 4V → stop`,
+  `< 45V → 0.2c limit`).
+
+## TODO
+
+- [ ] AES key/IV for the encrypted BLE GATT path (not present as a literal).
+- [ ] CAN frame format / bitrate / node ids.
+- [ ] Verify the UUID→model branch mapping against a live GATT enumeration.
+
+---
+
 # Changes: hermes reader uses the recovered register map
 
 `internal/hermes/reader.go` now reads the inverter and battery registers
