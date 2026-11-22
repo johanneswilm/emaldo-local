@@ -50,9 +50,12 @@ def parse_din(buf):
         i += 2 + l
     return out
 
+PIDFILE = "/run/fake_canapp.pid"
+
 def build():
-    os.system("rm -rf " + D)
-    os.makedirs(f"{D}/{CAB}")
+    # idempotent: NEVER rm -rf here. A second spawn wiping /run/cabinet
+    # detaches the app mid-handshake (the app may spawn us twice).
+    os.makedirs(f"{D}/{CAB}", exist_ok=True)
     for b in BATS: os.makedirs(f"{D}/{CAB}/{b}")
     with open(f"{D}/tree", "w") as f:
         f.write("root (Core)\n")
@@ -137,6 +140,13 @@ def reporter():
             respond(f"{D}/{CAB}/{b}/out", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
 
 def main():
+    if os.path.exists(PIDFILE):
+        try:
+            os.kill(int(open(PIDFILE).read().strip()), 0)
+            return  # already serving
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    open(PIDFILE, "w").write(str(os.getpid()))
     build()
     say("fake_canapp up, holding FIFOs")
     for p in (f"{D}/{CAB}/out",) + tuple(f"{D}/{CAB}/{b}/out" for b in BATS):
