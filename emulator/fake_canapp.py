@@ -139,6 +139,19 @@ def reporter():
         for b in BATS:
             respond(f"{D}/{CAB}/{b}/out", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
 
+BANNER = [
+    "[{t}] [INFO] can init .",
+    "[{t}] [INFO] \u6587\u4ef6\u5939\u521b\u5efa\u6210\u529f",     # folder created
+    "[{t}] [INFO] tree file generated successfully!",
+    "[{t}] [INFO] cabinet_count = 1",
+]
+
+def banner():
+    # the app captures the cabinet process stdout (shell option
+    # outputProcLogs) and may wait for these real-canapp markers
+    for line in BANNER:
+        print(line.format(t=time.strftime("%Y-%m-%d %H:%M:%S")), flush=True)
+
 def main():
     if os.path.exists(PIDFILE):
         try:
@@ -147,7 +160,9 @@ def main():
         except (ValueError, ProcessLookupError, PermissionError):
             pass
     open(PIDFILE, "w").write(str(os.getpid()))
+    banner()
     build()
+    banner()
     say("fake_canapp up, holding FIFOs")
     for p in [f"{D}/{CAB}/in", f"{D}/{CAB}/out"] + \
              [f"{D}/{CAB}/{b}/in" for b in BATS] + [f"{D}/{CAB}/{b}/out" for b in BATS]:
