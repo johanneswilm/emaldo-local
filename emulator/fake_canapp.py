@@ -68,26 +68,25 @@ def build():
         if not os.path.exists(p): os.mkfifo(p)
     return fifos
 
-WRITERS = {}   # path -> fd (we write responses here)
+FDS = {}   # path -> O_RDWR|O_NONBLOCK fd (we hold BOTH directions)
 
-def writer(path):
-    if path in WRITERS:
-        return WRITERS[path]
-    try:
-        WRITERS[path] = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-    except OSError:
-        return None
-    return WRITERS[path]
+def fd_of(path):
+    if path not in FDS:
+        try:
+            FDS[path] = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
+            return None
+    return FDS[path]
 
 def respond(path, frame):
-    fd = writer(path)
+    fd = fd_of(path)
     if fd is None:
         return
     try:
         os.write(fd, frame)
         say(f"tx -> {path.split('/')[-1]} {frame.hex()}")
     except OSError:
-        WRITERS.pop(path, None)
+        FDS.pop(path, None)
 
 def handle_frame(name, path, tlvs):
     """Reply to an app command arriving on <cab>/out."""
@@ -99,9 +98,10 @@ def handle_frame(name, path, tlvs):
 
 def pump(name, path, on_frame=None):
     buf = b""
-    while True:
-        try: fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK); break
-        except OSError: time.sleep(0.2)
+    fd = fd_of(path)
+    if fd is None:
+        say(f"{name} open FAILED")
+        return
     say(f"{name} open")
     while True:
         try: data = os.read(fd, 4096)
@@ -149,8 +149,9 @@ def main():
     open(PIDFILE, "w").write(str(os.getpid()))
     build()
     say("fake_canapp up, holding FIFOs")
-    for p in (f"{D}/{CAB}/out",) + tuple(f"{D}/{CAB}/{b}/out" for b in BATS):
-        writer(p)  # hold writers so app reads never EOF
+    for p in [f"{D}/{CAB}/in", f"{D}/{CAB}/out"] + \
+             [f"{D}/{CAB}/{b}/in" for b in BATS] + [f"{D}/{CAB}/{b}/out" for b in BATS]:
+        fd_of(p)  # hold both directions: no open order race, no EOF
     threading.Thread(target=pump, args=("cab.in", f"{D}/{CAB}/in"),
                      kwargs={"on_frame": handle_frame}, daemon=True).start()
     for b in BATS:
