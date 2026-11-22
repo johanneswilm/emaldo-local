@@ -94,7 +94,7 @@ def handle_frame(name, path, tlvs):
         say(f"cmd type={t} len={len(d)} data={d.hex()}")
         if t == 2:
             # heartbeat/status: ack with a cabinet status report on <cab>/in
-            respond(f"{D}/{CAB}/out", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
+            respond(f"{D}/{CAB}/in", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
 
 def pump(name, path, on_frame=None):
     buf = b""
@@ -135,9 +135,9 @@ def pump(name, path, on_frame=None):
 def reporter():
     while True:
         time.sleep(1.0)
-        respond(f"{D}/{CAB}/out", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
+        respond(f"{D}/{CAB}/in", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
         for b in BATS:
-            respond(f"{D}/{CAB}/{b}/out", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
+            respond(f"{D}/{CAB}/{b}/in", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
 
 BANNER = [
     "[{t}] [INFO] can init .",
@@ -167,10 +167,10 @@ def main():
     for p in [f"{D}/{CAB}/in", f"{D}/{CAB}/out"] + \
              [f"{D}/{CAB}/{b}/in" for b in BATS] + [f"{D}/{CAB}/{b}/out" for b in BATS]:
         fd_of(p)  # hold both directions: no open order race, no EOF
-    threading.Thread(target=pump, args=("cab.in", f"{D}/{CAB}/in"),
+    threading.Thread(target=pump, args=("cab.out", f"{D}/{CAB}/out"),
                      kwargs={"on_frame": handle_frame}, daemon=True).start()
     for b in BATS:
-        threading.Thread(target=pump, args=(b + ".in", f"{D}/{CAB}/{b}/in"),
+        threading.Thread(target=pump, args=(b + ".out", f"{D}/{CAB}/{b}/out"),
                          kwargs={"on_frame": handle_frame}, daemon=True).start()
     threading.Thread(target=reporter, daemon=True).start()
     while True: time.sleep(60)
