@@ -1,0 +1,12 @@
+[Unit]
+Description=Sandbox Emaldo cloud API
+Before=emaldo.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/python3 /sandbox/sandbox_api.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

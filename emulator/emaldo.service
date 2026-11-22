@@ -1,0 +1,12 @@
+[Unit]
+Description=Emaldo IoT app (emulator)
+After=network.target sandbox-api.service
+
+[Service]
+ExecStart=/app/emaldo_iot_fw
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
