@@ -93,8 +93,10 @@ def handle_frame(name, path, tlvs):
     for t, d in tlvs:
         say(f"cmd type={t} len={len(d)} data={d.hex()}")
         if t == 2:
-            # heartbeat/status: ack with a cabinet status report on <cab>/in
-            respond(f"{D}/{CAB}/in", din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
+            # heartbeat/status seen on BOTH .out and .in: answer on the opposite end
+            other = path.replace("/out", "/in") if path.endswith("/out") \
+                    else path.replace("/in", "/out")
+            respond(other, din_frame(tlv(7, [1, 0, 0, 0, 0, 0])))
 
 def pump(name, path, on_frame=None):
     buf = b""
@@ -167,10 +169,10 @@ def main():
     for p in [f"{D}/{CAB}/in", f"{D}/{CAB}/out"] + \
              [f"{D}/{CAB}/{b}/in" for b in BATS] + [f"{D}/{CAB}/{b}/out" for b in BATS]:
         fd_of(p)  # hold both directions: no open order race, no EOF
-    threading.Thread(target=pump, args=("cab.out", f"{D}/{CAB}/out"),
-                     kwargs={"on_frame": handle_frame}, daemon=True).start()
-    for b in BATS:
-        threading.Thread(target=pump, args=(b + ".out", f"{D}/{CAB}/{b}/out"),
+    for p, lbl in [(f"{D}/{CAB}/out", "cab.out"), (f"{D}/{CAB}/in", "cab.in")] + \
+                  [(f"{D}/{CAB}/{b}/out", b + ".out") for b in BATS] + \
+                  [(f"{D}/{CAB}/{b}/in", b + ".in") for b in BATS]:
+        threading.Thread(target=pump, args=(lbl, p),
                          kwargs={"on_frame": handle_frame}, daemon=True).start()
     threading.Thread(target=reporter, daemon=True).start()
     while True: time.sleep(60)
