@@ -84,7 +84,7 @@ def main():
             try: outfd = os.open(f"{D}/{CAB}/out", os.O_WRONLY | os.O_NONBLOCK)
             except OSError: time.sleep(0.3); continue
         try:
-            outfd.write(din_frame(status))
+            os.write(outfd, din_frame(status))
             say("tx status din frame")
         except OSError:
             outfd = None
