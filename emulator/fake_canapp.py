@@ -2,18 +2,13 @@
 """Emulate the canapp (cabinet bridge) role over /run/cabinet FIFOs - no CAN
 hardware needed. Installed as /root/bin/cabinet inside the emulator VM.
 
-Why each trick exists (all learned the hard way):
-- The official app REPLACES /root/bin/cabinet with the real canapp binary on
-  every boot (temp file + rename). chattr +i on the FILE is bypassed by
-  rename; the DIRECTORY must be immutable too.
-- The app spawns this via a synchronous exec: we must daemonize (fork+setsid)
-  or the app waits forever.
-- The app pkills the previous daemon on every spawn: rebuild fresh each time.
-- The app's disk space monitor deletes files in /var/log: keep logs in /sandbox.
-- tree format (RE-verified): displayTree style, two-space indent per level.
-
-The app-side manager reads /run/cabinet/tree itself, then attaches the FIFOs
-and speaks Din-framed TLV ("Din" magic + len(2B BE) + TLV + xor8).
+Protocol facts (RE-verified against the real canapp, CANAPP_RE.md):
+- tree format: "root (Core)\n  1 (Cabinet)\n    1_1 (Battery)\n..." (2-space indent)
+- the APP writes commands to <cab>/out and reads responses from <cab>/in
+  (direction is from the app's point of view)
+- frames: "Din" + len(2B BE, total incl xor) + TLV... + xor8
+- TLV: [type:1][len:1][data...]
+- observed app heartbeat: type 2 len 6 data=01 00 00 00 00 00 every ~200 ms
 """
 import os, sys, time, threading
 
@@ -30,14 +25,30 @@ def xorb(b):
     for c in b: x ^= c
     return x
 
-def din_frame(tlv):
-    body = b"Din" + b"\x00\x00" + tlv
+def din_frame(tlv_blob):
+    body = b"Din" + b"\x00\x00" + tlv_blob
     ln = len(body) + 1
-    body = b"Din" + bytes([ln >> 8, ln & 0xFF]) + tlv
+    body = b"Din" + bytes([ln >> 8, ln & 0xFF]) + tlv_blob
     return body + bytes([xorb(body)])
 
 def tlv(t, data):
     return bytes([t, len(data)]) + bytes(data)
+
+def parse_din(buf):
+    """Return list of (type, data) from a Din frame, or None."""
+    if len(buf) < 7 or not buf.startswith(b"Din"):
+        return None
+    ln = (buf[3] << 8) | buf[4]
+    if len(buf) < ln or xorb(buf[:ln]) != 0:
+        return None
+    out, i = [], 5
+    while i + 2 <= ln - 1:
+        t, l = buf[i], buf[i + 1]
+        if i + 2 + l > ln - 1:
+            break
+        out.append((t, buf[i + 2:i + 2 + l]))
+        i += 2 + l
+    return out
 
 def build():
     os.system("rm -rf " + D)
@@ -54,7 +65,37 @@ def build():
         if not os.path.exists(p): os.mkfifo(p)
     return fifos
 
-def pump(name, path):
+WRITERS = {}   # path -> fd (we write responses here)
+
+def writer(path):
+    if path in WRITERS:
+        return WRITERS[path]
+    try:
+        WRITERS[path] = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    return WRITERS[path]
+
+def respond(path, frame):
+    fd = writer(path)
+    if fd is None:
+        return
+    try:
+        os.write(fd, frame)
+        say(f"tx -> {path.split('/')[-1]} {frame.hex()}")
+    except OSError:
+        WRITERS.pop(path, None)
+
+def handle_frame(name, path, tlvs):
+    """Reply to an app command arriving on <cab>/out."""
+    for t, d in tlvs:
+        say(f"cmd type={t} len={len(d)} data={d.hex()}")
+        if t == 2:
+            # heartbeat/status: ack with a cabinet status report on <cab>/in
+            respond(f"{D}/{CAB}/in", din_frame(tlv(2, [1, 0, 0, 0, 0, 0])))
+
+def pump(name, path, on_frame=None):
+    buf = b""
     while True:
         try: fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK); break
         except OSError: time.sleep(0.2)
@@ -63,32 +104,52 @@ def pump(name, path):
         try: data = os.read(fd, 4096)
         except (BlockingIOError, OSError): time.sleep(0.05); continue
         if data:
+            buf += data
             say(f"{name} rx {data.hex()}")
-        else: time.sleep(0.05)
+            while True:
+                if len(buf) < 7 or not buf.startswith(b"Din"):
+                    j = buf.find(b"Din")
+                    buf = buf[j:] if j >= 0 else b""
+                    if not buf: break
+                ln = (buf[3] << 8) | buf[4]
+                if len(buf) < ln: break
+                frame, buf = buf[:ln], buf[ln:]
+                tlvs = parse_din(frame + b"\x00")  # dummy xor slot; parse checks below
+                # re-parse properly:
+                tlvs = []
+                if xorb(frame) == 0:
+                    i = 5
+                    while i + 2 <= ln - 1:
+                        t, l = frame[i], frame[i + 1]
+                        if i + 2 + l > ln - 1: break
+                        tlvs.append((t, frame[i + 2:i + 2 + l]))
+                        i += 2 + l
+                if on_frame and tlvs:
+                    on_frame(name, path, tlvs)
+        else:
+            time.sleep(0.05)
+
+def reporter():
+    while True:
+        time.sleep(1.0)
+        respond(f"{D}/{CAB}/in", din_frame(tlv(2, [1, 0, 0, 0, 0, 0])))
+        for b in BATS:
+            respond(f"{D}/{CAB}/{b}/in", din_frame(tlv(2, [1, 0, 0, 0, 0, 0])))
 
 def main():
     build()
     say("fake_canapp up, holding FIFOs")
-    hold = []
     for p in (f"{D}/{CAB}/in",) + tuple(f"{D}/{CAB}/{b}/in" for b in BATS):
-        try: hold.append(os.open(p, os.O_WRONLY | os.O_NONBLOCK))
-        except OSError: pass
+        writer(p)  # hold writers so app reads never EOF
+    threading.Thread(target=pump, args=("cab.out", f"{D}/{CAB}/out"),
+                     kwargs={"on_frame": handle_frame}, daemon=True).start()
     threading.Thread(target=pump, args=("cab.in", f"{D}/{CAB}/in"), daemon=True).start()
-    threading.Thread(target=pump, args=("cab.out", f"{D}/{CAB}/out"), daemon=True).start()
     for b in BATS:
-        threading.Thread(target=pump, args=(b, f"{D}/{CAB}/{b}/in"), daemon=True).start()
-    outfd = None
-    status = tlv(2, [1, 0, 0, 0, 0, 0])
-    while True:
-        if outfd is None:
-            try: outfd = os.open(f"{D}/{CAB}/out", os.O_WRONLY | os.O_NONBLOCK)
-            except OSError: time.sleep(0.3); continue
-        try:
-            os.write(outfd, din_frame(status))
-            say("tx status din frame")
-        except OSError:
-            outfd = None
-        time.sleep(1.0)
+        threading.Thread(target=pump, args=(b + ".out", f"{D}/{CAB}/{b}/out"),
+                         kwargs={"on_frame": handle_frame}, daemon=True).start()
+        threading.Thread(target=pump, args=(b + ".in", f"{D}/{CAB}/{b}/in"), daemon=True).start()
+    threading.Thread(target=reporter, daemon=True).start()
+    while True: time.sleep(60)
 
 if __name__ == "__main__":
     pid = os.fork()
