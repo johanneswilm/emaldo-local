@@ -18,10 +18,11 @@ ALNUM = string.ascii_letters + string.digits
 LOG = os.environ.get("SB_LOG", "/var/log/sandbox_api.log")
 SB = os.environ.get("SB_DIR", "/sandbox")
 PORT = 443
-# e2e relay address handed to the app. 10.0.2.2 is qemu user-net's gateway = the host,
-# where the production relay (emaldo-capture/e2e_relay.py) already listens on
-# UDP 1050/1051; set E2E_RELAY=127.0.0.1 to keep the tunnel inside the guest.
-RELAY = os.environ.get("E2E_RELAY", "10.0.2.2")
+# e2e relay address handed to the app. Must be reachable from inside the VM:
+# run/vmstart.sh boots QEMU with user-net `restrict=on`, so guest connections to
+# the gateway (10.0.2.2 = the host) are refused - keep the tunnel on the guest's
+# own loopback and run the relay in the guest.
+RELAY = os.environ.get("E2E_RELAY", "127.0.0.1")
 
 def rand32():
     return "".join(secrets.choice(ALNUM) for _ in range(32))
@@ -104,6 +105,17 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
     def _handle(self):
+        if self.path.startswith("/generate_204") or self.path == "/generate_204":
+            # netmonitor's link check: an empty 204 is what "internet up" looks
+            # like. Without it the app treats the jail as offline and never
+            # starts the cloud stage.
+            with open(LOG, "a", buffering=1) as f:
+                f.write(json.dumps({"t": time.strftime("%H:%M:%S"),
+                                    "path": self.path, "probe": "204"}) + "\n")
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
         dec, raw = decode_fields(body)

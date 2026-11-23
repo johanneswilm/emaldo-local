@@ -1,0 +1,19 @@
+[Unit]
+Description=Emaldo emulator: e2e (MSCT/UDP) relay inside the guest
+Documentation=file:/sandbox/sandbox_e2e.json
+After=sandbox-api.service
+Wants=sandbox-api.service
+
+[Service]
+Environment=E2E_BASE=/sandbox
+Environment=E2E_CRED=/sandbox/e2e_active.json
+# EMALDO_VENDOR_LEG=0: the bridge leg toward the vendor relay must stay off -
+# inside the jail e2e2.emaldo.com resolves to the guest itself (sinkhole), so
+# the bridge would loop frames into its own socket.
+Environment=EMALDO_VENDOR_LEG=0
+ExecStart=/usr/bin/python3 /sandbox/e2e_relay.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

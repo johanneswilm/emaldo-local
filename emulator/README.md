@@ -39,11 +39,47 @@ and protocol experiments.
   ├─ /usr/sbin/{reboot,systemctl,...} -> ONE multi-call stub (tool-stub.sh; #1)
   ├─ /usr/sbin/modprobe        -> modprobe-stub.sh      (#4: fake btusb reload)
   ├─ /opt/vmfb/vmfb.ko         -> fake /dev/fb0 (e-ink capture, see vmfb/)
-  └─ /etc/hosts                dp.emaldo.com -> 127.0.0.1  (cloud = sandbox)
+  ├─ dns-sink.service          -> dnssink.py            sinkhole DNS :53 (containment)
+  ├─ portal204.service         -> portal204.py          captive-portal 204 on :80
+  └─ /etc/systemd/network/20-emu.network  static eth0 + resolver aliases (containment)
 ```
 
 The app generates a **fresh random device identity** on first boot - it never
 collides with a real battery.
+
+## Egress containment (the vendor cloud is still operating)
+
+Emaldo is bankrupt but its endpoints still resolve and answer. Nothing the
+firmware does in the VM may reach them, and the app actively tries: it resolves
+vendor names itself, and it probes `cp.cloudflare.com` about every 10 s to judge
+whether it has internet. Four layers, all inside this repo:
+
+| Layer | Mechanism | Proof |
+|---|---|---|
+| No route out | QEMU user-net `restrict=on` (`start-vm.sh`): slirp refuses every guest connection, including DNS it would forward on the host | guest `connect(104.26.5.120:443)` -> `ECONNREFUSED` |
+| No real answers | `dnssink.py` (systemd `dns-sink.service`) listens on 0.0.0.0:53; `/etc/dnssink.conf` maps the vendor zone to the sandbox, the connectivity-probe names to the sandbox, everything else NXDOMAIN | `gethostbyname(files.oms.emaldo.com)` -> `127.0.0.1` |
+| Its own resolver values land locally | the firmware's `netmonitor` **owns `/etc/resolv.conf`**: it unlinks and recreates it (so `chattr +i` is cleared) and writes `1.1.1.1` + `8.8.8.8`. The sink unit therefore claims those addresses plus slirp's `10.0.2.3` as local (lo aliases / static `20-emu.network`) | raw DNS to each of `127.0.0.1`, `1.1.1.1`, `8.8.8.8`, `10.0.2.3` returns 54 bytes from the sink |
+| The link check must pass locally | the probe must answer 204, otherwise the app calls the link down and never starts its cloud stage: `portal204.py` on :80 and `/generate_204` in `sandbox_api.py` on :443 | `HTTP/1.1 204 No Content` from the TLS probe |
+
+Consequence for the topology: with `restrict=on` the guest cannot reach the host
+either (`10.0.2.2:19999` -> `ECONNREFUSED`), so every responder - API sandbox,
+e2e relay, portal - runs **inside** the guest: `sandbox_api.py` defaults to
+`E2E_RELAY=127.0.0.1` and the relay runs as `e2e-relay.service` with
+`E2E_BASE=/sandbox` and `EMALDO_VENDOR_LEG=0` (the bridge toward the vendor
+relay would resolve to the guest itself and loop). The tripwire is
+`/var/log/dns_queries.log`: it records every name the firmware asks for, so the
+name set is discovered, and an unknown name is a visible event rather than a
+silent leak. Measured first tally: `cp.cloudflare.com` x38 (its link check),
+`files.oms.emaldo.com` x12; `api.emaldo.com` never appears because `/etc/hosts`
+answers it before DNS.
+
+Verify after any network change (all from inside the guest):
+
+```
+python3 -c "import socket;print(socket.gethostbyname('files.oms.emaldo.com'))"   # 127.0.0.1
+python3 -c "import socket;socket.create_connection(('104.26.5.120',443),5)"      # must raise
+tail -20 /var/log/dns_queries.log                                               # tripwire
+```
 
 ## Boot gates (the app reboots whenever one is unmet - found in order)
 
@@ -460,14 +496,31 @@ qemu-system-arm -M virt -m 1024 \
     stub log. Kill the exp-hb instance (or stop `exp-hb.service`) before
     restarting the unit, and check `ps -C emaldo_iot_fw` count whenever results
     look "off by one".
-26. **Contain the VM's egress.** QEMU user-net gives the guest real internet,
-    and the app resolves more vendor names than `/etc/hosts` currently pins
-    (`api.emaldo.com`, `dp.emaldo.com` only). Anything not pinned goes to the
-    dead/vendor infrastructure - the network trace showed it dialling Cloudflare
-    and Google (NTP, `generate_204`, DoH to 1.1.1.1/8.8.8.8) happily. Pin every
-    vendor name the SAN cert covers (`files.oms.`, `e2e2.`, `master.`, `iot.`)
-    if you want no real-world traffic, and remember the app NTP-syncs: an
-    out-of-sync host clock shows up as TLS "not yet valid" failures in the guest.
+26. **Contain the VM's egress (now enforced, see "Egress containment").** The
+    app resolves more names than `/etc/hosts` pins and happily dials Cloudflare
+    and Google (captive-portal `generate_204`, DoH to 1.1.1.1/8.8.8.8, NTP).
+    `restrict=on` + `dnssink.py` + `portal204.py` close that; `/etc/hosts`
+    pinning alone was measurably not enough. NTP is now unreachable inside the
+    VM, so the clock comes from the RTC at boot - check `date` in the guest if
+    TLS ever reports "not yet valid".
+27. **`systemctl` in PATH is the tool stub.** `/usr/sbin/systemctl` is the
+    2430-byte `tool-stub.sh` (that is how gate #1 is fed fake answers), and
+    `/usr/sbin` precedes `/bin` in PATH, so a bare `systemctl restart foo` in an
+    ssh command is a no-op and `is-active` returns "disabled" for units that were
+    never even started. Lab commands must use `/bin/systemctl`.
+28. **A DNS reply with the RD bit in the wrong byte is silently discarded.**
+    Masking `flags[0] & 0x01` and OR-ing it into the low byte sets RCODE=1
+    (FormErr). `dig` prints the answer anyway, `getent`/`gethostbyname` fail -
+    so the resolver looked broken while the server was. Decode the flags:
+    `0x8481` = RA + **FormErr**, not RA + RD.
+29. **The firmware owns `/etc/resolv.conf`.** `netmonitor` unlinks and recreates
+    it every so often (so `chattr +i` is silently undone) and writes public
+    resolvers into it. Pinning the file cannot work; claim the addresses instead
+    (`Address=1.1.1.1/32`, `8.8.8.8/32` on lo, slirp's `10.0.2.3/24` on eth0) so
+    whatever it writes is local.
+30. **`cp.cloudflare.com` every ~10 s is the app's link check.** Answer it
+    (sink + 204) or the cloud stage never starts; watch
+    `/var/log/dns_queries.log` to see the name set the firmware actually uses.
 
 ## Why not qemu user-mode (chroot)?
 

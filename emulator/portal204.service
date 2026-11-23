@@ -1,0 +1,12 @@
+[Unit]
+Description=Captive-portal 204 responder for the Emaldo firmware VM
+Documentation=file:/etc/dnssink.conf
+Before=emaldo.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/portal204.py 80
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

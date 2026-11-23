@@ -1,0 +1,26 @@
+# Static net config, and it doubles as the egress-containment anchor.
+#
+# Why static: with DHCP=yes, slirp hands out 10.0.2.3 as the resolver and the
+# app's own netmonitor rewrites /etc/resolv.conf (it unlinks+recreates it, so an
+# immutable bit is cleared) - it wrote 1.1.1.1 and 8.8.8.8 in a measured run, and
+# those queries went out through slirp to the real internet, so vendor names
+# resolved to Cloudflare in front of the sinkhole.
+#
+# Why these extra addresses: dnssink.py listens on 0.0.0.0:53. Claiming slirp's
+# resolver alias (10.0.2.3) plus the public resolvers netmonitor writes
+# (1.1.1.1, 8.8.8.8) as local addresses means every nameserver value the
+# firmware can possibly write lands on the sinkhole, which answers the vendor
+# zone with the sandbox address and NXDOMAIN for everything else, logging every
+# query. Combined with slirp's restrict=on (see run/vmstart.sh) no packet can
+# reach the real Emaldo cloud or the internet.
+[Match]
+Name=en*
+Name=eth*
+
+[Network]
+Address=10.0.2.15/24
+Address=10.0.2.3/24
+Address=1.1.1.1/32
+Address=8.8.8.8/32
+Gateway=10.0.2.2
+DNS=127.0.0.1

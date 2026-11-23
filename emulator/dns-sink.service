@@ -1,0 +1,19 @@
+[Unit]
+Description=Sinkhole DNS for the Emaldo firmware VM
+Documentation=file:/etc/dnssink.conf
+Before=emaldo.service
+
+[Service]
+# Claim the resolver addresses the firmware's netmonitor writes into
+# /etc/resolv.conf (measured: 1.1.1.1, 8.8.8.8; slirp's own alias 10.0.2.3 comes
+# from the network file) so every nameserver value it can produce lands here.
+# "-" ignores "address already assigned" on restarts.
+ExecStartPre=-/usr/sbin/ip addr add 1.1.1.1/32 dev lo
+ExecStartPre=-/usr/sbin/ip addr add 8.8.8.8/32 dev lo
+ExecStart=/usr/bin/python3 /usr/local/bin/dnssink.py
+Restart=always
+RestartSec=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
