@@ -1,0 +1,18 @@
+[Unit]
+Description=Emaldo emulator: vendor bluetooth placeholder modules (rtk_btusb/aic_btusb)
+# Boot gate #4: the firmware runs `lsmod` and then `modprobe -r <vendor>_btusb`
+# + `modprobe <vendor>_btusb`; it escalates to a reboot when that fails. The
+# btmod/ placeholders must therefore be resolvable by REAL kmod: depmod first,
+# then modprobe (insmod alone leaves them unresolvable, which reproduces the
+# failure). Ordered before the app so the check passes on the first pass.
+Before=emaldo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/depmod -a
+ExecStart=/usr/sbin/modprobe rtk_btusb
+ExecStart=/usr/sbin/modprobe aic_btusb
+
+[Install]
+WantedBy=multi-user.target

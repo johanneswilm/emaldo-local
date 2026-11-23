@@ -6,16 +6,21 @@ cloud, so you can study, poke, and test it without touching real hardware.
 This is the test bench `emaldo-local` development uses for the OTA round-trip
 and protocol experiments.
 
-> Status: **BLOCKED on one remaining reboot** in the official app - it
-> reboots the VM every boot ~3-90 s into bring-up (see Boot gates #1;
-> exhaustive history in the private working repo's HANDOFF_EMULATOR.md).
-> Everything up to that point works: the fake BMS cabinet registers over
-> vcan, the app attaches to the cabinet FIFOs and walks its init stages,
-> all hardware gates (network state, backlight, screen state) are
-> emulated, pprof is live, and a virtual BLE adapter (btattach + H4 shim)
-> is in place. Cloud login against the sandbox is the milestone this
-> blocker gates. QEMU user-mode was abandoned midway (timing races); the
-> supported path is **QEMU system-mode** (full ARM VM). The notes on why
+> Status: **the official app boots and stays up** (verified 2026-11-23). The
+> last reboot gate - the Bluetooth driver-reload escalation, gate #4 - is
+> cleared: the virtual controller now completes HCI init so the adapter reports
+> `UP RUNNING`, and past that point the app walks `iot.Start`, opens its 9
+> leveldb stores, binds the tower UDP socket (`*:9332`), starts BLE
+> advertising and waits in `tower/connfork` for the cloud side of the e2e
+> tunnel. Everything else works too: the fake BMS cabinet registers over vcan,
+> the app attaches to the cabinet FIFOs, the network/backlight/screen gates are
+> emulated, and pprof is live (the app binds **:16061**, not 6060). Current
+> milestone: the e2e tunnel. The sandbox hands the app relay creds pointing at
+> `10.0.2.2:1050/1051` (the host, where the production `e2e_relay.py` listens)
+> and the app does reach the sandbox API, but the relay has not registered a
+> device session from the VM yet - that gates the FCR/MQTT pokes and the OTA
+> round-trip. QEMU user-mode was abandoned midway (timing races);
+> the supported path is **QEMU system-mode** (full ARM VM). The notes on why
 > are kept at the bottom - they will save you from re-trying it.
 
 ## Architecture
@@ -32,6 +37,7 @@ and protocol experiments.
   │   └─ sshd + serial console on ttyAMA0
   ├─ /root/bin/cabinet         -> REAL canapp binary    (immutable; bridges can0 <-> app)
   ├─ /usr/sbin/{reboot,systemctl,...} -> ONE multi-call stub (tool-stub.sh; #1)
+  ├─ /usr/sbin/modprobe        -> modprobe-stub.sh      (#4: fake btusb reload)
   ├─ /opt/vmfb/vmfb.ko         -> fake /dev/fb0 (e-ink capture, see vmfb/)
   └─ /etc/hosts                dp.emaldo.com -> 127.0.0.1  (cloud = sandbox)
 ```
@@ -41,20 +47,24 @@ collides with a real battery.
 
 ## Boot gates (the app reboots whenever one is unmet - found in order)
 
-1. **Bluetooth config-by-reboot (THE root cause of the reboot loop).** The
+1. **Bluetooth config-by-reboot.** The
    app applies bluetooth configuration by REBOOTING: goroutine 1 reaches
    `bluetoothctrl.(*reloadable).Start` (iot.go:343) ->
    `shell.Exec(ctx, "reboot")`. Every boot it runs
    `systemctl is-enabled/disable/mask bluetooth.service` and then reboots "to
    apply". On real hardware exactly one config reboot happens, then the state
-   persists. The stateless stub made every boot look like the first ->
-   infinite loop. **Fix: the stateful multi-call stub** (`tool-stub.sh`),
+   persists. The stateless stub made every boot look like the first.
+   **Fix: the stateful multi-call stub** (`tool-stub.sh`),
    installed under EVERY name the app shells out to (reboot, shutdown,
    systemctl, gpioget, dmesg, hostnamectl, ifconfig, aplay - `/usr/sbin/
    systemctl` is a separate file by default and forgetting it silently
    disables the whole fix). The stub prints realistic stdout ("masked",
    "inactive") - the app parses it, exit codes alone are not enough - and
    records `disable`/`mask` in `/root/.stub_state/` on the persistent fs.
+   NOTE: with that stub in place the box *still* rebooted - `reloadable.Start`
+   has a second, independent reboot branch, see gate #4. Masking the unit only
+   silences the disable/mask branch (no `systemctl disable/mask` lines in
+   `/var/log/stubs.log` afterwards).
 2. **Network state file.** The app polls `/run/hps/networking/eth0.env` ~1/s
    for ~6 s (written on real hw by the netctl/dhclient hooks), and its own
    `netctl-supervisor` watchdog DELETES the file whenever no dhclient process
@@ -70,11 +80,67 @@ collides with a real battery.
    and creates the device), and only then opens `/dev/mcu1`/`/dev/fb0` for
    the display pipeline. The app never opens the mcu char devices during
    bring-up.
+4. **Bluetooth driver reload escalation (`reloadable.Start`, iot.go:343).**
+   The app (a) enumerates services (`systemctl is-enabled networking/netctl/
+   bluetooth`, then `disable --now` + `mask bluetooth.service` - gate #1),
+   (b) runs the reload routine at **0x00c01060**, which executes **`lsmod`** and
+   matches it against `aic_btusb` (AICSemi) / `rtk_btusb` (Realtek), (c) if the
+   vendor module is not right, runs the pair `modprobe -r <mod>`,
+   `modprobe <mod>` - twice, each command under a ~1 s `context.WithTimeout` -
+   and (d) if that still fails calls `shell.Exec(ctx, "reboot")` (pprof:
+   `reloadable.go:50 +0x248` = the `blx r1` at 0x00c020cc) **and returns an
+   error**, so main exits 1. Verified from the service strace:
+   `modprobe -r aic_btusb` / `modprobe aic_btusb` x2 at ~3-6 s spacing, then
+   `execve("/bin/bash",["-c","reboot"])` -> `execve("/usr/sbin/reboot")` ->
+   `exit_group(1)`.
+   Historical failures, in order of discovery:
+   - `lsmod` did not exist (the app deletes `/lib/modules` and the kmod
+     aliases; see gotcha 12) -> `exec.LookPath("lsmod")` error, no reload
+     commands at all, reboot with zero BT-related syscalls in the trace. That
+     is why the first traces looked "syscall-free".
+   - After kmod was repaired, `lsmod` worked, the vendor was picked
+     (AICSemi) and the modprobe pair ran, but the stub's `$(date)` fork made
+     each call exceed the 1 s timeout -> "failed" -> reboot (gotcha 14).
+   **Fix (verified 2026-11-23): both halves are needed - the module names AND a
+   controller that actually initialises.** (i) `btmod/` builds two no-op modules
+   named exactly `rtk_btusb` and `aic_btusb`; copy them into
+   `/usr/lib/modules/$(uname -r)/kernel/net/bluetooth/`, run `depmod -a`, and
+   list them in `/etc/modules-load.d/btmod.conf`, so real kmod answers `lsmod`
+   and the modprobe pair. (ii) The reload routine's last step is the HCI device
+   list (ioctl `HCIGETDEVLIST`, whose per-entry `dev_flag` carries `HCI_DEV_UP`)
+   and its own BLE bring-up: an `hci0` that exists but sits in INIT is *not*
+   enough - the adapter has to reach `UP RUNNING`. That takes `bt-stub.service`
+   (enabled: check `systemctl is-enabled bt-stub`, the wants symlink is easy to
+   lose) running `modprobe hci_uart` + `btattach -B /dev/ttyAMA1 -P h4` against
+   the host `h4_shim.py`, and the shim must answer each command with the *exact*
+   Command Complete struct size: the kernel's `hci_cc_*` handlers log
+   `Bluetooth: hci0: unexpected cc 0x0c14 length: 9 < 249` when they get a wrong
+   one, and the resulting `-38` leaves the adapter DOWN. `h4_cmds.json` holds
+   those lengths (10 opcodes) and `h4-fix.py` grows it by replaying the guest
+   journal until `hciconfig hci0 up` succeeds - 8 iterations from scratch.
+   With `hciconfig -a` showing `UP RUNNING` the escalation stops: no new
+   `SUPPRESSED` line in `/var/log/stubs.log`, and the goroutine dump moves on to
+   `sockets/ble.(*Ble).Advertise` + `tower/connfork`.
+   What does NOT work: `/root/config.toml` keys `reboot_bluetooth = false` and
+   `reboot_batteries = false` (tested, escalation unchanged - those keys belong
+   to the OTA/update subsystem), and neutering `/usr/sbin/reboot`:
+   `reboot-stub.sh` (log + `exit 0`) only makes the app *exit 1* right after the
+   request (tool-stub rule 1) - useful as instrumentation (the `SUPPRESSED` line
+   marks the exact decision point) but it does not get you past gate #4.
 
-After the gates: the app reaches `iot.go:281 cabinetComm.Background()` and
-probes the link (`netmonitor` arping/DoH - install `busybox` for arping).
-Next milestone: cloud login against the sandbox (`/var/log/sandbox_api.log`),
-then the e2e relay on 127.0.0.1:1050, FCR/MQTT pokes, OTA round-trip.
+After the gates: the app walks to `iot.Start` (pprof shows `iot.go:1539`),
+opens 9 leveldb stores, binds its tower UDP socket (`*:9332`), starts BLE
+advertising and parks in `tower/connfork.(*downstream).Recv`. The API stage is
+live too - the network trace shows `connect(127.0.0.1:443)` (the sandbox, via
+`/etc/hosts` entries for `api.emaldo.com`/`dp.emaldo.com`) alongside its DoH and
+NTP probes. `sandbox_api.py` hands out e2e creds with
+`host 10.0.2.2:1050 / util_host 10.0.2.2:1051` - under QEMU user-net 10.0.2.2 is
+the host, where the production relay (`../emaldo-capture/e2e_relay.py`, UDP
+1050/1051) already runs; set `E2E_RELAY=127.0.0.1` to keep the tunnel in the
+guest instead. Instrument that stage with `SB_LOG` (set it to `/sandbox/...`, not
+`/var/log`: gotcha 3), because the relay has not yet reported a device session
+from the VM. Next milestone: get the MSCT tunnel up (relay join), then FCR/MQTT
+pokes and the OTA round-trip.
 
 ## Debugging playbook (this is how every gate was cracked)
 
@@ -164,22 +230,33 @@ sudo ln -sf /lib/systemd/systemd rootfs/sbin/init
 # 4. Vendor domains -> sandbox
 echo "127.0.0.1 dp.emaldo.com api.emaldo.com" | sudo tee -a rootfs/etc/hosts
 
-# 5. TLS: sandbox CA + server certs, CA into the trust store
+# 5. TLS: sandbox CA + ONE server cert, CA into the trust store.
+#    Go and Python both ignore CN and require a subjectAltName - per-host
+#    CN-only certs make the handshake fail SILENTLY (the app connects to :443
+#    and never sends a request; the sandbox request log stays empty). Cover
+#    every name the app resolves, and note the app NTP-syncs, so do not mint
+#    the cert with a notBefore in the guest's future.
 sudo mkdir -p rootfs/sandbox
 sudo openssl req -x509 -newkey rsa:2048 -keyout rootfs/sandbox/ca.key \
     -out rootfs/sandbox/ca.crt -days 3650 -nodes -subj "/CN=EmaldoSandboxCA"
-for h in dp.emaldo.com api.emaldo.com; do
-  sudo openssl req -newkey rsa:2048 -keyout rootfs/sandbox/$h.key \
-      -out /tmp/$h.csr -nodes -subj "/CN=$h"
-  sudo openssl x509 -req -in /tmp/$h.csr -CA rootfs/sandbox/ca.crt \
-      -CAkey rootfs/sandbox/ca.key -CAcreateserial -out rootfs/sandbox/$h.crt -days 3650
-done
+printf 'subjectAltName=DNS:api.emaldo.com,DNS:dp.emaldo.com,DNS:files.oms.emaldo.com,DNS:e2e2.emaldo.com,DNS:e2e.emaldo.com,DNS:master.emaldo.com,DNS:iot.emaldo.com\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n' > /tmp/san.cnf
+sudo openssl req -newkey rsa:2048 -keyout rootfs/sandbox/sandbox.key \
+    -out /tmp/sandbox.csr -nodes -subj "/CN=api.emaldo.com"
+sudo openssl x509 -req -in /tmp/sandbox.csr -CA rootfs/sandbox/ca.crt \
+    -CAkey rootfs/sandbox/ca.key -CAcreateserial -extfile /tmp/san.cnf \
+    -days 800 -out rootfs/sandbox/sandbox.crt
 sudo cp rootfs/sandbox/ca.crt rootfs/usr/local/share/ca-certificates/
 sudo chroot rootfs update-ca-certificates
+# verify from inside the guest (this is the check that was missing for hours):
+#   python3 -c 'import ssl,socket;c=ssl.create_default_context();
+#     print(c.wrap_socket(socket.create_connection(("api.emaldo.com",443),6),
+#     server_hostname="api.emaldo.com").version())'
 
 # 6. systemd units (see emulator/*.service): emaldo, sandbox-api, sshd,
 #    systemd-networkd with DHCP. Add StartLimitIntervalSec=0 drop-ins -
 #    the app restarts itself and you do not want rate limiting.
+#    Enable bt-stub with emulator/bt-stub-enable.conf (a Wants= drop-in on
+#    multi-user.target) - NOT by copying the unit into .wants/ (gotcha 20).
 
 # 7. IMMUTABLE DEFENSES (critical, see Gotchas):
 sudo chattr +i rootfs/root/bin rootfs/root/bin/cabinet
@@ -273,6 +350,124 @@ qemu-system-arm -M virt -m 1024 \
 11. The master config (`/root/config.toml`) supports `mqtt_enabled`,
     `mqtt_broker_url`, `mqtt_username`, `mqtt_password` as plain TOML keys -
     a device-local MQTT path that bypasses the cloud cred-handout entirely.
+12. **`/usr/sbin/modprobe` (and most of `/usr/sbin`) are SYMLINKS into the
+    package's real binary on this merged-usr image** (`/usr/sbin/modprobe ->
+    /bin/kmod`, and `/bin`, `/lib`, `/sbin` are themselves symlinks into
+    `/usr`). `cat > /usr/sbin/modprobe` therefore writes *through* the symlink
+    and destroys `/usr/bin/kmod` - the whole system loses modprobe. Always
+    `rm` first, then write. Same trap made a passthrough stub recurse forever:
+    `/sbin/modprobe` and `/usr/sbin/modprobe` are the SAME path there, so
+    "pass through to /sbin/modprobe" exec'd the stub again and again (1 vCPU at
+    100%, sshd never answers the banner). Passthrough must exec a *different*
+    path - `kmod` picks its behaviour from argv[0], so a symlink named
+    `modprobe` in another directory is the right target.
+    Recovery when kmod is already clobbered: the original binary is still in
+    the image's apt cache - `debugfs -R 'dump /var/cache/apt/archives/kmod_*.deb' ...`,
+    `ar x`, `tar -xf data.tar.xz`, then write it back with debugfs.
+14. **Stub scripts must not fork.** The app wraps its shell calls in short
+    `context.WithTimeout`s (~1 s for the bluetooth reload pair). On one emulated
+    vCPU under strace a `$(date)` fork or `/usr/bin/basename` can exceed that,
+    the app sees a timeout instead of your exit code, and the gate fails for a
+    reason that looks like a driver problem. Log with `read -r t _ <
+    /proc/uptime` and dispatch on `$0` (no subprocesses).
+15. **`/usr/sbin/systemctl` must be a REAL file.** It used to be a symlink to
+    `/usr/sbin/reboot` (one multi-call stub). Replacing `reboot` (e.g. with the
+    diagnostic `reboot-stub.sh`) then silently replaced `systemctl` too, and
+    gate #1's stateful `is-enabled`/`mask` answers disappeared - every boot
+    looked like the first. Install one real file per name.
+16. **Every QEMU serial socket needs exactly one long-lived reader.** With
+    `-serial unix:...,server=on,wait=off` the vCPU blocks once the chardev
+    buffer fills if nothing is attached (guest freezes minutes into boot:
+    console silent, ssh hangs at the banner, pprof unreachable - it looks like
+    the app did something evil). QEMU 11 does re-accept a client after the old
+    one goes away, so `start-vm.sh`'s `socat -u UNIX-CONNECT:serial.sock -`
+    reconnect loop and `h4_shim.py` (the second serial = ttyAMA1 = the fake
+    Bluetooth UART) can restart; older QEMU kept only one client ever. If the
+    reader dies the link dies *silently*: the tell-tale is the guest console
+    repeating `Bluetooth: hci0: Opcode 0x0c03 failed: -110` (HCI Reset timing
+    out) while QEMU sits at 0% CPU and the forwarded ports stop answering -
+    check `pgrep -f h4_shim.py` before debugging the guest. `cat serial.sock`
+    does NOT work (open() on a socket file returns ENXIO). QEMU 11 also
+    removed the chardev `reconnect` option, so QEMU cannot dial out to a
+    restartable host listener; the host side must be the client.
+17. **Guest wedged looks like app mischief.** Total console silence + QEMU at
+    0% CPU + forwarded ports (10022/16060) refusing connections = the guest is
+    stuck on I/O (a full rootfs, or everything blocked behind a wedged writer),
+    not "the app crashed": the app is a busy restart loop, which burns CPU, and
+    a silent guest with idle QEMU is the opposite. Recover with
+    `start-vm.sh` (it e2fscks the image) and check `df -h /` early.
+18. **`emaldo.service` is not the only starter.** The app also comes up when
+    `emaldo.service` is removed from `multi-user.target.wants`, because
+    `exp-hb.service` (oneshot, `/usr/local/sbin/exp-hb.sh`: screen_state
+    heartbeat + "single app instance") starts it. Account for that when you
+    want a quiet boot: the restart loop (each instance rewrites
+    `/root/bin/cabinet`, spawns `cabinet -t 2`, reloads the BT stack) starves
+    the guest, so ssh times out mid-experiment and every measurement is
+    polluted. With the gates fixed one instance is stable, which is what you
+    want to observe - just know which unit launched it.
+19. **Offline image surgery needs no root and no loop mount:** stop the VM,
+    then `debugfs -w -f cmds.txt rootfs2.img` with `rm`/`write <hostfile>
+    <path>`/`symlink <path> <target>`/`set_inode_field <path> mode 0100755`
+    (mask a unit with `symlink /etc/systemd/system/foo.service /dev/null`;
+    drop-in dirs like `/etc/systemd/system/emaldo.service.d` are real dirs).
+    `debugfs write` does not preserve size - verify with
+    `debugfs -R "ls -l <dir>"` and re-dump to compare bytes. `debugfs write`
+    onto an EXISTING path fails ("File exists"): `rm` first, then `write`. And
+    the PARENT must exist: `/usr/local/bin` was not in this rootfs at all, so
+    every write there failed with "File not found by ext2_lookup" until
+    `mkdir /usr/local/bin` was issued first.
+20. **`.wants/` entries must be SYMLINKS.** Copying a unit file into
+    `multi-user.target.wants/` does nothing:
+    `multi-user.target: Wants dependency dropin ... is not a symlink, ignoring`.
+    debugfs `symlink` refuses when the name already exists, and after a hard
+    `kill -9` of QEMU recent in-guest writes can be lost, so enable units
+    offline with a real file instead:
+    `/etc/systemd/system/multi-user.target.d/bt-stub.conf` containing
+    `[Unit] Wants=bt-stub.service` + `After=bt-stub.service` ✓ verified:
+    `bt-stub: hci0 UP (attempt 1)` at up=110, no BT escalation.
+21. **The guest has no `which`, `wget` or `curl`** (PATH-less busybox-free
+    mini rootfs; `hciconfig`/`hcitool`/`ss`/`journalctl` are there). For HTTP
+    inside the guest use `python3 -c 'import urllib.request as u;
+    print(u.urlopen("http://127.0.0.1:16061/debug/pprof/goroutine?debug=1").read())'`.
+    The app's pprof binds **:16061** (from `enable_pprof`). `start-vm.sh` forwards
+    16060->6060 and 16062->16061 (host 16061 is still occupied by the abandoned
+    user-mode instance of the app, `qemu-arm-static /app/emaldo_iot_fw`).
+22. **A `pkill -f 'btattac[h]'` that also mentions `btattach` in the same
+    remote command kills its own ssh session.** The guest runs `bash -c "<cmd>"`
+    and that cmdline contains the literal `/usr/bin/btattach`, which the regex
+    matches - the bracket trick only protects against the *pattern* text. Split
+    kill and (re)start into separate calls (that is why `h4-fix.py` does).
+23. **Boot takes ~110 s to `network.target`** on this host, so ssh before that
+    fails fast (`rc=255`, connection refused - sshd is not listening yet), and
+    `vmssh.sh`'s retries can burn their whole budget. For work that must happen
+    early, use the serial console: `vm-cons.py '<cmd>' ...` (the image ships a
+    `getty@ttyAMA0.service.d/autologin.conf` drop-in, so it drops you into a
+    root shell with no password).
+24. **Instrumenting the service can bring the reboot back; the cause is not
+    settled.** With `trace_app.sh on "...,execve"` the app instance under the
+    wrapper escalated (reboot count +4) while the same boot without it had run
+    862 s. Suspect: the app wraps each Bluetooth-reload shell call in a ~1 s
+    `context.WithTimeout`, and `execve`/`file` tracing slows `modprobe` enough to
+    fail it. Confounders were present (the adapter was not up at boot in those
+    runs), and a later test with `bt-stub` up gave +1 rather than +4 - so treat
+    it as: trace the narrowest set you need, re-check `/var/log/stubs.log` after
+    removing the wrapper, and never compare a traced run to an untraced one
+    without also comparing the adapter state.
+25. **`exp-hb.service` runs the app OUTSIDE systemd.** Its `exp-hb.sh` starts a
+    bare `/app/emaldo_iot_fw` instance, so `systemctl restart emaldo` does not
+    touch the live process (its `etimes` keeps growing) and instead launches a
+    SECOND instance - which then fails its bring-up and adds a `reboot` to the
+    stub log. Kill the exp-hb instance (or stop `exp-hb.service`) before
+    restarting the unit, and check `ps -C emaldo_iot_fw` count whenever results
+    look "off by one".
+26. **Contain the VM's egress.** QEMU user-net gives the guest real internet,
+    and the app resolves more vendor names than `/etc/hosts` currently pins
+    (`api.emaldo.com`, `dp.emaldo.com` only). Anything not pinned goes to the
+    dead/vendor infrastructure - the network trace showed it dialling Cloudflare
+    and Google (NTP, `generate_204`, DoH to 1.1.1.1/8.8.8.8) happily. Pin every
+    vendor name the SAN cert covers (`files.oms.`, `e2e2.`, `master.`, `iot.`)
+    if you want no real-world traffic, and remember the app NTP-syncs: an
+    out-of-sync host clock shows up as TLS "not yet valid" failures in the guest.
 
 ## Why not qemu user-mode (chroot)?
 
@@ -288,5 +483,15 @@ above (stubs, tree format, immutable defenses) all carry over unchanged.
 
 - Cabinet/app FIFO protocol ("Din" framing, TLV, opcodes): the takeover repo's
   docs and `firmware/CANAPP_RE.md` in the working repo.
+- Firmware symbol tables: recover function **starts** from the binary's own
+  pclntab, not from `redress` output - on this go1.24.1 ARM build the
+  recovered symbol files carry wrong addresses (e.g. `(*reloadable).Start`
+  0x00bf0e88 vs the real 0x00872288) and disassembling them yields wrapper
+  stubs/garbage. Layout: pcHeader magic 0xfffffff1, u32 fields
+  `nfunc nfiles textStart nameOff cutab filetab pctab funcTable`; funcTable =
+  sorted (funcPC, name) pairs, stride 8, last PC = text end. The name column
+  is not a usable plain offset (Go name dedup), so identify routines by their
+  rodata string literals: scan .text for 4-byte words equal to a string VA
+  (literal pools) and map the containing function by PC.
 - e2e relay protocol: [ha-emaldo-local PROTOCOL.md](https://github.com/johanneswilm/ha-emaldo-local/blob/main/docs/PROTOCOL.md).
 - OTA contract: [ha-emaldo-local OTA.md](https://github.com/johanneswilm/ha-emaldo-local/blob/main/docs/OTA.md).

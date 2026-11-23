@@ -7,11 +7,15 @@ Description=Emaldo emulator: virtual BLE adapter via btattach on ttyAMA1
 Before=emaldo.service
 
 [Service]
+Type=oneshot
+RemainAfterExit=yes
+# bt-stub-run.sh backgrounds btattach (it holds the N_HCI line discipline);
+# without KillMode=process systemd would kill it when the script exits and
+# hci0 would be unregistered again.
+KillMode=process
 # hci_uart must be loaded before btattach's protocol ioctl
 ExecStartPre=/sbin/modprobe hci_uart
-ExecStart=/usr/bin/btattach -B /dev/ttyAMA1 -S 115200 -P h4
-Restart=always
-RestartSec=1
+ExecStart=/usr/local/bin/bt-stub-run.sh
 
 [Install]
 WantedBy=multi-user.target

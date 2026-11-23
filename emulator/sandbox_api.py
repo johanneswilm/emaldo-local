@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Sandbox Emaldo cloud API for the emulator (fresh identity, fully local).
 
-Serves the module app's gm1/gm2 HTTP API. Everything is answered locally;
-nothing is forwarded to the vendor. e2e-bmt-login points the app at a
-sandbox e2e relay (default 127.0.0.1:1050).
-
-Crypto: APP_SECRET is the vendor's public app secret (extracted from the
-official app/firmware, same for every device - not a per-unit credential).
+Answers the module app's gm1/gm2 HTTP API inside the container. No vendor
+forwarding - everything is served locally with plausible or captured content.
+The e2e-bmt-login points the app at a sandbox relay (127.0.0.1:1050).
 """
 import base64, http.server, json, os, secrets, socketserver, string, ssl, sys, time
 try:
@@ -18,9 +15,13 @@ except ImportError:
 
 APP_SECRET = b"FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
 ALNUM = string.ascii_letters + string.digits
-LOG = os.environ.get("SB_LOG", "/sandbox/api.log")
+LOG = os.environ.get("SB_LOG", "/var/log/sandbox_api.log")
 SB = os.environ.get("SB_DIR", "/sandbox")
-PORT = int(os.environ.get("SB_PORT", "443"))
+PORT = 443
+# e2e relay address handed to the app. 10.0.2.2 is qemu user-net's gateway = the host,
+# where the production relay (emaldo-capture/e2e_relay.py) already listens on
+# UDP 1050/1051; set E2E_RELAY=127.0.0.1 to keep the tunnel inside the guest.
+RELAY = os.environ.get("E2E_RELAY", "10.0.2.2")
 
 def rand32():
     return "".join(secrets.choice(ALNUM) for _ in range(32))
@@ -31,8 +32,7 @@ if os.path.exists(CREDS_PATH):
 else:
     E2E = {"id": "bmt", "group_id": rand32() + "@0", "end_id": rand32(),
            "end_secret": rand32(), "chat_secret": rand32(),
-           "host": os.environ.get("SB_RELAY", "127.0.0.1:1050"),
-           "util_host": os.environ.get("SB_RELAY", "127.0.0.1:1050").replace(":1050", ":1051")}
+           "host": RELAY + ":1050", "util_host": RELAY + ":1051"}
     json.dump(E2E, open(CREDS_PATH, "w"), indent=1)
 print("sandbox e2e creds:", json.dumps(E2E), flush=True)
 
@@ -91,7 +91,10 @@ def fake_result(path):
         return dict(AREA, gmtime=gm)
     if "get-global-config" in p:
         return {"config": {}, "gmtime": gm}
-    if "balance-contract" in p:
+    if "get-balance-contract-status" in p:
+        return {"is_pause": False, "is_signed": True, "revenue_type": 3,
+                "gmtime": gm}
+    if "get-family-balance-contract-info" in p:
         return {"is_pause": False, "is_signed": True, "revenue_type": 3,
                 "gmtime": gm}
     return {"gmtime": gm}
@@ -136,8 +139,12 @@ class S(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 if __name__ == "__main__":
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(os.path.join(SB, "dp.emaldo.com.crt"),
-                        os.path.join(SB, "dp.emaldo.com.key"))
+    # ONE cert with SANs for every host the app resolves through /etc/hosts
+    # (api/dp/files.oms/e2e2...): Go and Python both ignore CN and require a SAN,
+    # so the earlier per-host CN-only certs failed the handshake silently - the
+    # app connected to :443 and never sent a request.
+    ctx.load_cert_chain(os.environ.get("SB_CERT", os.path.join(SB, "sandbox.crt")),
+                        os.environ.get("SB_KEY", os.path.join(SB, "sandbox.key")))
     with S(("127.0.0.1", PORT), H) as srv:
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         print(f"sandbox api on :{PORT}", flush=True)
