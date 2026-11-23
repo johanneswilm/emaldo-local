@@ -5,9 +5,9 @@ Usage: vmrun.py 'shell command'
 Logs in as root if a login prompt appears, sends the command, prints the
 output up to the next shell prompt. Console is flaky: retry on garbage.
 """
-import socket, sys, time, re
+import os, socket, sys, time, re
 
-SOCK = "/home/johannes/src/emaldo-emu/run/serial.sock"
+SOCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serial.sock")  # next to start-vm.sh
 PROMPT = re.compile(rb"[^\r\n]*# $")
 
 def read_until(s, patterns, timeout=25):

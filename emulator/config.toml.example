@@ -1,0 +1,16 @@
+# /root/config.toml for the emulator.
+enable_pprof = true                      # pprof on :16061
+
+# The app leaves its "Unconfigured" wizard state - and only then starts the
+# cabinet/battery/inverter side (hermes) - once these five are non-empty.
+# Any values do; base_url/data_url point at the sandbox via /etc/hosts.
+app_id = "sandboxapp"
+app_secret = "sandboxsecret0123456789abcdef0123"
+base_url = "https://api.emaldo.com"
+data_url = "https://dp.emaldo.com"
+cloud_token = "sandboxtoken"
+home_id = "sandboxhome"
+
+# Debug feed: the app posts every decoded peripheral reading as JSON to this
+# websocket (see ws_sink.py / spy-sink.service -> /sandbox/spy.out).
+hermes_spy = "ws://127.0.0.1:18765/spy"

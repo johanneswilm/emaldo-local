@@ -31,13 +31,16 @@ and protocol experiments.
   │   ├─ emaldo.service        -> /app/emaldo_iot_fw   (the OFFICIAL app, native ARM)
   │   ├─ sandbox-api.service   -> sandbox_api.py        (fake Emaldo cloud API, TLS :443)
   │   ├─ vcan.service          -> modprobe vcan; can0 up (kernel virtual CAN)
-  │   ├─ fake-bms.service      -> fake_bms.py           (DIN cabinet/BMS on can0)
+  │   ├─ fake-bms.service      -> fake_bms.py + fake_bak.py (cabinets and their BAK batteries on can0)
+  │   ├─ serial-tap.service    -> serial_tap.py         (stand-in /dev/ttymxc2 + /dev/ttyCH9344USB0-7, logged)
+  │   ├─ spy-sink.service      -> ws_sink.py            (receives the app's decoded readings, /sandbox/spy.out)
   │   ├─ hps-net-state.service -> writes netctl eth0.env state (boot gate #2)
   │   ├─ screen-mcu-stub.service -> screen_state, /dev/mcu1*, backlight overlay (#3)
   │   └─ sshd + serial console on ttyAMA0
   ├─ /root/bin/cabinet         -> REAL canapp binary    (immutable; bridges can0 <-> app)
   ├─ /usr/sbin/{reboot,systemctl,...} -> ONE multi-call stub (tool-stub.sh; #1)
   ├─ /usr/sbin/modprobe        -> modprobe-stub.sh      (#4: fake btusb reload)
+  ├─ /usr/local/sbin/ip        -> ip-vcan.sh            (keeps can0 up: drops "type can ..." on vcan)
   ├─ /opt/vmfb/vmfb.ko         -> fake /dev/fb0 (e-ink capture, see vmfb/)
   ├─ dns-sink.service          -> dnssink.py            sinkhole DNS :53 (containment)
   ├─ portal204.service         -> portal204.py          captive-portal 204 on :80
@@ -212,30 +215,118 @@ pokes and the OTA round-trip.
   whole-disk ext4. Guest writes go straight to the image - editing files
   inside the running VM IS persistent.
 
-## DIN CAN wire format (fake_bms.py <-> real canapp)
+## Cabinets and batteries (verified against the running app, v2.35.3)
 
-Reverse-engineered from `dinCanFrameReceiveProc` in the canapp binary. All
-frames are extended ID; **bit 24 (flag) must be 1** on complete frames or the
-receiver buffers them as never-completed fragments:
+Status 2026-11-23: with the pieces below the app discovers the cabinets, takes
+every battery in them as a BAK pack and reads it about twice a second. Checked
+with one internal cabinet of 3 packs plus one external cabinet of 5: the app's
+own debug feed reports `battery/0` ... `battery/7` with the values the fake
+sends (52.64 V, 60 % SoC, 16 cell voltages, six temperatures, cycles, health).
+
+### What the app needs before it talks to anything
+
+- **It must be "configured".** A fresh device sits in the wizard state
+  `Unconfigured` (goroutine `appwizard/staterunners.(*Unconfigured).Run`): it
+  attaches to the cabinet FIFOs but never sends a byte, and the whole
+  peripheral side (`hermes`) is not started. `appdata.IsConfigured` is true
+  when app id, app secret, base URL, cloud token and home id are all
+  non-empty, and all five can be given in `/root/config.toml`
+  (`config.toml.example`).
+- **`/dev/ttymxc2` must exist** (the MCU serial port). Without it the
+  configured app dies in a loop: `failed to create mcu sock: no such file or
+  directory`. `serial_tap.py` puts a pty there.
+- **`/dev/ttyCH9344USB0-3` are not batteries.** The app sends Modbus RTU there
+  (slave 1): ports 0, 2 and 3 get `01 03 0F A4 00 01`, later `0F A0`
+  (1 and 15 words) - three identical devices, i.e. the inverters; port 1 gets
+  registers `0x008D` and `0x0061` (the b-sensor). `serial_tap.py` logs them to
+  `/sandbox/tap.out` and stays silent; the app carries on without replies.
+- **can0 must stay up.** canapp and the app's CAN monitor run
+  `ip link set can0 down` / `ip link set can0 up type can restart-ms 1000` (or
+  `bitrate 500000`). vcan rejects `type can`, the link stays DOWN and the
+  cabinets vanish. `ip-vcan.sh` installed as `/usr/local/sbin/ip` drops those
+  arguments.
+
+### The bus (from canapp's code, confirmed on the wire)
+
+The app never touches CAN. `canapp` (`/root/bin/cabinet -t 2`) bridges can0 to
+FIFOs: `/run/cabinet/<cab>/{in,out}` for a cabinet and
+`/run/cabinet/<cab>/<seat>/{in,out}` for each battery, listed in
+`/run/cabinet/tree`.
 
 ```
-  bits 25-28: type        bit 24: flag (1 = complete, 0 = fragment page)
-  bits 16-23: page (0x01 = single/complete frame)
-  bits  8-15: SOURCE address (cabinet = cab_index << 4)
-  bits  0- 7: destination (only 0x00 and 0xFF are accepted)
+  CAN id:  bits 25-28 type | bit 24 flag | bits 16-23 page | 8-15 source | 0-7 dest
+  address = cabinet << 4 | battery seat (seat 0 = the cabinet); canapp = 0x00
+  canapp only accepts dest 0x00 or 0xFF
+  longer than 8 bytes:  first frame flag 1, page = N (page count)
+                        frames 2..N  flag 0, page = k;  length = (N-1)*8 + last dlc
+  single frame:         flag 1, page 1
 ```
 
-canapp's own poll on the wire: `0x8B0100FF` = type 5, flag 1, page 1, src 0x00,
-dst 0xFF, payload `[0x04]`, every ~2 s. Reply with src = `cab<<4`, dst 0x00:
+| type | direction | meaning |
+|---|---|---|
+| 5 | canapp -> all (`0x8B0100FF`, payload `04`, every 2 s until answered) | discovery |
+| 5 | cabinet -> canapp | `05 mask uuid(8)`; mask **bit 7 = seat 1**, bit 6 = seat 2 ...; cabinet 1 takes seats 1-3, others 1-5 |
+| 7 | both | battery tunnel: raw bytes of `<cab>/<seat>/out` to dest `cab<<4|seat`, replies from that source into `.../in` |
+| 9 | app -> cabinet (Din TLV 2), about 2 per s | status; reply >= 7 bytes `state b1 mask w_hi w_lo t_hi t_lo` |
+| 10 | app -> cabinet (Din TLV 4) | version; reply 24 bytes, three 8-byte strings |
+| 2 | app -> cabinet (Din TLV 3) | set battery status, 2 bytes |
 
-- type 5 (battery-online): payload `[5, batt_mask, uuid...]` - each set bit in
-  `batt_mask` registers battery `cab_bit`. The uuid copy wants len >= 10
-  (impossible on classic CAN); it logs an error but registration still happens.
-- type 9 (status): reply `[1, 0, ...]` = online.
-- type 10 (version): reply 8 version bytes.
+- The old fake used mask `0x07`, which canapp reads as seats 6-8 and rejects -
+  that is why the tree never showed a battery.
+- canapp polls only until the first cabinet answers and then writes the tree
+  **once**; all cabinets have to answer that same poll.
+- **A status reply shorter than 7 bytes panics the app** (`index out of range
+  [5] with length 5` in `peripherals/cabinet.(*Cabinet).ReadData`). State byte:
+  bit 3 = bootloader, else bits 0-1.
+- Toward the app, canapp wraps cabinet replies as `"Din" len(2, BE) T L data
+  xor8`; the app reads at most 48 bytes and wants TLV type = the one it asked.
 
-With that, the real canapp creates `/run/cabinet/{tree,1/in,1/out}` and the app
-attaches within one boot.
+### The battery protocol inside the tunnel (BAK)
+
+`START 00 GROUP LEN payload CHECK 0D`, `CHECK = xor ^ sum8` of everything
+before it. The address byte is always `00`; the CAN address picks the pack.
+The app reads exactly `LEN + 6` bytes per reply (length-prefixed, binary
+safe) - a trailing LF breaks the next reply.
+
+1. `7E 00 33 00 FC 0D`, up to 5 times at 2 s: the type probe
+   (`resolver.ParseBatteryType`). A valid reply **longer than 8 bytes** means
+   BAK; a 2-byte payload is looked up in a table for the other makes.
+2. `7E 00 DC 03 06 00 00 C4 0D`: version string (two frames on CAN).
+3. `7C 00 01 00 00 0D`, about twice a second: basic data, blocks
+   `id n n*u16`: 1 cell mV, 2 current `30000 - mA/10`, 3 SoC x100,
+   4 capacity x100, 5 six temperatures (`degC + 50`), 6 state, 7 cycles,
+   8 pack voltage in 10 mV, 9 health x100, 10 protection.
+4. `7E 00 25 00 F8 0D`, every ~11 s: current-limiting mode (an empty payload
+   is accepted).
+
+State block 6 (10 bytes), mapped by flipping single bits and reading the
+app's decode: all zero = not charging, discharge MOS on;
+`byte[2]` `0x40` charging, `0x80` charging through the limiter, `0x20`
+discharge MOS off, `0x10` ChargeMOS -1, `0x08` LimitingMOS 1;
+`byte[5] 0x10` heat film status 2; `byte[7] 0x20` heat film status 0.
+No single bit of block 10 changes the decoded fields.
+
+### Seeing what the app decoded: the spy feed
+
+`hermes_spy = "ws://127.0.0.1:18765/spy"` in `/root/config.toml` makes the app
+open a websocket and post every peripheral reading as JSON
+(`{"channel":"spy","payload":{"name":"battery/0","cmd":"readdata","data":{...}}}`,
+also `bsensor`). `ws_sink.py` (spy-sink.service) accepts it and appends to
+`/sandbox/spy.out`. This is the only practical window into the app's state:
+module debug logging needs `/etc/hps/logging.toml` whose `modules` field must
+be stored encrypted.
+
+### Knobs
+
+```
+fake-bms.service.d/*.conf:  Environment=BMS_CABINETS=1:3,2:5   # cab:batteries
+                            Environment=BAK_SOC=60 BAK_CURRENT_A=10 ...
+/sandbox/bak_off     pack ids (cab<<4|seat) that stop answering, live
+/sandbox/bak_flags   raw hex for blocks 6 / 10, live
+```
+
+Not emulated: battery history, LIn-mode policy, battery and cabinet firmware
+update, inverters, b-sensor, the MCU.
 
 ## Build from scratch
 
@@ -329,6 +420,61 @@ qemu-system-arm -M virt -m 1024 \
   -netdev user,id=n0,hostfwd=tcp::10022-:22 -device virtio-net-device,netdev=n0 \
   -display none -serial unix:$PWD/serial.sock,server=on,wait=off -monitor none
 ```
+
+### What it took to get and keep it running (rebuild on Ubuntu 24.04 arm64, 2026-11-23)
+
+Host and image:
+
+- **QEMU >= 9 is required.** `-M virt` in QEMU 8.2 (Ubuntu 24.04) creates only
+  one PL011, so `/dev/ttyAMA1` never appears and `bt-stub` retries for minutes
+  while `emaldo.service` waits behind it. QEMU 10.1.2 built from source with
+  `--target-list=arm-softmmu --enable-slirp` works.
+- **aarch64 hosts have no `qemu-arm` binfmt entry** after installing
+  `qemu-user-static`; debootstrap's second stage fails at `chroot /bin/true`.
+  Register `/usr/bin/qemu-arm-static` by hand (flag `F`) first.
+- **Do not autoload `vmfb.ko` at boot.** Listed in `/etc/modules-load.d` it
+  froze the guest ~30 s into boot (QEMU idle, console silent).
+- `h4_shim.py`, `vmrun.py` and `vmwait.py` now look for their sockets next to
+  `start-vm.sh` instead of a fixed home directory.
+- Add `bluez` (btattach, hciconfig), `udev`, `dbus` and `e2fsprogs` to the
+  debootstrap package list; the README list above lacks them.
+
+Unconfigured app (the state the status block at the top describes):
+
+- **`/root/bin/cabinet` must already exist.** With an empty `/root/bin` the app
+  logs `failed to init cabinet communication, error: /root/bin/cabinet does not
+  exist` and carries on without a cabinet. Seed it with the canapp ELF embedded
+  in the firmware (the dynamically linked armhf executable containing
+  `dinCanFrameAnalysisProc`); the app then replaces it itself on each start.
+- **can0 goes DOWN whenever the app stops or re-initialises CAN.** Install
+  `ip-vcan.sh` as `/usr/local/sbin/ip` (and `emaldo-can0-up.conf` as a drop-in
+  for the first start).
+
+Configured app (needed for cabinets, batteries, inverters - see "Cabinets and
+batteries"):
+
+- the five identity keys in `/root/config.toml`; a wrong value type anywhere
+  in that file (`log_level = "debug"` - it wants an integer) is logged as
+  `config file err` and worth checking for after every edit;
+- `serial-tap.service` for `/dev/ttymxc2`, or the app exits at once, forever;
+- cabinet status replies of at least 7 bytes, or the app panics every ~80 s;
+- battery replies with nothing after the closing `0D`;
+- `spy-sink.service` + `hermes_spy` if you want to see anything.
+
+Operating traps:
+
+- The tool stub shadows `systemctl` on PATH; use `/bin/systemctl` for real work
+  inside the guest.
+- Restart units from ssh detached (`setsid ... </dev/null >/dev/null 2>&1 &`):
+  restarting `emaldo` inline tends to drop the session.
+- `pkill -f PATTERN` over ssh kills the ssh command itself when the pattern
+  also matches the rest of the command line, bracket trick or not. One kill
+  per ssh call.
+- Never `rm` a log a running helper has open (`spy.out`, `bms.out`): it keeps
+  writing to the deleted file. Restart the helper too.
+- After a restart the app takes ~75 s before the first battery frame.
+- Set `SB_LOG=/sandbox/api.log` for the sandbox (drop-in); the default path is
+  in `/var/log`, which the app cleans.
 
 ## Operating it
 

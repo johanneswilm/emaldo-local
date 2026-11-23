@@ -3,9 +3,9 @@
 run the given command. Tolerates reboot loops (misses one window, catches next).
 Usage: vmwait.py 'shell command' [budget_seconds]
 """
-import socket, sys, time, re
+import os, socket, sys, time, re
 
-SOCK = "/home/johannes/src/emaldo-emu/run/serial.sock"
+SOCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serial.sock")  # next to start-vm.sh
 
 def main():
     cmd = sys.argv[1]
