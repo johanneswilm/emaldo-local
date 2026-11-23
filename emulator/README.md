@@ -373,12 +373,43 @@ What the app does with both in place (per inverter, in order):
 +-3600). With the switches reported on at start, the app writes `0` to all
 three files about 6 s after start and leaves them off.
 
-Not working yet: the app does not start its periodic inverter read, and no
-`inverter` message appears in the spy feed. The three `hal/inverter.Run`
-goroutines sit in `select`. Status 3 is "locked" and 5 "confirming locking"
-(`sideCheckLocking`); which one the inverters are in is not known.
+**Polling was seen once.** In the first run with the MCU directory the app
+read each inverter about every 2 s for 35 s (51 `inverter/N` `readdata` and 51
+`readregisters` messages in the spy feed), then stopped, and it has not polled
+in later runs. The decoded fields: `FanStatus`, `AccessToGridEnabled`,
+`PowerOnGrid`, `AccessToBatteryEnabled`, `PowerOnBattery`,
+`AccessToMPPTEnabled`, `PowerOnMPPT`, `RealPowerOnMPPT`, `AccessToLineEnabled`,
+`PowerOnLine`, five temperatures, `VoltageOnBus`, `VoltageOnPV`,
+`VoltageOnBattery`, `CurrentOnBattery`, `GridFrequency`, `State`,
+`IsPVSurplus`. All 0 with the register store, except `AccessToLineEnabled`.
 
-Leads:
+Why it stays off, as far as known: the app's database (`/root/db/db`) holds
+`invs_ctrl_status` = off and `global_errors` = `["E010","0400"]` (base64 in the
+file; `8003` also appears at times). The limp-mode runners (`limpops`) are
+active. What raises those codes is not known; the EV gun port and the
+all-zero inverter state are the candidates. HAL status 3 is "locked" and 5
+"confirming locking" (`sideCheckLocking`).
+
+### Grid meter (b-sensor), port `/dev/ttyCH9344USB1`
+
+Measured by setting one register at a time and reading the `bsensor` spy
+message:
+
+| Register | Field |
+|---|---|
+| `0x0061`-`0x0063` | `Voltage1..3` |
+| `0x0064`-`0x0066` | `Current1..3` |
+| `0x0067`-`0x0069` | `Power1..3` |
+| `0x006A` | `TotalPower` |
+| `0x0077` | `GridFrequency`, x0.01 Hz |
+| `0x008D`, `0x008E` | voltage and current ratio, read once at start; voltage = reg x `0x008D`, current = reg x `0x008E`, power = reg x both (16-bit wrap) |
+
+A healthy grid for the app: in `/sandbox/tap_regs`,
+`USB1 0x0061 2300` (also `0x0062`, `0x0063`), `USB1 0x0077 5000`,
+`USB1 0x008d 1`, `USB1 0x008e 1`. It decodes as 2300 / 50.01 Hz. This alone
+did not bring the inverters back.
+
+### Other leads
 
 - `/var/log/inverterN_error_<time>.csv`: the app writes one when the fault
   words in registers 4000-4099 (`0x0FA0`-`0x1003`) are non-zero. Its columns
@@ -387,10 +418,14 @@ Leads:
 - `inverter_factory` is read by `sidecar.ReadInverterType` and parsed as JSON.
   It probably selects the inverter make (hisolar / INVT / BST); the stub
   writes `0`.
-- Commands from the app side need the e2e tunnel. `e2e-relay.service` runs the
-  relay in the guest, but the firmware has never called the sandbox API in the
-  configured state (the request log holds only `/generate_204`), so it has no
-  relay session and `emaldo_re.e2e` cannot reach it yet.
+- Commands from the app side need the e2e tunnel, and the tunnel needs the
+  app's cloud stage. In the configured state the app has never called the
+  sandbox API: `mqttcred ... BrokerURLSource.Fetch` sits in its retry wait and
+  the relay log stays empty. Two faults were found and fixed on the way, without
+  curing it: the app also resolves `www.gstatic.com` (its
+  `https://www.gstatic.com/generate_204` probe), which the sink answered
+  NXDOMAIN, and the sandbox certificate did not cover that name. The app's own
+  probes still do not reach `portal204` or the sandbox.
 
 ## Build from scratch
 
