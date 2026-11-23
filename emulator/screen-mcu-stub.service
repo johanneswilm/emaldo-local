@@ -1,0 +1,11 @@
+[Unit]
+Description=Emaldo emulator: fake front-panel MCU surface + backlight
+Before=emaldo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/screen-mcu-stub
+
+[Install]
+WantedBy=multi-user.target

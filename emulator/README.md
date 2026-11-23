@@ -6,27 +6,31 @@ cloud, so you can study, poke, and test it without touching real hardware.
 This is the test bench `emaldo-local` development uses for the OTA round-trip
 and protocol experiments.
 
-> Status: the app **boots, discovers our fake cabinet over a real (virtual) CAN
-> bus, and attaches to the cabinet FIFOs** - but then reboots on the
-> **front-panel screen MCU** gate (see "Boot gates" below). QEMU user-mode was
-> abandoned midway (timing races); the supported path is **QEMU system-mode**
-> (full ARM VM). The notes on why are kept at the bottom - they will save you
-> from re-trying it.
+> Status: the app **boots past all bring-up gates and reaches its main run
+> phase** (`cabinetComm.Background`, 200s+ uptime, all subsystems live in
+> pprof). The reboot loop that blocked this for days was the app's bluetooth
+> config-by-reboot behavior (see Boot gates #1) plus a stub that could not
+> remember state. Cloud login against the sandbox is the current milestone.
+> QEMU user-mode was abandoned midway (timing races); the supported path is
+> **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom
+> - they will save you from re-trying it.
 
 ## Architecture
 
 ```
   qemu-system-arm -M virt (ARMv7 VM, Debian armhf rootfs)
   ├─ systemd
-  │   ├─ emaldo.service      -> /app/emaldo_iot_fw   (the OFFICIAL app, native ARM)
-  │   ├─ sandbox-api.service -> sandbox_api.py        (fake Emaldo cloud API, TLS :443)
-  │   ├─ vcan.service        -> modprobe vcan; can0 up (kernel virtual CAN)
-  │   ├─ fake-bms.service    -> fake_bms.py           (DIN cabinet/BMS on can0)
-  │   ├─ hps-net-state.service -> writes /run/hps/networking/eth0.env (boot gate, below)
+  │   ├─ emaldo.service        -> /app/emaldo_iot_fw   (the OFFICIAL app, native ARM)
+  │   ├─ sandbox-api.service   -> sandbox_api.py        (fake Emaldo cloud API, TLS :443)
+  │   ├─ vcan.service          -> modprobe vcan; can0 up (kernel virtual CAN)
+  │   ├─ fake-bms.service      -> fake_bms.py           (DIN cabinet/BMS on can0)
+  │   ├─ hps-net-state.service -> writes netctl eth0.env state (boot gate #2)
+  │   ├─ screen-mcu-stub.service -> screen_state, /dev/mcu1*, backlight overlay (#3)
   │   └─ sshd + serial console on ttyAMA0
-  ├─ /root/bin/cabinet       -> REAL canapp binary    (immutable; bridges can0 <-> app)
-  ├─ /usr/sbin/reboot + friends -> tool stubs (log to /var/log/stubs.log; see below)
-  └─ /etc/hosts              dp.emaldo.com -> 127.0.0.1  (cloud = sandbox)
+  ├─ /root/bin/cabinet         -> REAL canapp binary    (immutable; bridges can0 <-> app)
+  ├─ /usr/sbin/{reboot,systemctl,...} -> ONE multi-call stub (tool-stub.sh; #1)
+  ├─ /opt/vmfb/vmfb.ko         -> fake /dev/fb0 (e-ink capture, see vmfb/)
+  └─ /etc/hosts                dp.emaldo.com -> 127.0.0.1  (cloud = sandbox)
 ```
 
 The app generates a **fresh random device identity** on first boot - it never
@@ -34,24 +38,74 @@ collides with a real battery.
 
 ## Boot gates (the app reboots whenever one is unmet - found in order)
 
-1. **Network state file**: the app polls `/run/hps/networking/eth0.env` ~1/s
-   for ~6 s after boot (on real hw it is written by the netctl/dhclient hooks
-   in `/etc/hps/networking/common.sh:write_state_file`). Missing => reboot.
-   Fixed by `hps-net-state.service` which copies the live eth0 lease into the
-   expected `IFACE=/SOURCE=/IP=/PREFIX=/GATEWAY=/DNS=/DOMAIN=/METRIC=/
-   LEASE_EXPIRE=/UPDATED=` file before emaldo.service starts.
-2. **Front-panel screen MCU (CURRENT BLOCKER)**: after the cabinet FIFOs are
-   attached the app checks `/run/screen_state` (written by
-   `rosetta/hardware/screen.manager` after the display MCU handshake),
-   `/proc/version_screen` (custom kernel file on real hw) and
-   `/sys/class/backlight/backlight-display/brightness`, then reboots.
-   `gpiochip0` access works under qemu `-M virt`, but the MCU bus/protocol is
-   unemulated. The app's flow is strictly sequential: no screen => no cloud
-   login. The delayed-reboot trick (stub reboots 6 min late) does NOT help -
-   the app blocks waiting for the shutdown instead of continuing.
-3. Once the screen is emulated, the expected next step is cloud login against
-   the sandbox (`/var/log/sandbox_api.log`) - e2e-bmt-login points the app at
-   127.0.0.1:1050, run the e2e relay there.
+1. **Bluetooth config-by-reboot (THE root cause of the reboot loop).** The
+   app applies bluetooth configuration by REBOOTING: goroutine 1 reaches
+   `bluetoothctrl.(*reloadable).Start` (iot.go:343) ->
+   `shell.Exec(ctx, "reboot")`. Every boot it runs
+   `systemctl is-enabled/disable/mask bluetooth.service` and then reboots "to
+   apply". On real hardware exactly one config reboot happens, then the state
+   persists. The stateless stub made every boot look like the first ->
+   infinite loop. **Fix: the stateful multi-call stub** (`tool-stub.sh`),
+   installed under EVERY name the app shells out to (reboot, shutdown,
+   systemctl, gpioget, dmesg, hostnamectl, ifconfig, aplay - `/usr/sbin/
+   systemctl` is a separate file by default and forgetting it silently
+   disables the whole fix). The stub prints realistic stdout ("masked",
+   "inactive") - the app parses it, exit codes alone are not enough - and
+   records `disable`/`mask` in `/root/.stub_state/` on the persistent fs.
+2. **Network state file.** The app polls `/run/hps/networking/eth0.env` ~1/s
+   for ~6 s (written on real hw by the netctl/dhclient hooks), and its own
+   `netctl-supervisor` watchdog DELETES the file whenever no dhclient process
+   exists (the VM uses networkd). Fix: `hps-net-state.service` copies the
+   live lease into the expected format, then `chattr +i` the file - the
+   supervisor's `rm` fails with EPERM and the gate stays green. NOTE: the
+   minimal rootfs has **no awk/sed** - hps-net-state.sh is pure shell.
+3. **Front-panel screen MCU.** The app reads `/run/screen_state` (written by
+   the kernel mcu driver on real hw after the display handshake; any string
+   that is not `power_off`/`low-power`/`upgrading` is healthy), writes
+   `/sys/class/backlight/backlight-display/brightness` (the class dir exists
+   in the stock kernel but is empty - `screen-mcu-stub.sh` overlays a tmpfs
+   and creates the device), and only then opens `/dev/mcu1`/`/dev/fb0` for
+   the display pipeline. The app never opens the mcu char devices during
+   bring-up.
+
+After the gates: the app reaches `iot.go:281 cabinetComm.Background()` and
+probes the link (`netmonitor` arping/DoH - install `busybox` for arping).
+Next milestone: cloud login against the sandbox (`/var/log/sandbox_api.log`),
+then the e2e relay on 127.0.0.1:1050, FCR/MQTT pokes, OTA round-trip.
+
+## Debugging playbook (this is how every gate was cracked)
+
+- **pprof is the killer tool**: `/root/config.toml` with `enable_pprof = true`
+  exposes `http://127.0.0.1:16061/debug/pprof/goroutine?debug=2` from ~20 s
+  into boot. The app BLOCKS inside the reboot call for the whole
+  delayed-reboot grace, so it is snapshot-able at leisure. goroutine 1's
+  stack names the exact bring-up stage; watching it walk down `iot.go` line
+  numbers = a live boot progress bar. SIGQUIT dumps work too but pprof needs
+  no timing luck.
+- **strace the service** (`-e trace=process,openat,read,write,connect,socket,
+  ioctl,poll,ppoll,epoll_wait,futex`) and read the LAST boot's trace: the
+  final 200 ms before the `execve(".../reboot")` show the deciding checks.
+  `-o` truncates per Restart=always cycle - only the last boot is kept.
+- **The stub invocation log** `/var/log/stubs.log` is the app's boot sequence
+  map. If a line you expect is missing, the app never got there.
+- **THE SINGLE-INSTANCE RULE**: never run two app processes. They fight over
+  leveldb LOCK files, spin at 100% CPU each (load 20+ on one vCPU), wedge PID
+  1 into D-state ("Transport endpoint is not connected" from systemctl), and
+  corrupt each other's db. `systemctl stop emaldo` + kill every
+  `emaldo_iot_fw`/`strace` + verify with pgrep BEFORE any manual run, and
+  remember the systemd unit has Restart=always (it resurrects instances
+  unless stopped/masked). After a wedge: kill QEMU, `fsck.ext4 -y`, reboot.
+- **Console/ssh**: sshd in the minimal rootfs needs hand-holding: create
+  `/etc/ssh/sshd_config` (it may be MISSING), generate host keys, add the
+  `sshd` user, `PermitEmptyPasswords yes`, `RuntimeDirectory=sshd`. Empty the
+  root password for console+ssh. QEMU serial socket accepts ONE client -
+  kill hung console scripts before reconnecting; backgrounded children with
+  inherited stdout hang ssh (use `setsid ... </dev/null >log 2>&1 &`).
+- **Offline image surgery**: kill qemu by exact PID (`pgrep -x
+  qemu-system-arm` - never `pkill -f`, it matches your own shell),
+  `fsck.ext4 -y`, `mount -o loop`, edit, umount, boot. The image is a
+  whole-disk ext4. Guest writes go straight to the image - editing files
+  inside the running VM IS persistent.
 
 ## DIN CAN wire format (fake_bms.py <-> real canapp)
 
@@ -200,13 +254,10 @@ qemu-system-arm -M virt -m 1024 \
    with instant no-op stubs - but you MUST still provide
    `/run/hps/networking/eth0.env` (see Boot gates #1): `ifup` succeeding is
    not enough, the app watches the state file the dhclient hook writes.
-8. **Tool stubs must behave like the real tools.** `/usr/sbin/reboot` that
-   just exits 0 => the app exits 1 a moment later (it knows the reboot did not
-   happen) => systemd restart loop. It must REALLY reboot (`/bin/systemctl
-   reboot`). `systemctl is-enabled/is-active` stubs return exit 1 (nothing
-   enabled) which the app tolerates. Log every stub invocation to
-   `/var/log/stubs.log` - the invocation list is a map of the app's
-   bring-up sequence.
+8. **Tool stubs must behave like the real tools** - see `tool-stub.sh` and
+   Boot gates #1 for the full rules (real reboot; stateful bluetooth answers
+   with realistic stdout; one multi-call file under ALL names including
+   `systemctl`).
 9. **Offline image surgery is the reliable way to work on the VM.** The serial
    console is only usable while the app is not rebooting; qemu's serial socket
    accepts ONE client at a time (kill hung console scripts before reconnecting).
@@ -214,11 +265,11 @@ qemu-system-arm -M virt -m 1024 \
    `pkill -f`, it matches your own shell), `fsck.ext4 -y rootfs.img`,
    `mount -o loop`, edit, `umount`, boot. The image is a whole-disk ext4
    (no partition table). Every unclean kill needs the fsck.
-10. `enable_pprof` in `/root/config.toml` may expose pprof on :16061 after
-    cloud init - useful for live profiling.
-9. The master config (`/root/config.toml`) supports `mqtt_enabled`,
-   `mqtt_broker_url`, `mqtt_username`, `mqtt_password` as plain TOML keys -
-   a device-local MQTT path that bypasses the cloud cred-handout entirely.
+10. `enable_pprof` in `/root/config.toml` exposes pprof on :16061 from ~20 s
+    into boot - the primary debug tool (see Debugging playbook).
+11. The master config (`/root/config.toml`) supports `mqtt_enabled`,
+    `mqtt_broker_url`, `mqtt_username`, `mqtt_password` as plain TOML keys -
+    a device-local MQTT path that bypasses the cloud cred-handout entirely.
 
 ## Why not qemu user-mode (chroot)?
 
