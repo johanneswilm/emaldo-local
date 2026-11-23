@@ -33,16 +33,26 @@ case "$0" in
     exit 0;;
   */systemctl)
     case "$1 $2" in
-      "is-enabled bluetooth.service")
-        if [ -f /root/.stub_state/bluetooth_masked ]; then
-          echo "masked"; exit 1
-        else
-          echo "enabled"; exit 0
-        fi;;
-      "is-active bluetooth.service")
-        echo "inactive"; exit 3;;
-      "is-enabled "*|"is-active "*)
-        echo "disabled"; exit 1;;
+      *bluetooth*)
+        # Only bluetooth is faked (the config-reboot state machine, note 2).
+        if [ "$1" = "is-enabled" ]; then
+          if [ -f /root/.stub_state/bluetooth_masked ]; then
+            echo "masked"; exit 1
+          else
+            echo "enabled"; exit 0
+          fi
+        elif [ "$1" = "is-active" ]; then
+          echo "inactive"; exit 3
+        fi
+        mkdir -p /root/.stub_state
+        case " $* " in *bluetooth*) touch /root/.stub_state/bluetooth_masked;; esac
+        exit 0;;
+      "is-enabled "*|"is-active "*|"status "*|"show "*)
+        # Everything else gets the truth from the real systemd, so unit-level
+        # questions (netctl.service, networking.service, ...) reflect the actual
+        # guest state instead of a blanket "disabled".
+        /bin/systemctl "$1" "$2"
+        exit $?;;
       "disable "*|"mask "*)
         mkdir -p /root/.stub_state
         case " $* " in *bluetooth*) touch /root/.stub_state/bluetooth_masked;; esac
