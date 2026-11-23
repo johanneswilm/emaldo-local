@@ -1,0 +1,608 @@
+# /etc/default/ifplugd
+# managed by hps migratenetworking
+# ifplugd 
+
+INTERFACES="eth0"
+HOTPLUG_INTERFACES="eth0"
+ARGS="-q -f -u0 -d5 -w -I"
+SUSPEND_ACTION="stop"
+#!/bin/sh
+# /etc/ifplugd/ifplugd.action
+# bridge cable plug/unplug events to netctl
+# args: $1 = interface, $2 = up|down
+
+case "$2" in
+    up)
+        /etc/hps/networking/netctl "$1" up
+        ;;
+    down)
+        /etc/hps/networking/netctl "$1" down
+        ;;
+    *)
+        echo "ifplugd.action: incorrect action argument" >&2
+        exit 1
+        ;;
+esac
+
+/dev/serial/by-path/platform-ci_hdrc.1-usb-0:1.3:1.5-port0 115200
+
+user "" password ""
+connect 'chat -s -v -f /run/hps/networking/simcom-chat-connect'
+disconnect 'chat -s -v -f /etc/ppp/peers/simcom-chat-disconnect'
+hide-password
+noauth
+debug
+nodefaultroute
+noipdefault
+novj
+novjccomp
+noccp
+ipcp-accept-local
+ipcp-accept-remote
+local
+lock
+modem
+dump
+nodetach
+nocrtscts
+remotename 3gppp
+ipparam
+3gppp
+ipcp-max-failure 30
+usepeerdns
+
+[Unit]
+Description=HPS netctl network supervisor
+After=ifupdown-pre.service network-pre.target
+Wants=network.target
+Before=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/etc/hps/networking/netctl-supervisor
+Restart=always
+RestartSec=5
+# 
+
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+
+#!/bin/sh
+# /etc/ppp/ip-up.d/99hps
+# record ppp0 ip/gateway/dns into the per-nic state file for netmonitor
+
+HPS_NET_DIR=/etc/hps/networking
+[ -r "${HPS_NET_DIR}/common.sh" ] && . "${HPS_NET_DIR}/common.sh"
+
+[ "$IFNAME" = ppp0 ] || exit 0
+
+metric=$(metric_for ppp0)
+
+ip route del default dev "$IFNAME" scope link 2>/dev/null || true
+ip route replace default via "$IPREMOTE" dev "$IFNAME" metric "$metric" 2>/dev/null || true
+
+dns=""
+[ -n "$DNS1" ] && dns="$DNS1"
+[ -n "$DNS2" ] && dns="${dns:+$dns }$DNS2"
+
+write_state_file "$IFNAME" ppp "$IPLOCAL" 32 "$IPREMOTE" "$dns" "" "$metric" ""
+resolv_fallback "$dns" ""
+
+REINDEXEDESCAPEACHECKEYBEFOREIGNOREGEXPLAINSTEADDATABASELECTABLEFTHENDEFERRABLELSEXCLUDELETEMPORARYISNULLSAVEPOINTERSECTIESNOTNULLIKEXCEPTRANSACTIONATURALTERAISEXCLUSIVEXISTSCONSTRAINTOFFSETRIGGERANGENERATEDETACHAVINGLOBEGINNEREFERENCESUNIQUERYWITHOUTERELEASEATTACHBETWEENOTHINGROUPSCASCADEFAULTCASECOLLATECREATECURRENT_DATEIMMEDIATEJOINSERTMATCHPLANALYZEPRAGMATERIALIZEDEFERREDISTINCTUPDATEVALUESVIRTUALWAYSWHENWHERECURSIVEABORTAFTERENAMEANDROPARTITIONAUTOINCREMENTCASTCOLUMNCOMMITCONFLICTCROSSCURRENT_TIMESTAMPRECEDINGFAILASTFILTEREPLACEFIRSTFOLLOWINGFROMFULLIMITIFORDERESTRICTOTHERSOVERETURNINGRIGHTROLLBACKROWSUNBOUNDEDUNIONUSINGVACUUMVIEWINDOWBYINITIALLYPRIMARY
+#!/bin/sh
+# /etc/dhcp/dhclient-enter-hooks.d/99hps
+# capture the DHCP result into the per-nic state file for netmonitor
+# also neuter make_resolv_conf so the stock dhclient-script never rewrites /etc/resolv.conf
+
+HPS_NET_DIR=/etc/hps/networking
+[ -r "${HPS_NET_DIR}/common.sh" ] && . "${HPS_NET_DIR}/common.sh"
+
+# stop the stock dhclient-script from touching /etc/resolv.conf
+# (this hook is sourced after dhclient-script defines make_resolv_conf)
+make_resolv_conf() {
+    :
+}
+
+case "$reason" in
+    BOUND | RENEW | REBIND | REBOOT)
+        _prefix=$(netmask_to_prefix "${new_subnet_mask:-255.255.255.0}")
+        _gw=$(echo "${new_routers:-}" | awk '{print $1}')
+        _domain="${new_domain_name:-}"
+        [ -n "${new_domain_search:-}" ] && _domain="$new_domain_search"
+        _expire=$(($(date +%s) + ${new_dhcp_lease_time:-0}))
+        write_state_file "$interface" dhcp \
+            "${new_ip_address:-}" "$_prefix" "$_gw" \
+            "${new_domain_name_servers:-}" "$_domain" \
+            "${IF_METRIC:-}" "$_expire"
+        resolv_fallback "${new_domain_name_servers:-}" "$_domain"
+        ;;
+    EXPIRE | FAIL | RELEASE | STOP)
+        del_state_file "$interface"
+        ;;
+esac
+
+#!/bin/sh
+# /usr/local/bin/pppdsetup
+# usage: pppdsetup [--apn <APN>] [--port <DEV>]
+
+HPS_STATE_DIR=/run/hps/networking
+PEER_TPL=/etc/ppp/peers/simcom-pppd
+PEER_RUN="${HPS_STATE_DIR}/simcom-pppd"
+CHAT_CONNECT_TPL=/etc/ppp/peers/simcom-chat-connect
+CHAT_CONNECT_RUN="${HPS_STATE_DIR}/simcom-chat-connect"
+
+apn=""
+port=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --apn)
+            apn=$2
+            shift 2
+            ;;
+        --port)
+            port=$2
+            shift 2
+            ;;
+        *)
+            echo "usage: pppdsetup [--apn <APN>] [--port <DEV>]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# port 
+
+if [ -z "$port" ]; then
+    _usb=$(lsusb 2>/dev/null)
+    case "$_usb" in
+        *1e0e:9011*) port=/dev/serial/by-path/platform-ci_hdrc.1-usb-0:1.3:1.5-port0 ;;
+        *1782:4d10*) port=/dev/ttyUSB6 ;;
+        *) exit 0 ;;
+    esac
+fi
+
+# apn 
+ teal
+[ -n "$apn" ] || apn=teal
+
+[ -f "$PEER_TPL" ] && [ -f "$CHAT_CONNECT_TPL" ] || exit 1
+
+mkdir -p "$HPS_STATE_DIR"
+
+# 
+ APN
+sed -E "s|^OK AT\\+CGDCONT=.*|OK AT+CGDCONT=1,\"IP\",\"${apn}\",,0,0|" "$CHAT_CONNECT_TPL" >"$CHAT_CONNECT_RUN"
+# 
+ port
+sed "1s#^[^ ]*#${port}#" "$PEER_TPL" >"$PEER_RUN"
+
+/usr/sbin/pppd file "$PEER_RUN" &
+
+#!/bin/sh
+#
+# This script is run by the pppd _after_ the link is brought down.
+# It uses run-parts to run scripts in /etc/ppp/ip-down.d, so to delete
+# routes, unset IP addresses etc. you should create script(s) there.
+#
+# Be aware that other packages may include /etc/ppp/ip-down.d scripts (named
+# after that package), so choose local script names with that in mind.
+#
+# This script is called with the following arguments:
+#    Arg  Name                          Example
+#    $1   Interface name                ppp0
+#    $2   The tty                       ttyS1
+#    $3   The link speed                38400
+#    $4   Local IP number               12.34.56.78
+#    $5   Peer  IP number               12.34.56.99
+#    $6   Optional ``ipparam'' value    foo
+
+# The environment is cleared before executing this script
+# so the path must be reset.
+PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+export PATH
+
+# These variables are for the use of the scripts run by run-parts
+PPP_IFACE="$1"
+PPP_TTY="$2"
+PPP_SPEED="$3"
+PPP_LOCAL="$4"
+PPP_REMOTE="$5"
+PPP_IPPARAM="$6"
+export PPP_IFACE PPP_TTY PPP_SPEED PPP_LOCAL PPP_REMOTE PPP_IPPARAM
+
+# as an additional convenience, $PPP_TTYNAME is set to the tty name,
+# stripped of /dev/ (if present) for easier matching.
+PPP_TTYNAME=$(/usr/bin/basename "$2")
+export PPP_TTYNAME
+
+# If /var/log/ppp-ipupdown.log exists use it for logging.
+if [ -e /var/log/ppp-ipupdown.log ]; then
+  exec >> /var/log/ppp-ipupdown.log 2>&1
+  echo "$0" "$@"
+  echo
+fi
+
+# This script can be used to override the .d files supplied by other packages.
+if [ -x /etc/ppp/ip-down.local ]; then
+  exec /etc/ppp/ip-down.local "$@"
+fi
+
+run-parts /etc/ppp/ip-down.d \
+  --arg="$1" --arg="$2" --arg="$3" --arg="$4" --arg="$5" --arg="$6"
+
+#!/bin/sh
+#
+# This script is run by the pppd after the link is established.
+# It uses run-parts to run scripts in /etc/ppp/ip-up.d, so to add routes,
+# set IP address, run the mailq etc. you should create script(s) there.
+#
+# Be aware that other packages may include /etc/ppp/ip-up.d scripts (named
+# after that package), so choose local script names with that in mind.
+#
+# This script is called with the following arguments:
+#    Arg  Name                          Example
+#    $1   Interface name                ppp0
+#    $2   The tty                       ttyS1
+#    $3   The link speed                38400
+#    $4   Local IP number               12.34.56.78
+#    $5   Peer  IP number               12.34.56.99
+#    $6   Optional ``ipparam'' value    foo
+
+# The environment is cleared before executing this script
+# so the path must be reset.
+PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+export PATH
+
+# These variables are for the use of the scripts run by run-parts
+PPP_IFACE="$1"
+PPP_TTY="$2"
+PPP_SPEED="$3"
+PPP_LOCAL="$4"
+PPP_REMOTE="$5"
+PPP_IPPARAM="$6"
+export PPP_IFACE PPP_TTY PPP_SPEED PPP_LOCAL PPP_REMOTE PPP_IPPARAM
+
+# as an additional convenience, $PPP_TTYNAME is set to the tty name,
+# stripped of /dev/ (if present) for easier matching.
+PPP_TTYNAME=$(/usr/bin/basename "$2")
+export PPP_TTYNAME
+
+# If /var/log/ppp-ipupdown.log exists use it for logging.
+if [ -e /var/log/ppp-ipupdown.log ]; then
+  exec >> /var/log/ppp-ipupdown.log 2>&1
+  echo "$0" "$@"
+  echo
+fi
+
+# This script can be used to override the .d files supplied by other packages.
+if [ -x /etc/ppp/ip-up.local ]; then
+  exec /etc/ppp/ip-up.local "$@"
+fi
+
+run-parts /etc/ppp/ip-up.d \
+  --arg="$1" --arg="$2" --arg="$3" --arg="$4" --arg="$5" --arg="$6"
+
+# if pon was called with the "quick" argument, stop pppd
+if [ -e /var/run/ppp-quick ]; then
+  rm /var/run/ppp-quick
+  wait
+  kill "$PPPD_PID"
+fi
+
+
+*
+,
+.
+0
+2
+4
+6
+8
+<
+>
+@
+B
+D
+F
+H
+J
+L
+N
+P
+R
+T
+V
+X
+Z
+_
+e
+l
+t
+v
+x
+z
+|
+~
+
+   ( ) * / 0 9 : ; ? A D E F G R S T U _ ` j p q t z } ~ 
+!$!%!&!'!(!)!*!.!/!0!4!5!9!:!<!>!@!E!G!J!K!L!N!O!P!`!
+#!/bin/sh
+# /etc/hps/networking/common.sh
+# shared helpers for netctl and the dhclient enter hook
+# this file is meant to be sourced, not executed
+
+HPS_NET_DIR=/etc/hps/networking
+HPS_STATE_DIR=/run/hps/networking
+
+# metric_for IFACE -> fixed route metric, single source of truth shared by
+# netctl, the supervisor and the ppp ip-up hook, aligned with netmonitor
+# linkctl priority constants (eth0 < wlan0 < ppp0 < fallback)
+metric_for() {
+    case "$1" in
+        eth0) echo 10 ;;
+        wlan0) echo 20 ;;
+        ppp0) echo 35 ;;
+        *) echo 90 ;;
+    esac
+}
+
+# is_static IFACE -> 0 when the iface stanza declares a static address
+is_static() {
+    _stanza="/etc/network/interfaces.d/$1"
+    [ -f "$_stanza" ] && grep -qE '^[[:space:]]*address[[:space:]]' "$_stanza"
+}
+
+# has_ip IFACE -> 0 when the iface holds a global-scope IPv4 address
+has_ip() {
+    case "$(ip -4 addr show dev "$1" 2>/dev/null)" in
+        *"inet "*"scope global"*) return 0 ;;
+    esac
+    return 1
+}
+
+# dhclient_alive IFACE -> 0 when the netctl-owned dhclient for IFACE is running
+dhclient_alive() {
+    read -r _pid 2>/dev/null < "/run/dhclient.$1.pid" || return 1
+    [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null
+}
+
+# carrier_up IFACE -> 0 
+)
+carrier_up() {
+    read -r _carrier 2>/dev/null < "/sys/class/net/$1/carrier" || return 1
+    [ "$_carrier" = "1" ]
+}
+
+# wpa_completed IFACE -> 0 
+ DHCP
+wpa_completed() {
+    wpa_cli -i "$1" status 2>/dev/null | grep -q '^wpa_state=COMPLETED'
+}
+
+# link_ready IFACE -> 0 
+
+link_ready() {
+    carrier_up "$1" || return 1
+    [ "$1" != wlan0 ] || wpa_completed "$1"
+}
+
+# ensure_wpa_action IFACE -> keep exactly one wpa_cli action daemon so wifi
+# association changes reach netctl, restarting it when the previous one died
+# no-op for non-wlan0 ifaces
+ensure_wpa_action() {
+    [ "$1" = wlan0 ] || return 0
+    _wpf="/run/wpa-action.$1.pid"
+    if read -r _wpp 2>/dev/null < "$_wpf"; then
+        [ -n "$_wpp" ] && kill -0 "$_wpp" 2>/dev/null && return 0
+    fi
+    # 9>&- 
+
+    wpa_cli -i "$1" -a "${HPS_NET_DIR}/wpa-action" -B -P "$_wpf" 9>&- 2>/dev/null || true
+}
+
+# netmask_to_prefix DOTTED_MASK -> prefix length
+netmask_to_prefix() {
+    _bits=0
+    for _o in $(echo "${1:-255.255.255.0}" | tr '.' ' '); do
+        case "$_o" in
+            255) _bits=$((_bits + 8)) ;;
+            254) _bits=$((_bits + 7)) ;;
+            252) _bits=$((_bits + 6)) ;;
+            248) _bits=$((_bits + 5)) ;;
+            240) _bits=$((_bits + 4)) ;;
+            224) _bits=$((_bits + 3)) ;;
+            192) _bits=$((_bits + 2)) ;;
+            128) _bits=$((_bits + 1)) ;;
+            *) ;;
+        esac
+    done
+    echo "$_bits"
+}
+
+# write_state_file IFACE SOURCE IP PREFIX GW "DNS" DOMAIN METRIC LEASE_EXPIRE
+write_state_file() {
+    mkdir -p "$HPS_STATE_DIR" 2>/dev/null
+    _tmp="${HPS_STATE_DIR}/.$1.env.tmp"
+    {
+        echo "IFACE=$1"
+        echo "SOURCE=$2"
+        echo "IP=$3"
+        echo "PREFIX=$4"
+        echo "GATEWAY=$5"
+        echo "DNS=$6"
+        echo "DOMAIN=$7"
+        echo "METRIC=$8"
+        echo "LEASE_EXPIRE=$9"
+        echo "UPDATED=$(date +%s)"
+    } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "${HPS_STATE_DIR}/$1.env"
+}
+
+# del_state_file IFACE
+del_state_file() {
+    rm -f "${HPS_STATE_DIR}/$1.env"
+}
+
+# resolv_fallback "DNS" DOMAIN
+# cold-start safety net: write /etc/resolv.conf only when it is
+# missing, empty, or has no nameserver line; netmonitor is the normal owner
+resolv_fallback() {
+    if grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+        return 0
+    fi
+    {
+        [ -n "$2" ] && echo "search $2"
+        for _ns in $1; do
+            echo "nameserver $_ns"
+        done
+    } >/etc/resolv.conf 2>/dev/null || true
+}
+
+#!/bin/sh
+# /etc/hps/networking/netctl
+# unified connect/disconnect orchestrator for eth0 and wlan0
+# usage: netctl <iface> up|down
+
+HPS_NET_DIR=/etc/hps/networking
+. "${HPS_NET_DIR}/common.sh"
+
+IFACE=$1
+ACTION=$2
+[ -n "$IFACE" ] && [ -n "$ACTION" ] || {
+    echo "usage: netctl <iface> up|down" >&2
+    exit 1
+}
+
+PIDFILE="/run/dhclient.${IFACE}.pid"
+LEASEFILE="/var/lib/dhcp/dhclient.${IFACE}.leases"
+LOCKFILE="/run/netctl.${IFACE}.lock"
+STANZA="/etc/network/interfaces.d/${IFACE}"
+
+# LINK_TIMEOUT 
+
+read_stanza() {
+    _st_addr=""
+    _st_mask=""
+    _st_gw=""
+    _st_dns=""
+    _st_domain=""
+    [ -r "$1" ] || return 0
+    # || [ -n "$_k" ] 
+
+    while read -r _k _v || [ -n "$_k" ]; do
+        case "$_k" in
+            address) [ -n "$_st_addr" ] || _st_addr=$_v ;;
+            netmask) [ -n "$_st_mask" ] || _st_mask=$_v ;;
+            gateway) [ -n "$_st_gw" ] || _st_gw=$_v ;;
+            dns-nameservers) [ -n "$_st_dns" ] || _st_dns=$_v ;;
+            dns-search) [ -n "$_st_domain" ] || _st_domain=$_v ;;
+        esac
+    done < "$1"
+}
+
+kill_dhclient() {
+    [ -f "$PIDFILE" ] || return 0
+    if read -r _p 2>/dev/null < "$PIDFILE" && [ -n "$_p" ]; then
+        kill "$_p" 2>/dev/null
+        _n=0
+        while kill -0 "$_p" 2>/dev/null && [ "$_n" -lt 3 ]; do
+            sleep 1
+            _n=$((_n + 1))
+        done
+        kill -0 "$_p" 2>/dev/null && kill -9 "$_p" 2>/dev/null
+    fi
+    rm -f "$PIDFILE"
+}
+
+# wait_can_dhcp 
+
+wait_can_dhcp() {
+    _n=0
+    while ! link_ready "$IFACE"; do
+        [ "$_n" -ge "$LINK_TIMEOUT" ] && return 1
+        sleep 1
+        _n=$((_n + 1))
+    done
+    return 0
+}
+
+# start_dhclient 
+
+start_dhclient() {
+    wait_can_dhcp || return 1
+    dhclient -4 -nw -pf "$PIDFILE" -lf "$LEASEFILE" -e "IF_METRIC=$(metric_for "$IFACE")" "$IFACE" 9>&-
+    _n=0
+    while [ ! -s "$PIDFILE" ] && [ "$_n" -lt 20 ]; do
+        sleep 0.1
+        _n=$((_n + 1))
+    done
+    _n=0
+    while ! has_ip "$IFACE" && [ "$_n" -lt "$DHCP_TIMEOUT" ]; do
+        sleep 1
+        _n=$((_n + 1))
+    done
+    has_ip "$IFACE"
+}
+
+do_up() {
+    if dhclient_alive "$IFACE" && has_ip "$IFACE"; then
+        ensure_wpa_action "$IFACE"
+        return 0
+    fi
+
+    kill_dhclient
+    # dhcp 
+
+    if [ -n "$_st_addr" ] || ! has_ip "$IFACE"; then
+        ip addr flush dev "$IFACE" 2>/dev/null || true
+        ip link set "$IFACE" up 2>/dev/null || true
+    fi
+
+    if [ -n "$_st_addr" ]; then
+        _metric=$(metric_for "$IFACE")
+        case "$_st_addr" in
+            */*) _cidr=$_st_addr ;;
+            *) _cidr="${_st_addr}/$(netmask_to_prefix "$_st_mask")" ;;
+        esac
+        ip addr add "$_cidr" dev "$IFACE" 2>/dev/null || true
+        [ -n "$_st_gw" ] && ip route replace default via "$_st_gw" dev "$IFACE" metric "$_metric" 2>/dev/null || true
+        write_state_file "$IFACE" static "${_cidr%/*}" "${_cidr#*/}" "$_st_gw" "$_st_dns" "$_st_domain" "$_metric" ""
+        resolv_fallback "$_st_dns" "$_st_domain"
+    else
+        # start_dhclient 
+
+        start_dhclient || true
+    fi
+    ensure_wpa_action "$IFACE"
+    # ifup 
+
+    return 0
+}
+
+do_down() {
+    if [ -z "$_st_addr" ] && [ -f "$PIDFILE" ]; then
+        dhclient -r -pf "$PIDFILE" -lf "$LEASEFILE" "$IFACE" 2>/dev/null || true
+    fi
+    kill_dhclient
+    ip addr flush dev "$IFACE" 2>/dev/null || true
+    del_state_file "$IFACE"
+}
+
+# serialize concurrent triggers (ifplugd / ifup / netmonitor / wpa-action)
+exec 9>"$LOCKFILE"
+if ! flock -w 60 9; then
+    echo "netctl ${IFACE} ${ACTION}: lock timeout" >&2
+    exit 1
+fi
+
+read_stanza "$STANZA"
+
+case "$ACTION" in
+    up) do_up ;;
+    down) do_down ;;
+    *)
+        echo "netctl: unknown action ${ACTION}" >&2
+        exit 1
+        ;;
+esac

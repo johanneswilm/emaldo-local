@@ -15,8 +15,13 @@
 set -u
 REAL=/usr/lib/execlog-real
 LOG=/var/log/exec.log
-TARGETS="sh dash dhclient wpa_cli iw ip route ping pkill date logger sync tar gzip
-hostname insmod mount umount killall iwconfig wpa_supplicant crontab udevadm"
+# NOTE: do NOT wrap sh/dash. The wrapper's own `#!/bin/sh` shebang then points at
+# the wrapper (ELOOP: "bad interpreter: Too many levels of symbolic links"), and
+# every shell script in the image - including the other stubs - stops working.
+# The app builds its commands through /bin/bash -c (verified in the saved
+# network trace), so wrapping bash captures the command strings.
+TARGETS="bash dhclient wpa_cli iw ip route ping pkill date logger sync tar gzip
+hostname insmod lsmod rm basename mount umount killall iwconfig wpa_supplicant crontab udevadm"
 
 case "${1:-install}" in
   install)
@@ -30,13 +35,17 @@ case "${1:-install}" in
       if [ ! -e "$REAL/$n" ]; then
         cp -fL "$src" "$REAL/$n" 2>/dev/null || continue
         chmod 755 "$REAL/$n"
-        cat > "$src" <<EOF
+        cat > "$src.new" <<EOF
 #!/bin/sh
 read -r t _ < /proc/uptime
 echo "up=\${t%%.*} $n \$@" >> $LOG
 exec $REAL/$n "\$@"
 EOF
-        chmod 755 "$src"
+        chmod 755 "$src.new"
+        # rename, not truncate: running processes keep the old inode, and
+        # `cat > busy-binary` fails with ETXTBSY (that is how /bin/sh escaped
+        # the census the first time)
+        mv -f "$src.new" "$src"
         echo "wrapped $n ($src)"
       fi
     done
