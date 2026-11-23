@@ -1,0 +1,12 @@
+[Unit]
+Description=Emaldo emulator: write netctl eth0.env state (boot gate)
+After=systemd-networkd.service
+Before=emaldo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hps-net-state
+
+[Install]
+WantedBy=multi-user.target

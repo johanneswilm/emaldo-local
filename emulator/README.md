@@ -6,10 +6,12 @@ cloud, so you can study, poke, and test it without touching real hardware.
 This is the test bench `emaldo-local` development uses for the OTA round-trip
 and protocol experiments.
 
-> Status: **works end-to-end** (app boots, registers with the sandbox cloud,
-> calls its API). QEMU user-mode was abandoned midway (timing races); the
-> supported path is **QEMU system-mode** (full ARM VM). The notes on why are
-> kept at the bottom - they will save you from re-trying it.
+> Status: the app **boots, discovers our fake cabinet over a real (virtual) CAN
+> bus, and attaches to the cabinet FIFOs** - but then reboots on the
+> **front-panel screen MCU** gate (see "Boot gates" below). QEMU user-mode was
+> abandoned midway (timing races); the supported path is **QEMU system-mode**
+> (full ARM VM). The notes on why are kept at the bottom - they will save you
+> from re-trying it.
 
 ## Architecture
 
@@ -18,13 +20,63 @@ and protocol experiments.
   ├─ systemd
   │   ├─ emaldo.service      -> /app/emaldo_iot_fw   (the OFFICIAL app, native ARM)
   │   ├─ sandbox-api.service -> sandbox_api.py        (fake Emaldo cloud API, TLS :443)
+  │   ├─ vcan.service        -> modprobe vcan; can0 up (kernel virtual CAN)
+  │   ├─ fake-bms.service    -> fake_bms.py           (DIN cabinet/BMS on can0)
+  │   ├─ hps-net-state.service -> writes /run/hps/networking/eth0.env (boot gate, below)
   │   └─ sshd + serial console on ttyAMA0
-  ├─ /root/bin/cabinet       -> fake_canapp.py        (FIFO cabinet bridge emulator)
+  ├─ /root/bin/cabinet       -> REAL canapp binary    (immutable; bridges can0 <-> app)
+  ├─ /usr/sbin/reboot + friends -> tool stubs (log to /var/log/stubs.log; see below)
   └─ /etc/hosts              dp.emaldo.com -> 127.0.0.1  (cloud = sandbox)
 ```
 
 The app generates a **fresh random device identity** on first boot - it never
 collides with a real battery.
+
+## Boot gates (the app reboots whenever one is unmet - found in order)
+
+1. **Network state file**: the app polls `/run/hps/networking/eth0.env` ~1/s
+   for ~6 s after boot (on real hw it is written by the netctl/dhclient hooks
+   in `/etc/hps/networking/common.sh:write_state_file`). Missing => reboot.
+   Fixed by `hps-net-state.service` which copies the live eth0 lease into the
+   expected `IFACE=/SOURCE=/IP=/PREFIX=/GATEWAY=/DNS=/DOMAIN=/METRIC=/
+   LEASE_EXPIRE=/UPDATED=` file before emaldo.service starts.
+2. **Front-panel screen MCU (CURRENT BLOCKER)**: after the cabinet FIFOs are
+   attached the app checks `/run/screen_state` (written by
+   `rosetta/hardware/screen.manager` after the display MCU handshake),
+   `/proc/version_screen` (custom kernel file on real hw) and
+   `/sys/class/backlight/backlight-display/brightness`, then reboots.
+   `gpiochip0` access works under qemu `-M virt`, but the MCU bus/protocol is
+   unemulated. The app's flow is strictly sequential: no screen => no cloud
+   login. The delayed-reboot trick (stub reboots 6 min late) does NOT help -
+   the app blocks waiting for the shutdown instead of continuing.
+3. Once the screen is emulated, the expected next step is cloud login against
+   the sandbox (`/var/log/sandbox_api.log`) - e2e-bmt-login points the app at
+   127.0.0.1:1050, run the e2e relay there.
+
+## DIN CAN wire format (fake_bms.py <-> real canapp)
+
+Reverse-engineered from `dinCanFrameReceiveProc` in the canapp binary. All
+frames are extended ID; **bit 24 (flag) must be 1** on complete frames or the
+receiver buffers them as never-completed fragments:
+
+```
+  bits 25-28: type        bit 24: flag (1 = complete, 0 = fragment page)
+  bits 16-23: page (0x01 = single/complete frame)
+  bits  8-15: SOURCE address (cabinet = cab_index << 4)
+  bits  0- 7: destination (only 0x00 and 0xFF are accepted)
+```
+
+canapp's own poll on the wire: `0x8B0100FF` = type 5, flag 1, page 1, src 0x00,
+dst 0xFF, payload `[0x04]`, every ~2 s. Reply with src = `cab<<4`, dst 0x00:
+
+- type 5 (battery-online): payload `[5, batt_mask, uuid...]` - each set bit in
+  `batt_mask` registers battery `cab_bit`. The uuid copy wants len >= 10
+  (impossible on classic CAN); it logs an error but registration still happens.
+- type 9 (status): reply `[1, 0, ...]` = online.
+- type 10 (version): reply 8 version bytes.
+
+With that, the real canapp creates `/run/cabinet/{tree,1/in,1/out}` and the app
+attaches within one boot.
 
 ## Build from scratch
 
@@ -145,9 +197,25 @@ qemu-system-arm -M virt -m 1024 \
    `netctl` with 10 s/35 s timeouts) and runs `ifup eth0`. In the VM either
    give it a dummy `eth0` (`ip link add eth0 type dummy`) with a static
    `/etc/network/interfaces.d/eth0` stanza (immutable), or replace the scripts
-   with instant no-op stubs.
-8. `enable_pprof` in `/root/config.toml` may expose pprof on :16061 after
-   cloud init - useful for live profiling.
+   with instant no-op stubs - but you MUST still provide
+   `/run/hps/networking/eth0.env` (see Boot gates #1): `ifup` succeeding is
+   not enough, the app watches the state file the dhclient hook writes.
+8. **Tool stubs must behave like the real tools.** `/usr/sbin/reboot` that
+   just exits 0 => the app exits 1 a moment later (it knows the reboot did not
+   happen) => systemd restart loop. It must REALLY reboot (`/bin/systemctl
+   reboot`). `systemctl is-enabled/is-active` stubs return exit 1 (nothing
+   enabled) which the app tolerates. Log every stub invocation to
+   `/var/log/stubs.log` - the invocation list is a map of the app's
+   bring-up sequence.
+9. **Offline image surgery is the reliable way to work on the VM.** The serial
+   console is only usable while the app is not rebooting; qemu's serial socket
+   accepts ONE client at a time (kill hung console scripts before reconnecting).
+   Faster loop: `kill <qemu-pid>` (from `pgrep -x qemu-system-arm` - never
+   `pkill -f`, it matches your own shell), `fsck.ext4 -y rootfs.img`,
+   `mount -o loop`, edit, `umount`, boot. The image is a whole-disk ext4
+   (no partition table). Every unclean kill needs the fsck.
+10. `enable_pprof` in `/root/config.toml` may expose pprof on :16061 after
+    cloud init - useful for live profiling.
 9. The master config (`/root/config.toml`) supports `mqtt_enabled`,
    `mqtt_broker_url`, `mqtt_username`, `mqtt_password` as plain TOML keys -
    a device-local MQTT path that bypasses the cloud cred-handout entirely.

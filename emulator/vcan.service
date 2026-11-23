@@ -1,0 +1,13 @@
+[Unit]
+Description=Emaldo emulator: vcan can0
+Before=emaldo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe vcan
+ExecStart=/sbin/ip link add dev can0 type vcan
+ExecStart=/sbin/ip link set can0 up
+
+[Install]
+WantedBy=multi-user.target
