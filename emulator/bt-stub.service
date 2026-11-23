@@ -1,0 +1,17 @@
+[Unit]
+Description=Emaldo emulator: virtual BLE adapter via btattach on ttyAMA1
+# Requires the host-side H4 shim (emulator/h4_shim.py) connected to the
+# VM's second serial port (-serial unix:serial2.sock). The shim answers
+# every HCI command with Command Complete success - the kernel sees a
+# healthy hci0 and the app's BLE bring-up gets an adapter.
+Before=emaldo.service
+
+[Service]
+# hci_uart must be loaded before btattach's protocol ioctl
+ExecStartPre=/sbin/modprobe hci_uart
+ExecStart=/usr/bin/btattach -B /dev/ttyAMA1 -S 115200 -P h4
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

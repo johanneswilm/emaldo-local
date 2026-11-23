@@ -6,7 +6,7 @@ cloud, so you can study, poke, and test it without touching real hardware.
 This is the test bench `emaldo-local` development uses for the OTA round-trip
 and protocol experiments.
 
-> Status: the app **boots past all bring-up gates and reaches its main run
+> Status: BLOCKED on one remaining reboot in the official app (see "Boot gates" #1 - exhaustive history in the private repo's HANDOFF_EMULATOR.md). Everything else works: the app 
 > phase** (`cabinetComm.Background`, 200s+ uptime, all subsystems live in
 > pprof). The reboot loop that blocked this for days was the app's bluetooth
 > config-by-reboot behavior (see Boot gates #1) plus a stub that could not
