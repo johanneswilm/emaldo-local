@@ -100,6 +100,23 @@ def fake_result(path):
                 "gmtime": gm}
     return {"gmtime": gm}
 
+def doh(query):
+    """DNS wire-format answer from dnssink.py (same rules, same query log)."""
+    try:
+        for d in ("/usr/local/bin", "/usr/local/sbin", SB, os.path.dirname(os.path.abspath(__file__))):
+            if d not in sys.path: sys.path.append(d)
+        import dnssink
+        got = dnssink.reply(query, dnssink.rules())
+        if not got:
+            return b""
+        name, qtype, kind, value, pkt = got
+        dnssink.log("doh qname=%s qtype=%s -> %s %s" % (name, qtype, kind, value or ""))
+        return pkt
+    except Exception as e:
+        with open(LOG, "a", buffering=1) as f:
+            f.write(json.dumps({"t": time.strftime("%H:%M:%S"), "doh_error": repr(e)}) + "\n")
+        return b""
+
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a):
@@ -118,6 +135,20 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
+        if self.path.startswith("/dns-query"):
+            # The app resolves vendor names by DNS-over-HTTPS (RFC 8484) to
+            # 1.1.1.1 / 8.8.8.8, which are local aliases in the jail. Answer
+            # with the DNS sink's own rules, or the app never finds its API.
+            if not body and "dns=" in self.path:
+                q = self.path.split("dns=", 1)[1].split("&")[0]
+                body = base64.urlsafe_b64decode(q + "=" * (-len(q) % 4))
+            out = doh(body)
+            self.send_response(200 if out else 400)
+            self.send_header("Content-Type", "application/dns-message")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
         dec, raw = decode_fields(body)
         rec = {"t": time.strftime("%H:%M:%S"), "path": self.path,
                "gm": raw.get("gm"),
@@ -157,7 +188,9 @@ if __name__ == "__main__":
     # app connected to :443 and never sent a request.
     ctx.load_cert_chain(os.environ.get("SB_CERT", os.path.join(SB, "sandbox.crt")),
                         os.environ.get("SB_KEY", os.path.join(SB, "sandbox.key")))
-    with S(("127.0.0.1", PORT), H) as srv:
+    # 0.0.0.0: the app's DoH lookups go to the resolver aliases (1.1.1.1,
+    # 8.8.8.8) and its sockets are bound to eth0, so loopback is not enough.
+    with S((os.environ.get("SB_ADDR", "0.0.0.0"), PORT), H) as srv:
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         print(f"sandbox api on :{PORT}", flush=True)
         srv.serve_forever()

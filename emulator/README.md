@@ -419,13 +419,28 @@ did not bring the inverters back.
   It probably selects the inverter make (hisolar / INVT / BST); the stub
   writes `0`.
 - Commands from the app side need the e2e tunnel, and the tunnel needs the
-  app's cloud stage. In the configured state the app has never called the
-  sandbox API: `mqttcred ... BrokerURLSource.Fetch` sits in its retry wait and
-  the relay log stays empty. Two faults were found and fixed on the way, without
-  curing it: the app also resolves `www.gstatic.com` (its
-  `https://www.gstatic.com/generate_204` probe), which the sink answered
-  NXDOMAIN, and the sandbox certificate did not cover that name. The app's own
-  probes still do not reach `portal204` or the sandbox.
+  app's cloud stage, which does not start in the configured state. Found and
+  fixed on the way:
+  - The app resolves its link-check name by **DNS-over-HTTPS**: `POST
+    /dns-query` to `1.1.1.1:443` / `8.8.8.8:443`. Those are local aliases in
+    the jail, so `sandbox_api.py` now answers `/dns-query` with the DNS sink's
+    rules and logs it as `doh ...` in `/var/log/dns_queries.log`. The sandbox
+    certificate needs `IP:1.1.1.1,IP:8.8.8.8` (and `1.0.0.1`, `8.8.4.4`) in its
+    subjectAltName, and the sandbox must listen on `0.0.0.0`.
+  - It also probes `https://www.gstatic.com/generate_204`; the name is now in
+    `dnssink.conf` and must be in the certificate too.
+  - The app's sockets appear bound to `eth0`: names that resolve to `127.0.0.1`
+    are not reached, names that resolve to the guest's own `10.0.2.15` are.
+    In the guest the probe names, the vendor zone and `/etc/hosts` now point at
+    `10.0.2.15` (the repo files still say `127.0.0.1`).
+  Still failing after that: `mqttcred ... BrokerURLSource.Fetch`,
+  `rebootlog ... submit` and `onlineconfstatusgetter` sit in `retryer.wait`
+  and make no TCP connection at all, so they fail before the network. The
+  likely cause is that the configured state was written straight into
+  `config.toml` instead of going through registration. `log_level = 5` in
+  `config.toml` adds no log lines.
+- Sending e2e packets (`emaldo_re.e2e`: power-flow read, emergency charge)
+  straight to the app's UDP ports (`9332` and its second port) gets no answer.
 
 ## Build from scratch
 
