@@ -6,14 +6,17 @@ cloud, so you can study, poke, and test it without touching real hardware.
 This is the test bench `emaldo-local` development uses for the OTA round-trip
 and protocol experiments.
 
-> Status: BLOCKED on one remaining reboot in the official app (see "Boot gates" #1 - exhaustive history in the private repo's HANDOFF_EMULATOR.md). Everything else works: the app 
-> phase** (`cabinetComm.Background`, 200s+ uptime, all subsystems live in
-> pprof). The reboot loop that blocked this for days was the app's bluetooth
-> config-by-reboot behavior (see Boot gates #1) plus a stub that could not
-> remember state. Cloud login against the sandbox is the current milestone.
-> QEMU user-mode was abandoned midway (timing races); the supported path is
-> **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom
-> - they will save you from re-trying it.
+> Status: **BLOCKED on one remaining reboot** in the official app - it
+> reboots the VM every boot ~3-90 s into bring-up (see Boot gates #1;
+> exhaustive history in the private working repo's HANDOFF_EMULATOR.md).
+> Everything up to that point works: the fake BMS cabinet registers over
+> vcan, the app attaches to the cabinet FIFOs and walks its init stages,
+> all hardware gates (network state, backlight, screen state) are
+> emulated, pprof is live, and a virtual BLE adapter (btattach + H4 shim)
+> is in place. Cloud login against the sandbox is the milestone this
+> blocker gates. QEMU user-mode was abandoned midway (timing races); the
+> supported path is **QEMU system-mode** (full ARM VM). The notes on why
+> are kept at the bottom - they will save you from re-trying it.
 
 ## Architecture
 
