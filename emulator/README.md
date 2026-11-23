@@ -33,6 +33,7 @@ and protocol experiments.
   │   ├─ vcan.service          -> modprobe vcan; can0 up (kernel virtual CAN)
   │   ├─ fake-bms.service      -> fake_bms.py + fake_bak.py (cabinets and their BAK batteries on can0)
   │   ├─ serial-tap.service    -> serial_tap.py         (stand-in /dev/ttymxc2 + /dev/ttyCH9344USB0-7, logged)
+  │   ├─ mcu-sysfs-stub.service -> mcu-sysfs-stub.sh    (/sys/class/mcu/mcu1: inverter switches)
   │   ├─ spy-sink.service      -> ws_sink.py            (receives the app's decoded readings, /sandbox/spy.out)
   │   ├─ hps-net-state.service -> writes netctl eth0.env state (boot gate #2)
   │   ├─ screen-mcu-stub.service -> screen_state, /dev/mcu1*, backlight overlay (#3)
@@ -327,6 +328,69 @@ fake-bms.service.d/*.conf:  Environment=BMS_CABINETS=1:3,2:5   # cab:batteries
 
 Not emulated: battery history, LIn-mode policy, battery and cabinet firmware
 update, inverters, b-sensor, the MCU.
+
+## Inverters (in progress, v2.35.3)
+
+The app drives three inverters over Modbus RTU, slave 1, one per port
+(`/dev/ttyCH9344USB0`, `2`, `3`), with the `hisolar` driver. Two things have to
+exist before it does more than probe them.
+
+**1. A Modbus slave that remembers writes.** `serial_tap.py` answers reads
+itself; choose how with `TAP_MODBUS`:
+
+| Value | Answer |
+|---|---|
+| `zero` (default) | every register reads 0 |
+| `store` | 0 until the app writes a register, then the written value |
+| `addr` | each register reads its own address (for mapping fields) |
+| `file` | values from `/sandbox/tap_regs`, lines `port-substring 0xADDR value` |
+
+The tap logs a repeated frame only the 1st, 2nd, 100th, 200th ... time, so a
+steady poll shows as `(100x, ...)`, not as many lines.
+
+**2. The MCU's sysfs directory.** The inverter on/off switches are not on
+Modbus. They are files of the vendor mcu driver, `/sys/class/mcu/mcu1/
+inverter_0..2`: the app writes `1` or `0` and reads the first byte back (`1` =
+on). `mcu-sysfs-stub.sh` (unit `mcu-sysfs-stub.service`) creates the directory
+by putting a tmpfs over `/sys/class` and binding the real class directories
+back in. Other attributes it creates because the app names them:
+`mcu_status`, `mcu_version`, `hardware_version`, `inverter_factory`,
+`temperature`, `con_power`, `updata_mode`, `mcu_rst`, `ev_green`, `ev_red`.
+
+What the app does with both in place (per inverter, in order):
+
+| Step | Modbus |
+|---|---|
+| hardware version | read `0x0FA4` x1 |
+| identity / state | read `0x0FA0` x1, `0x0FA0` x15, `0x0FDA` x1 |
+| battery charging voltage | write `0x0FE0`=0, `0x0FDA`=560 (56.0 V), `0x0FE0`=1 |
+| initial data | read `0x0FA0` x43, `0x0FCB` x57, `0x0FD3` x11, `0x0FAF` x18 |
+| control | write `0x0FD3`=1 |
+| powers (`BatchSetPowers`) | write `0x0FD8`..`0x0FDD` = `[0, 3600, 560, 3600, 0, 0]` |
+| second pass, only with the MCU directory | re-read, then write `0x0FD8`=333 and `0x0FDD`=333 |
+
+`0x0FD9` and `0x0FDB` are the maximum powers (the driver rejects values outside
++-3600). With the switches reported on at start, the app writes `0` to all
+three files about 6 s after start and leaves them off.
+
+Not working yet: the app does not start its periodic inverter read, and no
+`inverter` message appears in the spy feed. The three `hal/inverter.Run`
+goroutines sit in `select`. Status 3 is "locked" and 5 "confirming locking"
+(`sideCheckLocking`); which one the inverters are in is not known.
+
+Leads:
+
+- `/var/log/inverterN_error_<time>.csv`: the app writes one when the fault
+  words in registers 4000-4099 (`0x0FA0`-`0x1003`) are non-zero. Its columns
+  are the raw block and seven decoded fault groups, so it maps fault bits
+  to registers. `TAP_MODBUS=addr` produces one.
+- `inverter_factory` is read by `sidecar.ReadInverterType` and parsed as JSON.
+  It probably selects the inverter make (hisolar / INVT / BST); the stub
+  writes `0`.
+- Commands from the app side need the e2e tunnel. `e2e-relay.service` runs the
+  relay in the guest, but the firmware has never called the sandbox API in the
+  configured state (the request log holds only `/generate_204`), so it has no
+  relay session and `emaldo_re.e2e` cannot reach it yet.
 
 ## Build from scratch
 
