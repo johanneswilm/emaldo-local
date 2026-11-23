@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package config holds the device-local configuration for emaldo-local.
 //
 // The config file lives at /root/config.toml on the module (same path the

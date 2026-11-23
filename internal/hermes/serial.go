@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Serial + Modbus RTU over a tty. Pure stdlib ioctl via syscall — no
 // external termios dependency. Only Linux/ARM is a build target, but the
 // code compiles on any Unix.

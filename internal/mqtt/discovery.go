@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // HA discovery: publishes Home Assistant MQTT discovery messages for the
 // entities in telemetry.State, and republishes them on reconnect and on
 // config change.

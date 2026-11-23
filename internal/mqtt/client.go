@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package mqtt is a minimal self-contained MQTT 3.1.1 client:
 // CONNECT/PUBLISH/SUBSCRIBE/UNSUBSCRIBE/PING, QoS 0 and 1, TLS or plain,
 // auto-reconnect with backoff. Enough for telemetry publishing + command

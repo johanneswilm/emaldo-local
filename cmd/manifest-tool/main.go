@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // manifest-tool: create ed25519 keys and sign emaldo-local OTA
 // manifests.
 //

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package display drives the module's e-ink panel (/dev/fb0) with a live
 // status page: SOC, battery power + direction, grid, PV, faults, clock.
 //

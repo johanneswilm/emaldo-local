@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package bled is the BLE provisioning channel (FW-1: placeholder).
 //
 // Design: reuse the vendor's BLE GATT surface (fixed AES-256-CBC key/IV,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // emaldo-local — community firmware for the Emaldo Power Core IoT module.
 //
 // Replaces the vendor cloud binary with a fully local one: web UI for

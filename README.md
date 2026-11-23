@@ -17,7 +17,7 @@
 > the update path still works — treat every flash as potentially
 > unrecoverable without hardware access (UART console).
 
-License: MIT (see LICENSE).
+License: GPL-3.0-only (see LICENSE) - chosen specifically for its anti-tivoization clause: anyone shipping device firmware derived from this code must provide the Installation Information needed to run modified firmware on the device. This project exists to keep Emaldo batteries open, not to enable locking them down further.
 
 A free replacement for the vendor cloud binary on the Emaldo "Power Core"
 home battery's IoT module: fully local operation, a web UI to configure

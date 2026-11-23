@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Simulated telemetry source: when hardware.simulate is set, produces
 // plausible battery telemetry (PV sine curve over the day, SOC drift,
 // grid = load + PV - battery) so the web UI, MQTT, and e-ink display

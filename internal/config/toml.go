@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Minimal TOML subset: sections, string/int/bool values, comments.
 // Covers everything Config needs; full TOML is deliberately not supported
 // to keep the binary dependency-free.

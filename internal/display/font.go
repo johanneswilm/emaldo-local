@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 package display
 
 // font8x8 is a compact fixed 8x8 bitmap font for ASCII 32..126.

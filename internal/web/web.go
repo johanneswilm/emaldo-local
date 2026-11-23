@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package web serves the setup wizard, the single-page UI and the REST
 // API. Auth: bearer token or session cookie; everything except
 // /api/v1/setup and static assets requires auth once the admin password

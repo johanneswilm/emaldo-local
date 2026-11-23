@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package hermes talks to the battery over the internal serial bus.
 //
 // FW-1 scope: read-only Modbus RTU polling of the inverter data block

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Johannes Wilm
+//
 // Package ota: signed self-update. Full cycle: fetch manifest -> verify
 // ed25519 signature -> download binary -> verify sha256 -> atomic replace
 // of our own executable -> re-exec. The vendor update machinery lived in
