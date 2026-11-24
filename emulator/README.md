@@ -14,14 +14,30 @@ and protocol experiments.
 > advertising and waits in `tower/connfork` for the cloud side of the e2e
 > tunnel. Everything else works too: the fake BMS cabinet registers over vcan,
 > the app attaches to the cabinet FIFOs, the network/backlight/screen gates are
-> emulated, and pprof is live (the app binds **:16061**, not 6060). Current
-> milestone: the e2e tunnel. The sandbox hands the app relay creds pointing at
-> `10.0.2.2:1050/1051` (the host, where the production `e2e_relay.py` listens)
-> and the app does reach the sandbox API, but the relay has not registered a
-> device session from the VM yet - that gates the FCR/MQTT pokes and the OTA
-> round-trip. QEMU user-mode was abandoned midway (timing races);
-> the supported path is **QEMU system-mode** (full ARM VM). The notes on why
-> are kept at the bottom - they will save you from re-trying it.
+> emulated, and pprof is live (the app binds **:16061**, not 6060).
+>
+> **Correction (2026-11-24): the app never reaches the cloud login, and the first
+> reason is a bind problem, not a policy problem.** The firmware's HTTP/2 client
+> sets `SO_BINDTODEVICE eth0`, so it **cannot connect to loopback at all**: with
+> that option set, connects to `127.0.0.1:443`, `1.1.1.1:443` and `8.8.8.8:443`
+> (all of which is where our sandbox and DoH sinkholes listen, via `lo` aliases)
+> rot in `SYN-SENT`, while `10.0.2.3:443` connects instantly. Therefore the
+> netmonitor DoH gate (`linkprobe/doh_gate.go` -> `https://1.1.1.1:443/dns-query`,
+> `https://8.8.8.8:443/dns-query`) never completes, the link is never marked
+> online, and the code path that resolves/dials the vendor hostnames never runs -
+> `SB_LOG` stays empty and no cloud/HTTP client goroutine ever appears in pprof.
+> Fix: bind the sandbox API and the DoH fronts to an **on-link eth0 address**
+> (`eth0` carries `10.0.2.15/24` plus a secondary `10.0.2.3/24`); containment is
+> unaffected because `restrict=on` blocks only real outbound traffic. Second,
+> independent gate: the state machine parks in `Unconfigured`
+> (`staterunners.(*Unconfigured)`), and the encrypted `baseinfo` record
+> (`/root/filedb/baseinfo_v1`, 1900 B) is deterministic, not compressed, **not**
+> identity-keyed (changing every identity value leaves its md5 unchanged) and is
+> not decoded by any secret we hold. Evidence and routes:
+> `docs/EMALDO_STATE_GATE.md` in this repo and "The state-machine gate" below.
+> QEMU user-mode was abandoned midway (timing races); the supported path is
+> **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom -
+> they will save you from re-trying it.
 
 ## Architecture
 
