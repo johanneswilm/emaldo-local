@@ -3,9 +3,14 @@ enable_pprof = true                      # pprof on :16061
 
 # The app leaves its "Unconfigured" wizard state - and only then starts the
 # cabinet/battery/inverter side (hermes) - once these five are non-empty.
-# Any values do; base_url/data_url point at the sandbox via /etc/hosts.
-app_id = "sandboxapp"
-app_secret = "sandboxsecret0123456789abcdef0123"
+# base_url/data_url point at the sandbox via /etc/hosts.
+# app_secret is used as an AES key for every cloud request: it must be exactly
+# 32 bytes and equal to APP_SECRET in sandbox_api.py. With any other length the
+# app runs but every cloud call fails before it opens a connection (no API
+# requests, no e2e relay session).
+# app_id is the 32-character id e2e clients put in their packets.
+app_id = "sandboxappsandboxappsandboxappsa"
+app_secret = "FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
 base_url = "https://api.emaldo.com"
 data_url = "https://dp.emaldo.com"
 cloud_token = "sandboxtoken"

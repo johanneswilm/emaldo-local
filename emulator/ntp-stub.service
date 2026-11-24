@@ -1,0 +1,12 @@
+[Unit]
+Description=Emaldo emulator: in-guest NTP responder on the app's hard-coded time servers
+After=network-online.target systemd-networkd.service
+Before=emaldo.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/ntp_stub.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

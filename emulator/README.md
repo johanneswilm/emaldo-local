@@ -373,22 +373,37 @@ What the app does with both in place (per inverter, in order):
 +-3600). With the switches reported on at start, the app writes `0` to all
 three files about 6 s after start and leaves them off.
 
-**Polling was seen once.** In the first run with the MCU directory the app
-read each inverter about every 2 s for 35 s (51 `inverter/N` `readdata` and 51
-`readregisters` messages in the spy feed), then stopped, and it has not polled
-in later runs. The decoded fields: `FanStatus`, `AccessToGridEnabled`,
-`PowerOnGrid`, `AccessToBatteryEnabled`, `PowerOnBattery`,
-`AccessToMPPTEnabled`, `PowerOnMPPT`, `RealPowerOnMPPT`, `AccessToLineEnabled`,
-`PowerOnLine`, five temperatures, `VoltageOnBus`, `VoltageOnPV`,
-`VoltageOnBattery`, `CurrentOnBattery`, `GridFrequency`, `State`,
-`IsPVSurplus`. All 0 with the register store, except `AccessToLineEnabled`.
+**Why the inverters were held off: water alarm.** `fake_bms.py` sent 0 in
+the cabinet status reply's water sensor word. Below 620 the app raises error
+`0400` (`Cabinet.ProcessWaterSensorStatus`), switches the inverters off about
+40 s later, stops polling them and remembers that in `/root/db`
+(`invs_ctrl_status`, `global_errors`), so later boots start switched off.
+`0401` is `CabinetHealthCheckFailed`. With a dry sensor (default now) and a
+reset database (`systemctl stop emaldo; rm -rf /root/db/*`) the app writes `1`
+to `inverter_0..2`, polls each inverter about every 0.7 s without stopping, and
+writes power setpoints: `0x0FD8`=`0x0FDD`=533 about 16 s after start, back to 0
+about 40 s later. Error `8003` stays set; it does not stop this.
 
-Why it stays off, as far as known: the app's database (`/root/db/db`) holds
-`invs_ctrl_status` = off and `global_errors` = `["E010","0400"]` (base64 in the
-file; `8003` also appears at times). The limp-mode runners (`limpops`) are
-active. What raises those codes is not known; the EV gun port and the
-all-zero inverter state are the candidates. HAL status 3 is "locked" and 5
-"confirming locking" (`sideCheckLocking`).
+Inverter registers, from a run with `TAP_MODBUS=addr` (decimal addresses):
+
+| Register | Field in the spy feed |
+|---|---|
+| 4017 | `PowerOnGrid` |
+| 4018 | `GridFrequency`, x0.001 Hz |
+| 4021 | `CurrentOnBattery` (x100 in the feed) |
+| 4022 | `PowerOnBattery`, sign inverted |
+| 4027 | `PowerOnLine` |
+| 4030 | `VoltageOnPV` |
+| 4032 | `PowerOnMPPT` |
+| 4035-4040 | cooler, PV heatsink, boost 1-3, transformer temperatures |
+| 4042 | `VoltageOnBus` |
+| `0x0FD3` block | `AccessToGrid/Battery/MPPT/LineEnabled` |
+
+Not mapped: `State`, `FanStatus` (201 in that run), `VoltageOnBattery`
+(8784 in that run), `RealPowerOnMPPT`, `IsPVSurplus`. In `tap_regs` a value
+`=0x0fd8` makes a register follow one the app wrote, so measured power can
+track the setpoint. Simulated grid import or export on the b-sensor (3 kW
+either way) did not change the app's setpoints.
 
 ### Grid meter (b-sensor), port `/dev/ttyCH9344USB1`
 
@@ -418,29 +433,46 @@ did not bring the inverters back.
 - `inverter_factory` is read by `sidecar.ReadInverterType` and parsed as JSON.
   It probably selects the inverter make (hisolar / INVT / BST); the stub
   writes `0`.
-- Commands from the app side need the e2e tunnel, and the tunnel needs the
-  app's cloud stage, which does not start in the configured state. Found and
-  fixed on the way:
-  - The app resolves its link-check name by **DNS-over-HTTPS**: `POST
-    /dns-query` to `1.1.1.1:443` / `8.8.8.8:443`. Those are local aliases in
-    the jail, so `sandbox_api.py` now answers `/dns-query` with the DNS sink's
-    rules and logs it as `doh ...` in `/var/log/dns_queries.log`. The sandbox
-    certificate needs `IP:1.1.1.1,IP:8.8.8.8` (and `1.0.0.1`, `8.8.4.4`) in its
-    subjectAltName, and the sandbox must listen on `0.0.0.0`.
-  - It also probes `https://www.gstatic.com/generate_204`; the name is now in
-    `dnssink.conf` and must be in the certificate too.
-  - The app's sockets appear bound to `eth0`: names that resolve to `127.0.0.1`
-    are not reached, names that resolve to the guest's own `10.0.2.15` are.
-    In the guest the probe names, the vendor zone and `/etc/hosts` now point at
-    `10.0.2.15` (the repo files still say `127.0.0.1`).
-  Still failing after that: `mqttcred ... BrokerURLSource.Fetch`,
-  `rebootlog ... submit` and `onlineconfstatusgetter` sit in `retryer.wait`
-  and make no TCP connection at all, so they fail before the network. The
-  likely cause is that the configured state was written straight into
-  `config.toml` instead of going through registration. `log_level = 5` in
-  `config.toml` adds no log lines.
-- Sending e2e packets (`emaldo_re.e2e`: power-flow read, emergency charge)
-  straight to the app's UDP ports (`9332` and its second port) gets no answer.
+### Cloud stage and the e2e relay
+
+What it took before the app called the sandbox API and kept a relay session:
+
+- **`app_secret` must be 32 bytes** and equal to `APP_SECRET` in
+  `sandbox_api.py`. It is the AES key of every cloud request. With a 33-byte
+  value the app ran, but each cloud call failed before opening a connection.
+  This was the real blocker; the items below were found first.
+- **DNS-over-HTTPS.** The app resolves its link-check name by `POST
+  /dns-query` to `1.1.1.1:443` / `8.8.8.8:443` (local aliases in the jail).
+  `sandbox_api.py` answers with the DNS sink's rules (`doh ...` lines in
+  `/var/log/dns_queries.log`). The sandbox certificate needs `IP:1.1.1.1,
+  IP:8.8.8.8,IP:1.0.0.1,IP:8.8.4.4` and `www.gstatic.com` in its
+  subjectAltName, and the sandbox listens on `0.0.0.0`.
+- **eth0-bound sockets.** Names that resolve to `127.0.0.1` are not reached;
+  the guest's own `10.0.2.15` is. In the guest the probe names, the vendor
+  zone and `/etc/hosts` point at `10.0.2.15` (the repo files still say
+  `127.0.0.1`).
+- **NTP to fixed addresses** (`216.239.35.0/4`, `162.159.200.123`):
+  `ntp_stub.py` / `ntp-stub.service` claims them on eth0 and answers.
+- **Relay keep-alive.** The alive reply carries an AES-CBC body (key =
+  the end's `end_secret`, IV = the request nonce). `e2e_relay.py` used a
+  captured body, which the app cannot decrypt, so it logged in again every
+  10 s. The relay now seals `{"__time":...}` with the device's secret from
+  `sandbox_e2e.json`; the session is stable (alive every 10 s, no re-login).
+  `e2e_relay.py` here is `scripts/e2e_relay.py` with paths from `E2E_BASE`.
+
+Calls seen once it works: `e2e-bmt-login`, `iot-online`, `get-global-config`,
+`get_master_switch`, `get-sync-24h`, `submit-sync-24h`,
+`submit-bmt-low-freq-data`, `insert-bmt-reboot-log-many`,
+`get-latest-ver-url`, `get-default-price-percent`,
+`get-balance-contract-status`, `metrics/auth/*`, `update-region-v2`.
+
+**Not working: commands.** `emaldo_re.e2e` packets (power-flow read `0x30`,
+emergency charge `0x01`, override subscribe `0x1b`, battery `0x06`) reach the
+app through the relay, with wake and heartbeat forwarded too, and the app
+sends nothing back. Sent straight to its UDP ports they are ignored as well.
+From the code: a frame's first byte is version/type (`0xD_` = request), the
+user path needs the proxy option and decrypts the body with AES; which check
+drops these frames is not known.
 
 ## Build from scratch
 

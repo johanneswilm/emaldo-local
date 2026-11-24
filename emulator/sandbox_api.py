@@ -79,6 +79,10 @@ def fake_result(path):
     if "e2e-bmt-login" in p:
         r = dict(E2E)
         r["addtime"] = gm
+        # Without a lifetime the app treats the credentials as expired and
+        # logs in again every 10-20 s.
+        r["expires_in"] = 86400
+        r["expired_at"] = int(time.time()) + 86400
         return r
     if "get-latest-ver-url" in p:
         return {"versions": [], "count": 0, "gmtime": gm}
