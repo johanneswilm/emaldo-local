@@ -234,8 +234,11 @@ block). This is the transport needed to replay a diagchan activation once its
 command is known.
 
 - OTA: `/bmt/get-latest-ver-url` -> download -> md5 -> `[RootfsUpgrade]` /
-  `versions`, with `user-ota-preference`. The sandbox can serve our own image
-  for the flash/rollback test; nothing leaves the VM.
+  `versions`, with `user-ota-preference`. **Rootfs updates are APT-based**
+  (`rootfs.UpgradeWithApt`, `bootstrapAptKeyring`, vendor mirror), so a custom
+  rootfs needs the vendor apt key; per-device inverter/BMS firmware OTA is
+  md5-only but runs on other MCUs. Use OTA to test *our* firmware's own signed
+  self-update once it runs on the module, not to install it on a live battery.
 
 ## What is still not emulated
 
