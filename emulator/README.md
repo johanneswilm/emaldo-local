@@ -484,7 +484,9 @@ python3 /sandbox/e2e_try.py charge on    # emergency charge
 python3 /sandbox/e2e_try.py charge off
 python3 /sandbox/e2e_try.py slots 236    # override: discharge while above 20 %
 python3 /sandbox/e2e_try.py slots clear
-python3 /sandbox/e2e_try.py sell on 5    # manual selling (no effect so far)
+python3 /sandbox/e2e_try.py sellback on  # the "sell back to grid" setting
+python3 /sandbox/e2e_try.py sell on 5    # manual selling, 5 kWh (needs sellback on)
+python3 /sandbox/e2e_try.py raw 0x81     # any command, replies decrypted
 ```
 
 Measured: `charge on` is acknowledged, and within 2 s the app writes
@@ -556,9 +558,19 @@ Notes:
   flow comes from the packs' current, not from the inverter.
 - With full packs (100 % SOC) and PV, the app reports 200 W solar and writes
   nothing.
-- `e2e_try.py sell on 5` (manual selling) is acknowledged but changes nothing,
-  and reading its state back returns nothing. `manualSelling.validatePreconditions`
-  has several checks; which one fails is not known.
+- **Manual selling works once "sell back to grid" is on.** The reply to the
+  selling command (`0x80`) is `[ok, error bits u16 LE]`, which the client
+  ignores. Bits, from `manualSelling.validatePreconditions`: `0x0800` sell back
+  to grid is disabled, `0x0008` bsensor is missing, `0x0040` selling protection
+  limit reached, `0x0080` battery SOC too low. A fresh device answers
+  `01 00 08`. After `e2e_try.py sellback on` (command `0x05`), `sell on 5` is
+  answered `01 00 00`, the app writes `0x0FD8` = -3600 and 8 s later `0x0FDD`
+  = -3600 to each inverter, its power flow shows 10.8 kW from the battery to
+  the grid, and the state (`0x81`) counts up: target 5.0 kWh, sold 0.1, 0.3 ...
+  `sell off` puts `0x0FDD` back to 3600 at once and `0x0FD8` to 0 about 80 s
+  later; the model keeps exporting during that gap because it follows `0x0FD8`.
+- `e2e_try.py raw <type> [hex]` sends any command and prints every reply
+  decrypted - how the error bits above were found.
 - `plant_run.py` reads the flow about a minute after a change; right after a
   command the figures are still moving (the `charge on` row's battery and load
   figures were not settled).
