@@ -20,7 +20,7 @@ ExecStartPre=-/usr/sbin/ip addr del 8.8.8.8/32 dev lo
 # start before dnshijack, which binds those two literals.
 # DoH answers must point at an address the firmware can dial: its client sets
 # SO_BINDTODEVICE eth0, so never answer with a loopback address.
-Environment=DNSINK_DOH=10.0.2.3:443
+Environment=DNSINK_DOH=10.0.2.15:443
 Environment=DNSINK_SANDBOX=10.0.2.3
 Environment=DNSINK_CERT=/sandbox/doh.crt
 Environment=DNSINK_KEY=/sandbox/doh.key

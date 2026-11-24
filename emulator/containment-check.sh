@@ -56,21 +56,24 @@ s.sendall(b"GET /generate_204 HTTP/1.1\r\nHost: api.emaldo.com\r\nConnection: cl
 print(s.recv(64).split(b" ")[1].decode())
 PY
 )" "204"
-chk "sandbox api not on loopback" "$(ss -lntp 2>/dev/null | grep -cE "127.0.0.1:443 ") " "0"
+r=$(ss -lntp 2>/dev/null | grep -c "127.0.0.1:443 ")
+chk "sandbox api not on loopback" "$r" "0"
 chk "DoH tap owns the literals" "$(ss -lntp 2>/dev/null | grep -cE "1.1.1.1:443 |8.8.8.8:443 ")" "2"
+# Probe the front the way the firmware does: POST /dns-query with a raw
+# application/dns-message body. (The front does not parse ?dns= GET queries.)
 chk "DoH front answers" "$(python3 - <<PY
-import base64, socket, ssl, struct
-q = struct.pack(">HHHHHH", 7, 0x0100, 1, 0, 0, 0) + b"\x03www\x07google\x03com\x00" + struct.pack(">HH",1,1)
-url = base64.urlsafe_b64encode(q).decode().rstrip("=")
+import socket, ssl, struct
+q = struct.pack(">HHHHHH", 7, 0x0100, 1, 0, 0, 0) + b"\x03www\x06google\x03com\x00" + struct.pack(">HH",1,1)
 c = ssl.create_default_context(); c.load_verify_locations("/sandbox/doh.crt")
 s = c.wrap_socket(socket.create_connection(("1.1.1.1",443),5), server_hostname="one.one.one.one")
-s.sendall(("GET /dns-query?dns=" + url + " HTTP/1.1\r\nHost: 1.1.1.1\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nConnection: close\r\n\r\n").encode())
+s.sendall(b"POST /dns-query HTTP/1.1\r\nHost: 1.1.1.1\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: " + str(len(q)).encode() + b"\r\nConnection: close\r\n\r\n" + q)
 d = b""
 while True:
     ch = s.recv(2048)
     if not ch: break
     d += ch
-body = d.split(b"\r\n\r\n",1)[-1]
+parts = d.split(b"\r\n\r\n",1)
+body = parts[1] if len(parts) > 1 else b""
 print(".".join(str(x) for x in body[-4:]) if len(body) > 12 else "EMPTY")
 PY
 )" "10.0.2.3"
@@ -90,5 +93,5 @@ for addr in ["10.0.2.3", "1.1.1.1", "8.8.8.8", "127.0.0.1"]:
         print("NOTE %s:443 unreachable from an eth0-bound socket: %r" % (addr, exc))
     s.close()
 PY
-echo "== resolved names so far (tripwire):"; sed -n "s/.*qname=\([^ ]*\).*/\1/p" /var/log/dns_queries.log | sort | uniq -c | sort -rn | head -8
+echo "== resolved names so far (tripwire):"; grep -o "qname=[^ ]*" /var/log/dns_queries.log | sort | uniq -c | sort -rn | head -8
 exit $fail'

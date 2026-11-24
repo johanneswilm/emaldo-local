@@ -16,25 +16,26 @@ and protocol experiments.
 > the app attaches to the cabinet FIFOs, the network/backlight/screen gates are
 > emulated, and pprof is live (the app binds **:16061**, not 6060).
 >
-> **Correction (2026-11-24): the app never reaches the cloud login, and the first
-> reason is a bind problem, not a policy problem.** The firmware's HTTP/2 client
-> sets `SO_BINDTODEVICE eth0`, so it **cannot connect to loopback at all**: with
-> that option set, connects to `127.0.0.1:443`, `1.1.1.1:443` and `8.8.8.8:443`
-> (all of which is where our sandbox and DoH sinkholes listen, via `lo` aliases)
-> rot in `SYN-SENT`, while `10.0.2.3:443` connects instantly. Therefore the
-> netmonitor DoH gate (`linkprobe/doh_gate.go` -> `https://1.1.1.1:443/dns-query`,
-> `https://8.8.8.8:443/dns-query`) never completes, the link is never marked
-> online, and the code path that resolves/dials the vendor hostnames never runs -
-> `SB_LOG` stays empty and no cloud/HTTP client goroutine ever appears in pprof.
-> Fix: bind the sandbox API and the DoH fronts to an **on-link eth0 address**
-> (`eth0` carries `10.0.2.15/24` plus a secondary `10.0.2.3/24`); containment is
-> unaffected because `restrict=on` blocks only real outbound traffic. Second,
-> independent gate: the state machine parks in `Unconfigured`
-> (`staterunners.(*Unconfigured)`), and the encrypted `baseinfo` record
-> (`/root/filedb/baseinfo_v1`, 1900 B) is deterministic, not compressed, **not**
-> identity-keyed (changing every identity value leaves its md5 unchanged) and is
-> not decoded by any secret we hold. Evidence and routes:
-> `docs/EMALDO_STATE_GATE.md` in this repo and "The state-machine gate" below.
+> **Update (2026-11-24 19:00): the cloud login is reached.** Two gates
+> opened this evening. (1) The firmware's HTTP/2 client sets
+> `SO_BINDTODEVICE eth0` and cannot connect to loopback at all - with that
+> option, connects to `127.0.0.1:443`, `1.1.1.1:443`, `8.8.8.8:443` rot in
+> `SYN-SENT` while an on-link `10.0.2.15`/`10.0.2.3` address works. Everything
+> (sandbox API, DoH front, zone answers) therefore lives on eth0; the DoH
+> literals are claimed on eth0 and NATed to the front by `dnshijack`. The front
+> and the API used to collide on `10.0.2.3:443`; the front now runs on
+> `10.0.2.15:443`. (2) The state machine's `Unconfigured` gate is **config
+> identity**, not the encrypted `baseinfo` record: `appdata.IsConfigured`
+> requires `app_id`/`app_secret`/`cloud_token`/`home_id`/`base_url`, fed from
+> `/root/config.toml`. With those set the app runs `(*Configured)` and calls
+> `/bmt/e2e-bmt-login`, `/bmt/get-electricity-price-percents-v2`,
+> `/bmt/metrics/auth/get-forecast-solar` (see `/sandbox/api_req.log`). The next
+> gate it hit was `/dev/ttymxc2` (the MCU UART, `iot.go:546`); `ttymxc2-stub.py`
+> provides a pty and the app polls it every ~4 s. `baseinfo_v1` is the app's
+> own filedb bucket store and grows when the identity is persisted - do not try
+> to forge it. Full analysis: `docs/EMALDO_STATE_GATE.md`; bench notes:
+> `~/src/homeassistant/emaldo-capture/HANDOFF_EMULATOR.md` §4b.
+>
 > QEMU user-mode was abandoned midway (timing races); the supported path is
 > **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom -
 > they will save you from re-trying it.
@@ -55,7 +56,9 @@ and protocol experiments.
   ├─ /usr/sbin/{reboot,systemctl,...} -> ONE multi-call stub (tool-stub.sh; #1)
   ├─ /usr/sbin/modprobe        -> modprobe-stub.sh      (#4: fake btusb reload)
   ├─ /opt/vmfb/vmfb.ko         -> fake /dev/fb0 (e-ink capture, see vmfb/)
-  ├─ dns-sink.service          -> dnssink.py            sinkhole DNS :53 (containment)
+  ├─ dns-sink.service          -> dnssink.py            sinkhole DNS :53 + DoH front :443 (containment)
+  ├─ dnshijack.service         -> dnhijack.py           NAT 1.1.1.1/8.8.8.8:443 -> DoH front
+  ├─ ttymxc2-stub.service      -> ttymxc2-stub.py       pty /dev/ttymxc2 (MCU UART; gate #5)
   ├─ portal204.service         -> portal204.py          captive-portal 204 on :80
   └─ /etc/systemd/network/20-emu.network  static eth0 + resolver aliases (containment)
 ```
@@ -180,12 +183,38 @@ tail -20 /var/log/dns_queries.log                                               
    request (tool-stub rule 1) - useful as instrumentation (the `SUPPRESSED` line
    marks the exact decision point) but it does not get you past gate #4.
 
+5. **State gate (`Unconfigured`) and the MCU UART.** This one is not a reboot
+   loop: the app sits in `staterunners.(*Unconfigured)` forever. It is opened by
+   **config identity**, not by the `baseinfo_v1` record: `AppWizard.update`
+   calls `appdata.IsConfigured`, which is true iff `GetAppID`, `GetAppSecret`,
+   `GetHttpBaseURL`, `GetCloudToken`, `GetHomeID` are all non-empty, and
+   `appdata.FromConf` fills those from the main config (`app_id`, `app_secret`,
+   `base_url`, `cloud_token`, `home_id`; also `data_url`, `model`). Put the
+   public app id/secret plus a lab cloud token in `/root/config.toml` and the
+   app moves to `(*Configured)` and starts real `/bmt/...` API calls
+   (`/sandbox/api_req.log`). The very next moment it FATALs at
+   `iot.go:546 - failed to create mcu sock` = `openat("/dev/ttymxc2")`: the MCU
+   UART must exist. `ttymxc2-stub.py` (unit `ttymxc2-stub.service`,
+   `Before=emaldo`) creates a pty, symlinks it to `/dev/ttymxc2`, and logs the
+   app's frames to `/sandbox/ttymxc2_traffic.log` (~4 s cadence:
+   `00 00 01 06 00 15 00 05 10 00 00 06`). The stub does not answer yet; the
+   app still proceeds and runs the cloud stage.
+   Notes: `baseinfo_v1` is the app's own filedb bucket store and grows when the
+   identity is persisted (1900 -> 2743 B) - do not forge it. The netmonitor
+   classifies a link up via `BaseLink.Online()` (cached bool), refreshed only
+   while the base link's `LinkState` is `ok`, from the prober's `internetOK`:
+   a successful DoH exchange through the 1.1.1.1/8.8.8.8 fronts, or an HTTP 204.
+   Do not read `netmonitor.go:81` / `appwizard.go:101` as failures - both are
+   the normal `runtime.selectgo` waits.
+
 After the gates: the app walks to `iot.Start` (pprof shows `iot.go:1539`),
 opens 9 leveldb stores, binds its tower UDP socket (`*:9332`), starts BLE
-advertising and parks in `tower/connfork.(*downstream).Recv`. The API stage is
-live too - the network trace shows `connect(127.0.0.1:443)` (the sandbox, via
-`/etc/hosts` entries for `api.emaldo.com`/`dp.emaldo.com`) alongside its DoH and
-NTP probes. `sandbox_api.py` hands out e2e creds with
+advertising and parks in `tower/connfork.(*downstream).Recv`. With the state
+gate open (gate #5) it also runs `staterunners.(*Configured)` +
+`OperationCommon` + `ConfiguredDisplay` + `cloudr/updater` + `msct/e2e` and
+issues `/bmt/e2e-bmt-login`, `/bmt/get-electricity-price-percents-v2`,
+`/bmt/metrics/auth/get-forecast-solar` to the sandbox API on `10.0.2.3:443`
+(DoH front on `10.0.2.15:443`; the two used to collide on `10.0.2.3:443`). `sandbox_api.py` hands out e2e creds with
 `host 10.0.2.2:1050 / util_host 10.0.2.2:1051` - under QEMU user-net 10.0.2.2 is
 the host, where the production relay (`../emaldo-capture/e2e_relay.py`, UDP
 1050/1051) already runs; set `E2E_RELAY=127.0.0.1` to keep the tunnel in the

@@ -4,6 +4,57 @@ The emulator runs the official app end to end (reboot gates closed, fake BMS
 registered, BLE adapter `UP RUNNING`), but the app never reaches its cloud login.
 This document records what has been measured, so nobody re-derives it.
 
+## RESOLVED (2026-11-24 ~19:00): the gate is config identity, not baseinfo
+
+The state machine is open. Two answers, both from the decompiled decision loops
+(and confirmed live):
+
+1. **What makes netmonitor call a link `up`:** `link.Online()` only reads the
+   cached bool at `BaseLink+0x80`. It is refreshed (only while the base link's
+   `LinkState` is `ok`) from the link's OnlineFn, which is the prober's
+   `internetOK`: when DoH is enabled, a successful DoH exchange through the
+   `1.1.1.1`/`8.8.8.8` fronts (TLS checked against `/sandbox/doh.crt`);
+   otherwise (or as a fallback) an HTTP GET of the 204 URL. `pickMaster` and
+   `anyRoutableLink` look at nothing else. Separately `linkprobe.runCycle`
+   tracks a per-interface `ProbeState`: `cold-boot(0)`, `warmed(1)`,
+   `offline(2)`; no usable IPv4 / ARP-gateway failure makes it offline, an
+   http204 success makes it warmed, saturation downgrades it. `netmonitor.go:81`
+   (pc `0x8c8373`) is the normal `runtime.selectgo` wait over the 10 s / 30 s /
+   2 h / 12 h tickers and one channel - **not** a failure point: the 10 s case
+   runs `refresh`+`pickMaster`+`applyResolvConf`, the 30 s case
+   `evaluateAndApply`+`ensureGsmUp`+`ensureClock`+`maybePostEID`.
+2. **What makes appwizard dispatch a non-Unconfigured state:**
+   `AppWizard.update` calls itab slot `0x7c` of the interface at `wizard+0x4c`.
+   The only itab with `appdata.(*appData).IsConfigured` in that slot is
+   `0x13b1b10` (interface type `0x114eee0`), and `appdata.FromConf` materialises
+   exactly that itab. `IsConfigured` is true iff `GetAppID`, `GetAppSecret`,
+   `GetHttpBaseURL`, `GetCloudToken`, `GetHomeID` are all non-empty - and
+   `FromConf` fills those from the **main config**: TOML `app_id`,
+   `app_secret`, `base_url`, `cloud_token`, `home_id` (also `data_url`,
+   `model`). False -> the Unconfigured state object; true -> Configured unless
+   the OTA atomic or the bool behind `wizard+0x64` picks Updating/TestMode.
+   `appwizard.go:101` (pc `0x92824b`) is likewise the normal post-update select.
+
+Live proof: putting the public app id/secret (already documented in STATE.md)
+plus a lab `cloud_token` in `/root/config.toml` moved the app to
+`staterunners.(*Configured)` + `OperationCommon` + `ConfiguredDisplay` +
+`cloudr/updater` + `msct/e2e`, and produced the first real app API requests:
+`/bmt/e2e-bmt-login/<APP_ID>`, `/bmt/get-electricity-price-percents-v2/...`,
+`/bmt/metrics/auth/get-forecast-solar/...` in `/sandbox/api_req.log`. The very
+next FATAL, `iot.go:546 failed to create mcu sock`, is `openat("/dev/ttymxc2")`
+(the MCU UART); a pty stub (`emulator/ttymxc2-stub.py`, unit
+`ttymxc2-stub.service`) provides it and the app then polls the MCU every ~4 s.
+`baseinfo_v1` is the app's own filedb bucket store: it grew 1900 -> 2743 bytes
+and its md5 changed when the identity was persisted. It is not an input to
+forge; the "unreadable record" is the store's on-disk envelope.
+
+One bench bug mattered at the same time: the DoH front and `sandbox_api` both
+bound `10.0.2.3:443`, so whichever restarted first won the port (the DoH gate
+sometimes hit the API, and the API disappeared when the front won). The front
+now lives on **`10.0.2.15:443`**, the API stays on `10.0.2.3:443`.
+`containment-check.sh` is 20/20 PASS (two bugs fixed in it too: a malformed
+`\x07google` label length and a stray space).
+
 ## Symptom
 
 - pprof (`http://127.0.0.1:16061/debug/pprof/goroutine?debug=2` inside the guest;
@@ -66,7 +117,7 @@ Two tool bugs found while measuring this:
    interfaces. Removed, and `bind_ok()` now refuses binds that are not local
    interface addresses and logs the refusal.
 
-## Gate 1: the baseinfo store
+## Gate 1 - DISPROVED: the baseinfo store is not the gate
 
 `/root/filedb/baseinfo_v1` - 1900 bytes, mode 0600 - is the baseinfo bucket that
 holds the app's provisioning/identity state. In the binary the same bucket shows
@@ -164,20 +215,18 @@ decompile target for the envelope format.
    on-link eth0 address** and the DoH gate now completes. The state machine and
    the cloud stage are still not reached, so this route is exhausted as an
    explanation for `Unconfigured`.
-2. **Read the two decision loops in the binary**: `netmonitor.go:81`
-   (`(*netMonitor).Run`, the link classification) and `appwizard.go:101`
-   (`(*AppWizard).Run`, the state dispatch). Both are live in pprof, both have
-   every input we control in place - what decides their outcome? Use `dsm`
-   (Ghidra 12.2) on those two functions rather than the store codec.
-3. **Recover the codec/key derivation** from the binary: start at the store write
-   helper 0x1052d8, or reconstruct Go types to resolve the interface dispatch at
-   0x1795c8.
-4. **Transplant the live battery's `filedb`**: needs a read primitive on the
-   device (OTA is write-only); the candidate channel is the log upload /
-   `get-upload-token` flow the official app uses.
-5. **BLE provisioning**: BLE bring-up in the VM works - `h4_shim.log` counts 551
-   LE (OGF 0x08) commands, ending at `LE Set Advertise Enable` - so this route
-   needs a synthetic central behind the H4 shim, not a shim fix.
+2. **DONE (2026-11-24 19:00).** Both decision loops were decompiled with
+   Ghidra 12.2 after creating the pclntab functions (see the RESOLVED section
+   above): the state dispatch is `appdata.IsConfigured` fed from config, and the
+   link classification is `internetOK` (DoH gate or HTTP 204) behind
+   `BaseLink.Online()`. The addresses `netmonitor.go:81` and `appwizard.go:101`
+   are the normal select waits.
+3. ~~Recover the codec/key derivation~~ - moot for the state gate: the identity
+   is config, and `baseinfo_v1` is written by the app itself.
+4. ~~Transplant the live battery's `filedb`~~ - moot for the state gate.
+5. ~~BLE provisioning~~ - moot for the state gate (BLE is still needed for BLE
+   pairing features; bring-up in the VM works, ending at
+   `LE Set Advertise Enable`).
 6. **Unattributed traffic**: a client inside the guest POSTs
    `/generate_204` to the API every ~2 min and opens the two DoH pairs; it is
    not the firmware (my `probe-self` test line proves the writer is external to
