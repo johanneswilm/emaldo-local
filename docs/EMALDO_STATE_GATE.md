@@ -31,9 +31,30 @@ resolve and dial the vendor hostnames never runs. pprof agrees: the prober phase
 `linkprobe/http204` vs `linkprobe/doh_gate` + `dohresolver` appear, no
 cloud/HTTP client goroutine ever does.
 
-Fix direction: bind the API sandbox and the DoH fronts to an on-link eth0 address
-(`eth0` has `10.0.2.15/24` plus a secondary `10.0.2.3/24`). `restrict=on` blocks
-real outbound traffic only, so containment is preserved.
+Fix, installed in the image (2026-11-24, all verified by the DoH tap log):
+- `20-emu.network` claims `1.1.1.1/32` and `8.8.8.8/32` on **eth0** (slirp
+  answers ARP for every address on its subnet); `dns-sink.service` no longer
+  creates lo aliases for them (`ip addr del` instead of `ip addr add`) and
+  carries `Before=dnshijack.service`.
+- `dnshijack.service` (`/usr/local/bin/dnhijack.py`, pulled in with a `Wants=`
+  drop-in because `.wants/` copies are ignored and this image has no working
+  `systemctl enable`): socket-layer NAT from the resolver literals to the DoH
+  front, logging every accept and the byte count in each direction.
+- `dns-sink.service`: `DNSINK_DOH=10.0.2.3:443` (front on the unambiguous
+  address, never `0.0.0.0` - it would collide with the tap), `DNSINK_SANDBOX=10.0.2.3`,
+  and `dnssink.conf` answers the whole zone - vendor names, connectivity-probe
+  names and the resolver literals - with `10.0.2.3`.
+- `sandbox_api.py` gained a `SB_BIND` env (`SB_BIND=10.0.2.3` in the unit);
+  `/etc/hosts` maps `dp/api.emaldo.com` to `10.0.2.3`; `portal204.py` binds
+  `0.0.0.0:80` and logs the client address.
+
+Result: the DoH gate completes. `dnshijack.log` shows `relay ... ->
+('10.0.2.3',443)` pairs every ~2 min from the app plus one pair per boot, and
+`dns_queries.log` shows its connectivity probes answered `A 10.0.2.3`. The
+appwizard still parks in `Unconfigured` (`appwizard.go:101`) and the app still
+issues **zero** API requests, so the baseinfo gate below is the remaining one.
+pprof is reachable from the **host** at `127.0.0.1:16062` (guest 16061 answers
+nothing over loopback for a curl inside the guest in this build).
 
 Two tool bugs found while measuring this:
 1. `dnssink.rules()` merged built-in `DEFAULT_RULES` with the config and sorted by
@@ -79,15 +100,20 @@ accepted (`cfg_err = 0`) and no reboot.
 
 ## Control experiment: changing the DNS answer changes nothing
 
-Re-pointing the vendor zone from `127.0.0.1` to the non-loopback `10.0.2.3`
-(after fixing the config-override bug in `dnssink.py`, which is why an earlier
-attempt looked like it worked) and serving TLS there with the SAN cert produced
-**zero** app requests over ~37 minutes, and no change in state:
-`staterunners.(*Unconfigured)` + `UnconfiguredDisplay` in every pprof dump, no
-cloud/HTTP goroutine, and the `ss` sampler still showing only `SYN-SENT` sockets
-to `1.1.1.1` / `8.8.8.8` / `127.0.0.1` - none to `10.0.2.3`. The request lines
-that did appear in `SB_LOG` were our own probe client. So the blocker is the
-bind/interface problem in Gate 0, not the DNS answer.
+Measured 2026-11-24 ~14:00, i.e. **before** the interface fix in "Gate 0" above
+was complete - at that point the DoH front was still bound where an eth0-bound
+client could not reach it. Re-pointing the vendor zone from `127.0.0.1` to the
+non-loopback `10.0.2.3` (after fixing the config-override bug in `dnssink.py`,
+which is why an earlier attempt looked like it worked) and serving TLS there
+with the SAN cert produced **zero** app requests over ~37 minutes, and no change
+in state: `staterunners.(*Unconfigured)` + `UnconfiguredDisplay` in every pprof
+dump, no cloud/HTTP goroutine, and the `ss` sampler still showing only
+`SYN-SENT` sockets to `1.1.1.1` / `8.8.8.8` / `127.0.0.1` - none to `10.0.2.3`.
+The request lines that did appear in `SB_LOG` were our own probe client (proved
+later by a `probe-self` line at 15:44:16 with nothing else writing). So the
+blocker was the bind/interface problem in Gate 0, not the DNS answer - and even
+after Gate 0 was fixed the app still sends nothing, which is why the baseinfo
+gate is the remaining one.
 
 ## Static RE: what does and does not work
 
@@ -134,15 +160,27 @@ decompile target for the envelope format.
 
 ## Routes
 
-1. **Bind the sandbox API and the DoH fronts on an on-link eth0 address**
-   (`10.0.2.x`) instead of loopback aliases, restart the app, then re-sample the
-   appwizard state and `SB_LOG`. This is the only gate with a fix in reach.
-2. **Recover the codec/key derivation** from the binary: start at the store write
+1. **Done (2026-11-24): the API, DoH front and zone answers all moved onto the
+   on-link eth0 address** and the DoH gate now completes. The state machine and
+   the cloud stage are still not reached, so this route is exhausted as an
+   explanation for `Unconfigured`.
+2. **Read the two decision loops in the binary**: `netmonitor.go:81`
+   (`(*netMonitor).Run`, the link classification) and `appwizard.go:101`
+   (`(*AppWizard).Run`, the state dispatch). Both are live in pprof, both have
+   every input we control in place - what decides their outcome? Use `dsm`
+   (Ghidra 12.2) on those two functions rather than the store codec.
+3. **Recover the codec/key derivation** from the binary: start at the store write
    helper 0x1052d8, or reconstruct Go types to resolve the interface dispatch at
    0x1795c8.
-3. **Transplant the live battery's `filedb`**: needs a read primitive on the
+4. **Transplant the live battery's `filedb`**: needs a read primitive on the
    device (OTA is write-only); the candidate channel is the log upload /
    `get-upload-token` flow the official app uses.
-4. **BLE provisioning**: BLE bring-up in the VM works - `h4_shim.log` counts 551
+5. **BLE provisioning**: BLE bring-up in the VM works - `h4_shim.log` counts 551
    LE (OGF 0x08) commands, ending at `LE Set Advertise Enable` - so this route
    needs a synthetic central behind the H4 shim, not a shim fix.
+6. **Unattributed traffic**: a client inside the guest POSTs
+   `/generate_204` to the API every ~2 min and opens the two DoH pairs; it is
+   not the firmware (my `probe-self` test line proves the writer is external to
+   the app, and the app has never produced a request line). `portal204.py` now
+   logs client addresses; find that process (`ps -C python3` inside the guest,
+   or strace the connect) and confirm it is a lab helper, not a firmware thread.
