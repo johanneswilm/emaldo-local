@@ -18,6 +18,7 @@ ALNUM = string.ascii_letters + string.digits
 LOG = os.environ.get("SB_LOG", "/var/log/sandbox_api.log")
 SB = os.environ.get("SB_DIR", "/sandbox")
 PORT = 443
+SB_BIND = os.environ.get("SB_BIND", "127.0.0.1")
 # e2e relay address handed to the app. Must be reachable from inside the VM:
 # run/vmstart.sh boots QEMU with user-net `restrict=on`, so guest connections to
 # the gateway (10.0.2.2 = the host) are refused - keep the tunnel on the guest's
@@ -157,7 +158,7 @@ if __name__ == "__main__":
     # app connected to :443 and never sent a request.
     ctx.load_cert_chain(os.environ.get("SB_CERT", os.path.join(SB, "sandbox.crt")),
                         os.environ.get("SB_KEY", os.path.join(SB, "sandbox.key")))
-    with S(("127.0.0.1", PORT), H) as srv:
+    with S((SB_BIND, PORT), H) as srv:
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         print(f"sandbox api on :{PORT}", flush=True)
         srv.serve_forever()

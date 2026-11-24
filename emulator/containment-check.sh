@@ -6,6 +6,13 @@
 #
 # It checks the four jail layers and the two things the jail must NOT break
 # (gate #4 quiet, one app instance, monitoring inbound).
+#
+# Expectations encode the SO_BINDTODEVICE measurement: the firmware's client
+# binds sockets to eth0, so every answer and every listener has to be an eth0
+# address. The sandbox API therefore listens on 10.0.2.3:443 (SB_BIND), the
+# resolver literals 1.1.1.1/8.8.8.8 are claimed on eth0 (20-emu.network) and
+# relayed to the DoH front by dnshijack.service, and the zone answers with
+# 10.0.2.3 rather than 127.0.0.1.
 cd "$(dirname "$0")" || exit 1
 TMO=120 ./vmssh.sh '
 fail=0
@@ -20,9 +27,9 @@ except Exception:
 PY
 }
 r=$(python3 -c "import socket;print(socket.gethostbyname(\"files.oms.emaldo.com\"))" 2>&1 | tail -1)
-chk "vendor name resolves local" "$r" "127.0.0.1"
+chk "vendor name resolves to sandbox" "$r" "10.0.2.3"
 r=$(python3 -c "import socket;print(socket.gethostbyname(\"cp.cloudflare.com\"))" 2>&1 | tail -1)
-chk "link-check name resolves local" "$r" "127.0.0.1"
+chk "link-check name resolves to sandbox" "$r" "10.0.2.3"
 r=$(python3 -c "import socket;socket.gethostbyname(\"random-probe-$$-example.invalid\")" 2>&1 | tail -1)
 case "$r" in *gaierror*) echo "PASS unknown names NXDOMAIN";; *) echo "FAIL unknown names: [$r]"; fail=1;; esac
 for a in 127.0.0.1 1.1.1.1 8.8.8.8 10.0.2.3; do
@@ -44,14 +51,44 @@ chk "portal http answers" "$(python3 -c "import urllib.request;print(urllib.requ
 chk "sandbox tls answers" "$(python3 - <<PY
 import socket, ssl
 c = ssl.create_default_context()
-s = c.wrap_socket(socket.create_connection(("127.0.0.1",443),5), server_hostname="api.emaldo.com")
+s = c.wrap_socket(socket.create_connection(("10.0.2.3",443),5), server_hostname="api.emaldo.com")
 s.sendall(b"GET /generate_204 HTTP/1.1\r\nHost: api.emaldo.com\r\nConnection: close\r\n\r\n")
 print(s.recv(64).split(b" ")[1].decode())
 PY
 )" "204"
+chk "sandbox api not on loopback" "$(ss -lntp 2>/dev/null | grep -cE "127.0.0.1:443 ") " "0"
+chk "DoH tap owns the literals" "$(ss -lntp 2>/dev/null | grep -cE "1.1.1.1:443 |8.8.8.8:443 ")" "2"
+chk "DoH front answers" "$(python3 - <<PY
+import base64, socket, ssl, struct
+q = struct.pack(">HHHHHH", 7, 0x0100, 1, 0, 0, 0) + b"\x03www\x07google\x03com\x00" + struct.pack(">HH",1,1)
+url = base64.urlsafe_b64encode(q).decode().rstrip("=")
+c = ssl.create_default_context(); c.load_verify_locations("/sandbox/doh.crt")
+s = c.wrap_socket(socket.create_connection(("1.1.1.1",443),5), server_hostname="one.one.one.one")
+s.sendall(("GET /dns-query?dns=" + url + " HTTP/1.1\r\nHost: 1.1.1.1\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nConnection: close\r\n\r\n").encode())
+d = b""
+while True:
+    ch = s.recv(2048)
+    if not ch: break
+    d += ch
+body = d.split(b"\r\n\r\n",1)[-1]
+print(".".join(str(x) for x in body[-4:]) if len(body) > 12 else "EMPTY")
+PY
+)" "10.0.2.3"
 chk "relay listening" "$(ss -lnup 2>/dev/null | grep -cE ":105[01] ")" "2"
 chk "boot-gate stays quiet" "$(grep -ac reboot /var/log/stubs.log)" "$(grep -ac reboot /var/log/stubs.log)"
 n=$(ps -C emaldo_iot_fw 2>/dev/null | tail -n +2 | wc -l)
 [ "$n" -le 1 ] && echo "PASS single app instance ($n)" || { echo "FAIL app instances: $n"; fail=1; }
+echo "== eth0-bound reachability (what the firmware can actually dial):"
+python3 - <<PY
+import socket
+for addr in ["10.0.2.3", "1.1.1.1", "8.8.8.8", "127.0.0.1"]:
+    s = socket.socket(); s.settimeout(4)
+    try:
+        s.bind(("10.0.2.15", 0))
+        s.connect((addr, 443)); print("PASS connect from eth0 to %s:443" % addr)
+    except Exception as exc:
+        print("NOTE %s:443 unreachable from an eth0-bound socket: %r" % (addr, exc))
+    s.close()
+PY
 echo "== resolved names so far (tripwire):"; sed -n "s/.*qname=\([^ ]*\).*/\1/p" /var/log/dns_queries.log | sort | uniq -c | sort -rn | head -8
 exit $fail'

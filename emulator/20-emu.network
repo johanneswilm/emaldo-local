@@ -13,6 +13,13 @@
 # zone with the sandbox address and NXDOMAIN for everything else, logging every
 # query. Combined with slirp's restrict=on (see run/vmstart.sh) no packet can
 # reach the real Emaldo cloud or the internet.
+#
+# Claim them on eth0, NOT on lo: the firmware's HTTP/2 client sets
+# SO_BINDTODEVICE eth0, and a socket with that option can never reach an
+# address on loopback (measured: connects to 127.0.0.1:443 and to the lo /32
+# aliases of 1.1.1.1/8.8.8.8 sit in SYN-SENT forever; the same connect against
+# an eth0 /32 or against 10.0.2.3 completes). slirp answers ARP for every
+# address on its subnet, so 1.1.1.1/32 on eth0 is reachable.
 [Match]
 Name=en*
 Name=eth*

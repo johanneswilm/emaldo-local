@@ -1,0 +1,16 @@
+[Unit]
+Description=Emaldo emulator: redirect the firmware's DoH literals (1.1.1.1, 8.8.8.8) to the sinkhole DoH front
+Documentation=file:/usr/local/bin/dnhijack.py
+After=dns-sink.service
+Wants=dns-sink.service
+Before=emaldo.service
+
+[Service]
+Environment=UPSTREAM=10.0.2.3:443
+ExecStart=/usr/bin/python3 /usr/local/bin/dnhijack.py 1.1.1.1:443 8.8.8.8:443
+Restart=always
+RestartSec=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

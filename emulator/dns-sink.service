@@ -1,15 +1,29 @@
 [Unit]
 Description=Sinkhole DNS for the Emaldo firmware VM
+Before=dnshijack.service
 Documentation=file:/etc/dnssink.conf
 Before=emaldo.service
 
 [Service]
-# Claim the resolver addresses the firmware's netmonitor writes into
-# /etc/resolv.conf (measured: 1.1.1.1, 8.8.8.8; slirp's own alias 10.0.2.3 comes
-# from the network file) so every nameserver value it can produce lands here.
+# The resolver addresses the firmware's netmonitor writes into /etc/resolv.conf
+# (measured: 1.1.1.1, 8.8.8.8) are claimed on eth0 by /etc/systemd/network/
+# 45-dohtap.network, not on lo: the firmware's client sets SO_BINDTODEVICE eth0
+# and a socket with that option can never reach an address on loopback, and with
+# the /32s on eth0 local delivery picks eth0 as the source interface.
 # "-" ignores "address already assigned" on restarts.
-ExecStartPre=-/usr/sbin/ip addr add 1.1.1.1/32 dev lo
-ExecStartPre=-/usr/sbin/ip addr add 8.8.8.8/32 dev lo
+ExecStartPre=-/usr/sbin/ip addr del 1.1.1.1/32 dev lo
+ExecStartPre=-/usr/sbin/ip addr del 8.8.8.8/32 dev lo
+# DoH fronts: the app resolves business names via https://1.1.1.1/dns-query and
+# https://8.8.8.8/dns-query; both addresses are local aliases (ExecStartPre).
+# DoH front on the unambiguous eth0 address; dnshijack.service relays the
+# dohresolver's literal targets (1.1.1.1, 8.8.8.8) into this listener. It must
+# start before dnshijack, which binds those two literals.
+# DoH answers must point at an address the firmware can dial: its client sets
+# SO_BINDTODEVICE eth0, so never answer with a loopback address.
+Environment=DNSINK_DOH=10.0.2.3:443
+Environment=DNSINK_SANDBOX=10.0.2.3
+Environment=DNSINK_CERT=/sandbox/doh.crt
+Environment=DNSINK_KEY=/sandbox/doh.key
 ExecStart=/usr/bin/python3 /usr/local/bin/dnssink.py
 Restart=always
 RestartSec=1
