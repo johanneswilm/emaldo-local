@@ -388,21 +388,35 @@ Inverter registers, from a run with `TAP_MODBUS=addr` (decimal addresses):
 
 | Register | Field in the spy feed |
 |---|---|
-| 4017 | `PowerOnGrid` |
+| 4015 | not stored; non-zero sets `AccessToGridEnabled` (probably grid voltage) |
+| 4017 | `PowerOnGrid`, + = from the grid |
 | 4018 | `GridFrequency`, x0.001 Hz |
+| 4020 | `VoltageOnBattery`; non-zero sets `AccessToBatteryEnabled` |
 | 4021 | `CurrentOnBattery` (x100 in the feed) |
-| 4022 | `PowerOnBattery`, sign inverted |
+| 4022 | `PowerOnBattery`, stored with the sign inverted (register + = charging) |
 | 4027 | `PowerOnLine` |
-| 4030 | `VoltageOnPV` |
+| 4030 | `VoltageOnPV`; non-zero sets `AccessToMPPTEnabled` |
 | 4032 | `PowerOnMPPT` |
 | 4035-4040 | cooler, PV heatsink, boost 1-3, transformer temperatures |
 | 4042 | `VoltageOnBus` |
-| `0x0FD3` block | `AccessToGrid/Battery/MPPT/LineEnabled` |
 
-Not mapped: `State`, `FanStatus` (201 in that run), `VoltageOnBattery`
-(8784 in that run), `RealPowerOnMPPT`, `IsPVSurplus`. Signs and the plant
-model that makes these registers consistent are in "A house around the
-inverters" below.
+The 4015 / 4020 / 4030 rows and the signs are read from the driver
+(`hisolar.(*Inverter).parsePowerFromCache`, register = 4000 + byte offset / 2).
+While an "access" flag is off, the app takes that power as 0.
+
+Registers the app writes, by the driver function that writes them:
+
+| Register | Function |
+|---|---|
+| `0x0FD8` | `SetMaximumPower` - the signed setpoint, + = take from the grid |
+| `0x0FD9` | `SetMPPTMaximumPower` |
+| `0x0FDD` | `SetBatteryMaximumPower`, signed |
+| `0x0FD3` | `ToggleAlternatingCurrent` |
+| `0x0FF6` | `ToggleBoost`, only for model `HS_1_5` |
+
+Not mapped: `State`, `FanStatus` (201 in that run), `RealPowerOnMPPT`,
+`IsPVSurplus`. The plant model that makes these registers consistent is in
+"A house around the inverters" below.
 
 ### Grid meter (b-sensor), port `/dev/ttyCH9344USB1`
 
@@ -511,34 +525,47 @@ WAIT=60 python3 /sandbox/plant_run.py "PV=0 LOAD=500" "PV=1500 LOAD=500"
 ```
 
 The model, with S = the setpoint the app writes to `0x0FD8` (signed, W, + =
-take from the grid):
+take from the grid) and `LINE` = 1 when the load hangs on the inverter's line
+output, 0 when only the grid meter sees it (the app's "additional load"):
 
-| Register | Model | Meaning that fits the app's reactions |
-|---|---|---|
-| 4017 `PowerOnGrid` | `-S` | + = the inverter delivers to the AC side |
-| 4022 `PowerOnBattery` | `-(S + PV)` | register + = discharging (the feed shows the opposite sign) |
-| 4027 `PowerOnLine` | `LOAD` | the load on the inverter's output |
-| 4032 `PowerOnMPPT` | `PV` | PV power; 4030 `VoltageOnPV` non-zero sets `AccessToMPPTEnabled` |
-| meter `0x0067`-`0x0069` | `LOAD - reg 4017` | grid power per phase, + = import |
+| Register | Model |
+|---|---|
+| 4015, 4020 | constants, so the app uses the grid and battery power |
+| 4017 `PowerOnGrid` | `S + LINE x LOAD` (+ = from the grid) |
+| 4022 `PowerOnBattery` | `S + PV` (+ = charging) |
+| 4027 `PowerOnLine` | `LINE x LOAD` |
+| 4032 `PowerOnMPPT` | `PV`; 4030 `VoltageOnPV` is a constant |
+| meter `0x0067`-`0x0069` | reg 4017 + `(1 - LINE) x LOAD`, + = import |
+| battery (`bak_power`) | sum of `S + PV`, W into the packs |
 
-This is a model that the app's behaviour is consistent with, not a capture
-from real hardware. With the opposite sign on 4017 the app overshoots and
-exports; with 4027 tied to the setpoint it runs away to -3600 W.
+So the line output is treated as passed through from the grid side, and S as
+the power the inverter converts between AC and its battery/PV side. That is
+what the app's reactions fit: with the load on the line output it writes S =
+-load, not 0. It is a model, not a capture from real hardware, and it does
+not apply the battery limit in `0x0FDD`.
 
-Measured with it (fake packs at about 50 % SOC, values per inverter, power
-flow as the app reports it over e2e, three inverters summed):
+An earlier version had 4017 with the opposite sign and left 4015 and 4020 at
+0. The app then ignored the inverters' grid and battery power, which gave
+wrong figures whenever the load was only on the meter (a load of 200 W
+whatever the real one, solar = battery + 200 W) and a setpoint that hunted
+between two values under a large load.
 
-| PV | Load | App writes `0x0FD8` | App's power flow |
-|---|---|---|---|
-| 0 | 0 | 0 | all 0 |
-| 0 | 500 | -500 | battery 1500 discharging, load 1500, grid 0 |
-| 1500 | 500 | -500 | solar 4500, battery 3000 charging, load 1500, grid 0 |
-| 1500 | 0 | 0 | solar 4500, battery 4500 charging, grid 0 |
-| 1500 | 500, `charge on` | 2100 (= 3600 - PV) | grid 7800 import |
+Measured with it (fake packs at about 70 % SOC, PV and load per inverter /
+phase, power flow as the app reports it over e2e, three phases summed):
 
-So solar input works: the app sees the PV power, lets it charge the battery
-and covers the load from it, and an emergency charge tops the PV up to 3.6 kW
-per inverter from the grid.
+| Load on | PV | Load | App writes `0x0FD8` | App's power flow |
+|---|---|---|---|---|
+| - | 0 | 0 | 0 | all 0 |
+| line output | 0 | 500 | -500 | battery 1500 discharging, other load 1500, grid 0 |
+| line output | 1500 | 500 | -500 | solar 4500, battery 3000 charging, other load 1500, grid 0 |
+| meter only | 0 | 500 | -500 | battery 1500 discharging, additional load 1500, grid 0 |
+| meter only | 1500 | 500 | -500 | solar 4500, battery 3000 charging, additional load 1500, grid 0 |
+| meter only | 1500 | 2500 | -2500 | solar 4500, battery 3000 discharging, additional load 7500, grid 0 |
+| meter only | 1500 | 500, `charge on` | 3600 | solar 4500, battery 15300 charging, grid 12300 import |
+
+So solar input works in both layouts: the app sees the PV power, covers the
+load from it and charges the battery with the rest. The last row shows the
+missing battery limit: a real inverter would not put 5.1 kW into the battery.
 
 Discharge on command, measured earlier on a simpler model (packs at 100 %,
 load visible only on the grid meter as 1 kW import per phase):
@@ -551,13 +578,13 @@ load visible only on the grid meter as 1 kW import per phase):
 
 Notes:
 
-- `0x0FDD` is not a copy of `0x0FD8`: 3600 when idle, 200 while discharging
-  into a load, 1071-1700 with PV and load, 533 at start. Its meaning is open.
-- With 4027 left at 0 the app showed a load of 200 W and a solar figure of
-  battery + 200 W whatever the real values. The battery figure in the power
-  flow comes from the packs' current, not from the inverter.
-- With full packs (100 % SOC) and PV, the app reports 200 W solar and writes
-  nothing.
+- `0x0FDD` is the battery power limit (`SetBatteryMaximumPower`), not a copy
+  of `0x0FD8`: 3600 when idle, 200 while discharging into a load, 1071-1700
+  with PV and load, 533 at start, -3600 when selling or in an mFRR-up task.
+- The battery figure in the power flow comes from the packs' current, not from
+  the inverter: the sign of register 4022 made no difference to it.
+- With full packs (100 % SOC) and PV, the app reported 200 W solar and wrote
+  nothing - seen with the earlier model, not repeated with this one.
 - **Manual selling works once "sell back to grid" is on.** The reply to the
   selling command (`0x80`) is `[ok, error bits u16 LE]`, which the client
   ignores. Bits, from `manualSelling.validatePreconditions`: `0x0800` sell back
@@ -736,7 +763,7 @@ frequency of the house model (`plant.py FREQ=49900`, mHz), packs at about 75 %:
 | 2 | FCR-D down | 49.70 Hz | 0 | 0 |
 | 3 | FCR-D up | 49.70 Hz | -499 W (1.5 kW to the grid) | 4 |
 | 3 | FCR-D up | 50.30 Hz | 0 | 0 |
-| 4 | - | - | rejected, reply code 4 | - |
+| 4 | - | - | rejected, reply code 4 (kind unknown) | - |
 
 So `maxPower` is the capacity in W: FCR-N delivers all of it at +-0.1 Hz, and
 the FCR-D tasks delivered half of it 0.2 Hz past their 0.1 Hz threshold. For
@@ -746,13 +773,70 @@ every task the app writes `/var/log/thorfcr_<id>.csv` (about two rows a second:
 app takes the frequency from its inverters and meter, which is why it is a
 variable of the house model.
 
-Not known: the reply codes other than 0 (one FCR-N task was answered with code
-2 and still ran), why that task ended before its four minutes were over, and
-anything about `set_mfrr_schedule` beyond its layout - it was not sent. The
-earlier empty `set_fcr_schedule` test left the state at 0 (idle, no error).
+`set_mfrr_schedule`, sent with `mqtt_pub.py mfrr <kind> <minutes> <W>`:
+
+| kind | Task | App writes `0x0FD8` per inverter | State (`0x45`) |
+|---|---|---|---|
+| 11 | mFRR up | -1000 W (3 kW to the grid in total), `0x0FDD` = -3600 | 7 |
+| 12 | mFRR down | +1000 W (3 kW from the grid in total) | 6 |
+| 0 | - | stops the task with that `id` (`mqtt_pub.py mfrr 0`; the tool always uses the id `sandbox-mfrr`); setpoint back to 0 within a second | 0 |
+
+- `test_case` must not be 0, or the reply is code 6 "not supported"
+  (`fcrctrl.(*ctrl).SetMfrrSchedule`); `mqtt_pub.py mfrr` sends 1, also for
+  the stop.
+- The task starts at `activation_time`: the app wrote the setpoint in that
+  very second (12:30:00, 12:45:00). `mqtt_pub.py mfrr` picks the next quarter
+  hour that is at least 6 minutes away and sends `start_time` =
+  `activation_time`, `end_time` = that + `minutes`, `activation_type` 1,
+  `max_power`, `force` true. An activation time two minutes past a quarter was
+  accepted too (code 0) but stopped before it ran, so whether error 7 below is
+  ever enforced is not known.
+- Unlike FCR it does not follow the frequency: the full `max_power` is
+  delivered for the whole task. The log is again `/var/log/thorfcr_<id>.csv`.
+- Three tasks for the same quarter were all accepted; the last one ran.
+
+Reply codes (`code` in `{cmd, code, result}`) are the values of a map in the
+handlers, keyed by the error the controller returned:
+
+| code | Error text in the binary |
+|---|---|
+| 0 | accepted |
+| -1 | JSON not understood, unknown `cmd`, or an error not in this list |
+| 1 | task is busy |
+| 2 | task is overlaping |
+| 3 | task id exists |
+| 4 | fcr kind is unknown |
+| 5 | unknown complex task |
+| 6 | not supported |
+| 7 | activation time must be at quarter hour (0, 15, 30, 45 minutes) |
+| 8 | task conflict |
+| 9 | the start time is not 5 minutes earlier |
+| 10 | task save failed |
+| 11 | not signed |
+| 12 | task is activated |
+| 13 | forced setting error |
+| 14 | invalid delete fcr task param |
+| 15 | invalid mfrr time config |
+
+A task answered with code 2 is not stored: the one FCR-N task that got it was
+sent while the previous one still ran, and it has no log file - what kept
+running, and ended on time, was the earlier task.
+
+Task kinds and the state they give (`frr/const.FcrKind.String` and
+`.ToFcrState`): 0 off, 1 `fcr-n` -> 2, 2 `fcr-d down` -> 3, 3 `fcr-d up` -> 4,
+100 `fcr-d complex` -> 5, 11 `mfrr-up` -> 7, 12 `mfrr-down` -> 6. The app's
+state enum, which `emaldo_re/e2e.py` follows, names 3 "FcrDUp", 4 "FcrDDown",
+6 "MFRRUp" and 7 "MFRRDown" - the other way round. Measured behaviour agrees
+with the firmware's names: state 3 took power from the grid at 50.30 Hz, state
+7 delivered power to the grid. The earlier empty `set_fcr_schedule` test left
+the state at 0 (idle, no error).
+
+Not tried: `set_complex_fcr_schedule`, the test cases other than 1, and the
+`soc_preparation` fields.
 
 The panel lists the MQTT traffic with the other cloud messages, has a field to
-publish a command, a button to start an FCR task and a grid-frequency input.
+publish a command, rows to start an FCR task and to start or stop an mFRR
+task, and a grid-frequency input.
 
 ## Build from scratch
 

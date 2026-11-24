@@ -1,7 +1,15 @@
 # Plant model for serial_tap.py (TAP_MODBUS=store): three hisolar inverters
 # (USB0, USB2, USB3 = phases 1-3) and the grid meter (USB1). Change the "var"
 # lines to move the house - by hand, with plant.py, or from the panel.
-#   S = the setpoint the app writes to 0x0FD8 (signed W, + = take from the grid)
+#   S = the setpoint the app writes to 0x0FD8 (signed W). The app's reactions
+# fit an inverter whose line output is passed through from the grid side:
+#   grid port  = S + the load on the line output      (+ = from the grid)
+#   battery    = S + PV                               (+ = charging)
+# Register signs are the app's own (hisolar parsePowerFromCache, hal/inverter):
+#   4015 (not stored, probably grid voltage) and 4020 VoltageOnBattery - while
+#        they read 0 the app takes the inverter's grid / battery power as 0
+#   4017 PowerOnGrid, + = from the grid       4027 PowerOnLine, load on the output
+#   4022 PowerOnBattery, + = charging         4032 PowerOnMPPT, PV
 var LOAD1 0     # house load on phase 1, W
 var LOAD2 0
 var LOAD3 0
@@ -11,17 +19,18 @@ var PV3 0
 var FREQ 50000 # grid frequency, mHz (inverters report mHz, the meter 0.01 Hz)
 var LINE 1      # 1 = the load hangs on the inverters' line output (reg 4027),
                 # 0 = it is only seen by the grid meter ("additional load")
-# grid meter: 230 V, 50 Hz, ratios 1; power per phase = load - inverter output
+# grid meter: 230 V, 50 Hz, ratios 1; power per phase (+ = import) =
+#   the inverter's grid power + the load that is not on its line output
 USB1 0x0061 2300
 USB1 0x0062 2300
 USB1 0x0063 2300
 USB1 0x0077 =$FREQ/10
 USB1 0x008d 1
 USB1 0x008e 1
-USB1 0x0067 =$LOAD1-USB0:4017
-USB1 0x0068 =$LOAD2-USB2:4017
-USB1 0x0069 =$LOAD3-USB3:4017
-USB1 0x006a =$LOAD1+$LOAD2+$LOAD3-USB0:4017-USB2:4017-USB3:4017
+USB1 0x0067 =$LOAD1-$LINE*$LOAD1+USB0:4017
+USB1 0x0068 =$LOAD2-$LINE*$LOAD2+USB2:4017
+USB1 0x0069 =$LOAD3-$LINE*$LOAD3+USB3:4017
+USB1 0x006a =$LOAD1+$LOAD2+$LOAD3-$LINE*$LOAD1-$LINE*$LOAD2-$LINE*$LOAD3+USB0:4017+USB2:4017+USB3:4017
 # inverter 1
 USB0 4018 =$FREQ
 USB0 4042 4000
@@ -33,8 +42,10 @@ USB0 4039 300
 USB0 4040 300
 USB0 4030 2000
 USB0 4032 =$PV1
-USB0 4017 =-:0x0fd8
-USB0 4022 =-:0x0fd8-$PV1
+USB0 4015 2300
+USB0 4020 5290
+USB0 4017 =:0x0fd8+$LINE*$LOAD1
+USB0 4022 =:0x0fd8+$PV1
 USB0 4027 =$LINE*$LOAD1
 # inverter 2
 USB2 4018 =$FREQ
@@ -47,8 +58,10 @@ USB2 4039 300
 USB2 4040 300
 USB2 4030 2000
 USB2 4032 =$PV2
-USB2 4017 =-:0x0fd8
-USB2 4022 =-:0x0fd8-$PV2
+USB2 4015 2300
+USB2 4020 5290
+USB2 4017 =:0x0fd8+$LINE*$LOAD2
+USB2 4022 =:0x0fd8+$PV2
 USB2 4027 =$LINE*$LOAD2
 # inverter 3
 USB3 4018 =$FREQ
@@ -61,7 +74,9 @@ USB3 4039 300
 USB3 4040 300
 USB3 4030 2000
 USB3 4032 =$PV3
-USB3 4017 =-:0x0fd8
-USB3 4022 =-:0x0fd8-$PV3
+USB3 4015 2300
+USB3 4020 5290
+USB3 4017 =:0x0fd8+$LINE*$LOAD3
+USB3 4022 =:0x0fd8+$PV3
 USB3 4027 =$LINE*$LOAD3
-out /sandbox/bak_power =-USB0:4022-USB2:4022-USB3:4022   # W into the battery
+out /sandbox/bak_power =USB0:0x0fd8+USB2:0x0fd8+USB3:0x0fd8+$PV1+$PV2+$PV3   # W into the battery

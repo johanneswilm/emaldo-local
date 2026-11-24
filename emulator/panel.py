@@ -180,7 +180,7 @@ def apply_plant(values):
 
 def run_cmd(cmd):
     cmd = " ".join(str(cmd).split())
-    if re.fullmatch(r"fcr [1-3] \d{1,3} \d{1,5}", cmd):    # FCR task: kind, minutes, max power W
+    if re.fullmatch(r"(fcr [1-3]|mfrr (0|11|12)) \d{1,3} \d{1,5}", cmd):    # FCR / mFRR task: kind, minutes, max power W
         r = subprocess.run([sys.executable, os.path.join(os.path.dirname(E2E_TRY), "mqtt_pub.py")] + cmd.split(),
                            capture_output=True, text=True, timeout=30)
         return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr[-600:]).strip()}
@@ -244,6 +244,9 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
  <div class="row"><b>FCR task</b><select id="fk"><option value="1">FCR-N</option><option value="2">FCR-D down</option><option value="3">FCR-D up</option></select>
   <label>min <input type="number" id="fm" value="3" min="1" style="width:56px"></label><label>W <input type="number" id="fp" value="3000" step="500" style="width:76px"></label>
   <button onclick="cmd('fcr '+fk.value+' '+fm.value+' '+fp.value)">Start</button></div>
+ <div class="row"><b>mFRR task</b><select id="mk"><option value="11">mFRR up</option><option value="12">mFRR down</option></select>
+  <label>min <input type="number" id="mm" value="15" min="1" style="width:56px"></label><label>W <input type="number" id="mp" value="3000" step="500" style="width:76px"></label>
+  <button onclick="cmd('mfrr '+mk.value+' '+mm.value+' '+mp.value)">At next quarter</button><button onclick="cmd('mfrr 0 15 0')">Stop</button></div>
  <div class="row"><b>MQTT command</b><input id="mq" value='{"cmd":"hello"}' style="width:230px;padding:4px 6px">
   <button onclick="cmd('mqtt '+mq.value)">Publish</button></div>
  <pre id="cmdOut" class="mute">Replies appear here.</pre>
