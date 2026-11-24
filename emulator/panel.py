@@ -12,7 +12,7 @@ already use:
 
   GET  /              the page
   GET  /api/state     house variables, setpoints, readings, power flow
-  POST /api/plant     {"LOAD1": 500, "PV": 1500, "LINE": 0, "SOC": 60}
+  POST /api/plant     {"LOAD1": 500, "PV": 1500, "LINE": 0, "FREQ": 49900, "SOC": 60}
   POST /api/cmd       {"cmd": "charge on"}   (see COMMANDS; "mqtt {json}" publishes
                       to the app's MQTT command topic)
   GET  /api/messages  ?n=300  newest last, repeats folded
@@ -180,6 +180,10 @@ def apply_plant(values):
 
 def run_cmd(cmd):
     cmd = " ".join(str(cmd).split())
+    if re.fullmatch(r"fcr [1-3] \d{1,3} \d{1,5}", cmd):    # FCR task: kind, minutes, max power W
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(E2E_TRY), "mqtt_pub.py")] + cmd.split(),
+                           capture_output=True, text=True, timeout=30)
+        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr[-600:]).strip()}
     if cmd.startswith("mqtt "):                # JSON payload to iot/<device id>/down/cmd
         try:
             payload = json.dumps(json.loads(cmd[5:]), separators=(",", ":"))
@@ -224,6 +228,7 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
  <tr><td>Load W</td><td><input type="number" id="LOAD1" step="100"></td><td><input type="number" id="LOAD2" step="100"></td><td><input type="number" id="LOAD3" step="100"></td></tr>
  <tr><td>Solar W</td><td><input type="number" id="PV1" step="100"></td><td><input type="number" id="PV2" step="100"></td><td><input type="number" id="PV3" step="100"></td></tr></table>
  <div class="row"><label>Load is on <select id="LINE"><option value="1">the inverter output</option><option value="0">the grid meter side only</option></select></label></div>
+ <div class="row"><label>Grid frequency Hz <input type="number" id="FREQ" step="0.01" min="45" max="55"></label></div>
  <div class="row"><label>Battery SOC % <input type="number" id="SOC" min="0" max="100" placeholder="keep"></label>
  <button class="go" onclick="applyHouse()">Apply</button><button onclick="zero()">All zero</button><span id="houseMsg" class="mute"></span></div>
 </section>
@@ -236,6 +241,9 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
   <button onclick="cmd('sell on '+kwh.value)">Start</button><button onclick="cmd('sell off')">Stop</button></div>
  <div class="row"><b>Raw</b><input id="rawt" value="0x81" style="width:70px;padding:4px 6px"><input id="rawp" placeholder="payload hex" style="width:150px;padding:4px 6px">
   <button onclick="cmd('raw '+rawt.value+' '+rawp.value)">Send</button></div>
+ <div class="row"><b>FCR task</b><select id="fk"><option value="1">FCR-N</option><option value="2">FCR-D down</option><option value="3">FCR-D up</option></select>
+  <label>min <input type="number" id="fm" value="3" min="1" style="width:56px"></label><label>W <input type="number" id="fp" value="3000" step="500" style="width:76px"></label>
+  <button onclick="cmd('fcr '+fk.value+' '+fm.value+' '+fp.value)">Start</button></div>
  <div class="row"><b>MQTT command</b><input id="mq" value='{"cmd":"hello"}' style="width:230px;padding:4px 6px">
   <button onclick="cmd('mqtt '+mq.value)">Publish</button></div>
  <pre id="cmdOut" class="mute">Replies appear here.</pre>
@@ -261,8 +269,8 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
 const $=id=>document.getElementById(id), esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 let filled=false;
 async function j(url,body){const r=await fetch(url,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});return r.json()}
-function fillVars(v){for(const k of ['LOAD1','LOAD2','LOAD3','PV1','PV2','PV3'])$(k).value=v[k]??0;$('LINE').value=String(v.LINE??1)}
-async function applyHouse(){const b={LINE:+$('LINE').value};for(const k of ['LOAD1','LOAD2','LOAD3','PV1','PV2','PV3'])b[k]=+$(k).value||0;
+function fillVars(v){for(const k of ['LOAD1','LOAD2','LOAD3','PV1','PV2','PV3'])$(k).value=v[k]??0;$('LINE').value=String(v.LINE??1);$('FREQ').value=((v.FREQ??50000)/1000).toFixed(2)}
+async function applyHouse(){const b={LINE:+$('LINE').value,FREQ:Math.round(+$('FREQ').value*1000)||50000};for(const k of ['LOAD1','LOAD2','LOAD3','PV1','PV2','PV3'])b[k]=+$(k).value||0;
  if($('SOC').value!=='')b.SOC=+$('SOC').value;const v=await j('/api/plant',b);fillVars(v);$('SOC').value='';$('houseMsg').textContent='applied '+new Date().toLocaleTimeString()}
 function zero(){for(const k of ['LOAD1','LOAD2','LOAD3','PV1','PV2','PV3'])$(k).value=0;applyHouse()}
 async function cmd(c){$('cmdOut').textContent='sending: '+c+' ...';const r=await j('/api/cmd',{cmd:c.trim()});$('cmdOut').textContent=c+'\n'+r.output}

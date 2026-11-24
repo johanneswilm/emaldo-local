@@ -8,13 +8,14 @@ var LOAD3 0
 var PV1 0       # PV power on inverter 1, W
 var PV2 0
 var PV3 0
+var FREQ 50000 # grid frequency, mHz (inverters report mHz, the meter 0.01 Hz)
 var LINE 1      # 1 = the load hangs on the inverters' line output (reg 4027),
                 # 0 = it is only seen by the grid meter ("additional load")
 # grid meter: 230 V, 50 Hz, ratios 1; power per phase = load - inverter output
 USB1 0x0061 2300
 USB1 0x0062 2300
 USB1 0x0063 2300
-USB1 0x0077 5000
+USB1 0x0077 =$FREQ/10
 USB1 0x008d 1
 USB1 0x008e 1
 USB1 0x0067 =$LOAD1-USB0:4017
@@ -22,7 +23,7 @@ USB1 0x0068 =$LOAD2-USB2:4017
 USB1 0x0069 =$LOAD3-USB3:4017
 USB1 0x006a =$LOAD1+$LOAD2+$LOAD3-USB0:4017-USB2:4017-USB3:4017
 # inverter 1
-USB0 4018 50000
+USB0 4018 =$FREQ
 USB0 4042 4000
 USB0 4035 300
 USB0 4036 300
@@ -36,7 +37,7 @@ USB0 4017 =-:0x0fd8
 USB0 4022 =-:0x0fd8-$PV1
 USB0 4027 =$LINE*$LOAD1
 # inverter 2
-USB2 4018 50000
+USB2 4018 =$FREQ
 USB2 4042 4000
 USB2 4035 300
 USB2 4036 300
@@ -50,7 +51,7 @@ USB2 4017 =-:0x0fd8
 USB2 4022 =-:0x0fd8-$PV2
 USB2 4027 =$LINE*$LOAD2
 # inverter 3
-USB3 4018 50000
+USB3 4018 =$FREQ
 USB3 4042 4000
 USB3 4035 300
 USB3 4036 300

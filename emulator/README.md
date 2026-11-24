@@ -598,7 +598,7 @@ mechanism of its own: it edits the `var` lines of `tap_regs`, calls
 
 ```
 GET  /api/state      house variables, setpoints, readings, power flow
-POST /api/plant      {"LOAD1": 500, "PV": 1500, "LINE": 0, "SOC": 60}
+POST /api/plant      {"LOAD1": 500, "PV": 1500, "LINE": 0, "FREQ": 49900, "SOC": 60}
 POST /api/cmd        {"cmd": "charge on"}
 GET  /api/messages   ?n=300
 ```
@@ -678,9 +678,9 @@ How it finds its broker (all measured on v2.35.3):
 2. It POSTs `<mqtt_broker_router_url>/auth/broker_url/` in the usual gm2
    envelope, body `{"id": "<device id>"}`, and reads `broker_url` from the
    reply.
-3. It POSTs `/bmt/access/auth/<app id>` (same body) for a token. The sandbox
-   offers a JWT-shaped string under `token`, `access_token` and `jwt`; which
-   of the three the app reads is not known.
+3. It POSTs `/bmt/access/auth/<app id>` (same body) for a token. The reply
+   structure is `{token, expired_at, broker_url}`; the token becomes the MQTT
+   password.
 4. It connects: MQTT 5 over TLS, client id = user name = device id, password =
    that token, keep-alive 60 s, session expiry 600 s, and subscribes to
    `iot/<device id>/down/cmd`.
@@ -699,14 +699,60 @@ got iot/<id>/up/resp -> {"cmd":"set_fcr_schedule","code":0,"result":{"bmt_id":"<
 
 Commands are JSON with a `cmd` field; the handlers registered in the binary
 are `set_fcr_schedule`, `set_complex_fcr_schedule` and `set_mfrr_schedule`
-(grid-service schedules). Replies go to `iot/<device id>/up/resp` at QoS 1.
-In several minutes connected the app published nothing on its own. The
-parameters of the schedule commands are not worked out, and I do not know
-what the empty `set_fcr_schedule` above left behind in the app (it answered
-with one empty task id).
+(grid-service schedules). Replies go to `iot/<device id>/up/resp` at QoS 1:
+`{cmd, code, result}`. In several minutes connected the app published nothing
+on its own.
 
-The panel lists the MQTT traffic with the other cloud messages and has a field
-to publish a command.
+The command layouts, read from the binary's Go type information with
+`scripts/gotypes.py` (JSON names):
+
+```
+set_fcr_schedule          {cmd, trace_id, ver, bmt_id, payload: FcrTaskParams}
+  FcrTaskParams           id, kind, maxPower, start, minutes, force, testCase,
+                          testSineCycleTime, testSineTotalCycles, caption, exampleFile,
+                          remoteLogDir, dryRun, pqFrequency, logFormat,
+                          postHighFreqDataCounter, soc_preparation, preparation_data_type,
+                          preparation_upper_limit, preparation_lower_limit
+set_complex_fcr_schedule  payload: id, start, minutes, dryRun, force, logFormat,
+                          tasks: [FcrTaskParams], postHighFreqDataCounter
+set_mfrr_schedule         payload: kind, activation_type, start_time, end_time,
+                          activation_time, minutes, max_power, force, test_case,
+                          remote_log_dir, id, log_format, postHighFreqDataCounter,
+                          soc_preparation, preparation_*, ramp_up_duration_sec,
+                          ramp_down_duration_sec, log_extend_duration_sec
+reply result              {bmt_id, task_ids}
+```
+
+Measured with `mqtt_pub.py fcr <kind> <minutes> <W>` (payload `id`, `kind`,
+`maxPower` 3000, `start` = now + 5 s, `minutes`, `force` true) and the grid
+frequency of the house model (`plant.py FREQ=49900`, mHz), packs at about 75 %:
+
+| kind | Task | Frequency | App writes `0x0FD8` per inverter | State (`0x45`) |
+|---|---|---|---|---|
+| 1 | FCR-N | 50.00 Hz | 0 | 0 |
+| 1 | FCR-N | 49.90 Hz | -999 W (3 kW to the grid in total) | 2 |
+| 1 | FCR-N | 50.10 Hz | charging 3 kW (from its own log) | - |
+| 2 | FCR-D down | 50.30 Hz | +499 W (1.5 kW from the grid) | 3 |
+| 2 | FCR-D down | 49.70 Hz | 0 | 0 |
+| 3 | FCR-D up | 49.70 Hz | -499 W (1.5 kW to the grid) | 4 |
+| 3 | FCR-D up | 50.30 Hz | 0 | 0 |
+| 4 | - | - | rejected, reply code 4 | - |
+
+So `maxPower` is the capacity in W: FCR-N delivers all of it at +-0.1 Hz, and
+the FCR-D tasks delivered half of it 0.2 Hz past their 0.1 Hz threshold. For
+every task the app writes `/var/log/thorfcr_<id>.csv` (about two rows a second:
+`InsAcPow`, `GridFreq`, capacity, activated power, SOC ...), and its
+`submit-high-freq-data` uploads carry the frequency and an `fcr_task_id`. The
+app takes the frequency from its inverters and meter, which is why it is a
+variable of the house model.
+
+Not known: the reply codes other than 0 (one FCR-N task was answered with code
+2 and still ran), why that task ended before its four minutes were over, and
+anything about `set_mfrr_schedule` beyond its layout - it was not sent. The
+earlier empty `set_fcr_schedule` test left the state at 0 (idle, no error).
+
+The panel lists the MQTT traffic with the other cloud messages, has a field to
+publish a command, a button to start an FCR task and a grid-frequency input.
 
 ## Build from scratch
 

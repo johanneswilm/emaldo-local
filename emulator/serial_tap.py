@@ -16,7 +16,8 @@ Modbus RTU requests can be answered so the app keeps talking:
                       USB0:4017     a register of another port
                       $NAME         a variable, set by a line "var NAME value"
                       1000          a constant
-                    Factors may be joined with "*": $LINE*$LOAD1.
+                    Factors may be joined with "*": $LINE*$LOAD1, and a term
+                    may end in an integer divisor: $FREQ/10.
                     e.g. "USB1 0x0067 =$LOAD+USB0:4017" - grid meter phase 1 =
                     house load + what inverter 1 takes from the grid.
                     A line "out PATH =terms" writes the sum to a file whenever
@@ -59,7 +60,10 @@ def signed(v): return v - 0x10000 if v & 0x8000 else v
 def expr(link, e, var, depth):
     total = 0
     for sign, term in re.findall(r"([+-]?)([^+-]+)", e):
-        v = 1
+        v, div = 1, 1
+        if "/" in term:                        # trailing integer divisor: $FREQ/10
+            term, d = term.rsplit("/", 1)
+            div = int(d, 0) or 1
         for t in term.split("*"):
             if t[0] == "$": f = var.get(t[1:], 0)
             elif ":" in t:
@@ -68,6 +72,7 @@ def expr(link, e, var, depth):
                 f = signed(value(other, int(a, 0), depth + 1))
             else: f = int(t, 0)
             v *= f
+        v = int(v / div)
         total += -v if sign == "-" else v
     return total
 def value(link, addr, depth=0):
@@ -76,7 +81,7 @@ def value(link, addr, depth=0):
     if MODE in ("file", "store") and depth < 4:
         regs, var = table(link)
         v = regs.get(addr, 0)
-        if isinstance(v, str): v = max(-0x8000, min(0x7FFF, expr(link, v[1:], var, depth))) & 0xFFFF
+        if isinstance(v, str): v = max(-0x8000, min(0xFFFF, expr(link, v[1:], var, depth))) & 0xFFFF   # signed or unsigned 16 bit
         return v
     return 0
 def outputs(link):

@@ -3,6 +3,8 @@
 
   mqtt_pub.py '{"cmd":"set_fcr_schedule"}'            to iot/<device id>/down/cmd
   mqtt_pub.py some/topic 'payload' [seconds to listen]
+  mqtt_pub.py fcr <kind> [minutes] [max power W]      a set_fcr_schedule starting in 5 s
+                                                      kind 1 FCR-N, 2 FCR-D down, 3 FCR-D up
 
 The device id is the client id of the app's last CONNECT in the broker log.
 Run inside the guest (broker on 127.0.0.1:8883, TLS, certificate not checked).
@@ -40,6 +42,12 @@ def s(x):
 
 def main():
     a = sys.argv[1:]
+    if a and a[0] == "fcr":
+        kind, minutes, power = int(a[1]), int(a[2]) if len(a) > 2 else 3, int(a[3]) if len(a) > 3 else 3000
+        dev, now = device_id(), int(time.time())
+        a = [json.dumps({"cmd": "set_fcr_schedule", "trace_id": "sb%d" % now, "ver": "1", "bmt_id": dev,
+                         "payload": {"id": "sandbox-%d-%d" % (kind, now % 100000), "kind": kind, "maxPower": power,
+                                     "start": now + 5, "minutes": minutes, "force": True}})]
     if len(a) == 1:
         a = ["iot/%s/down/cmd" % device_id()] + a
     topic, payload, wait = a[0], a[1], float(a[2]) if len(a) > 2 else 4

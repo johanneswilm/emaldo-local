@@ -95,14 +95,13 @@ def fake_result(path):
         # asked at mqtt_broker_router_url (global config), same gm envelope
         return {"broker_url": BROKER, "gmtime": gm}
     if "access/auth" in p:
-        # MQTT login token. The field names are a guess (several offered);
-        # the token is shaped like a JWT with an expiry a day ahead.
+        # MQTT login (bhsdk.MQTTAccessAuthRsp: token, expired_at, broker_url).
+        # The app uses the token as its MQTT password; shaped like a JWT here.
         b64 = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+        exp = int(time.time()) + 86400
         jwt = ".".join([b64({"alg": "HS256", "typ": "JWT"}),
-                        b64({"sub": "sandbox", "iat": int(time.time()), "exp": int(time.time()) + 86400}),
-                        "c2FuZGJveA"])
-        return {"token": jwt, "access_token": jwt, "jwt": jwt, "expires_in": 86400,
-                "expired_at": int(time.time()) + 86400, "gmtime": gm}
+                        b64({"sub": "sandbox", "iat": int(time.time()), "exp": exp}), "c2FuZGJveA"])
+        return {"token": jwt, "expired_at": exp, "broker_url": BROKER, "gmtime": gm}
     if "get-latest-ver-url" in p:
         return {"versions": [], "count": 0, "gmtime": gm}
     if "get_master_switch" in p:
