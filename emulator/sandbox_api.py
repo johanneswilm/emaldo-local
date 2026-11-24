@@ -23,6 +23,11 @@ PORT = 443
 # the gateway (10.0.2.2 = the host) are refused - keep the tunnel on the guest's
 # own loopback and run the relay in the guest.
 RELAY = os.environ.get("E2E_RELAY", "127.0.0.1")
+# MQTT: the router URL handed out in the global config (this server), and the
+# broker it then names (mqtt_broker.py; the name is in /etc/hosts and the cert).
+ROUTER = os.environ.get("MQTT_ROUTER", "https://api.emaldo.com")
+BROKER = os.environ.get("MQTT_BROKER", "mqtts://mqtt.emaldo.com:8883")
+GLOBAL_SHAPE = os.environ.get("SB_GLOBAL_SHAPE", "list")
 
 def rand32():
     return "".join(secrets.choice(ALNUM) for _ in range(32))
@@ -86,6 +91,18 @@ def fake_result(path):
         r["expires_in"] = 86400
         r["expired_at"] = int(time.time()) + 86400
         return r
+    if "auth/broker_url" in p:
+        # asked at mqtt_broker_router_url (global config), same gm envelope
+        return {"broker_url": BROKER, "gmtime": gm}
+    if "access/auth" in p:
+        # MQTT login token. The field names are a guess (several offered);
+        # the token is shaped like a JWT with an expiry a day ahead.
+        b64 = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+        jwt = ".".join([b64({"alg": "HS256", "typ": "JWT"}),
+                        b64({"sub": "sandbox", "iat": int(time.time()), "exp": int(time.time()) + 86400}),
+                        "c2FuZGJveA"])
+        return {"token": jwt, "access_token": jwt, "jwt": jwt, "expires_in": 86400,
+                "expired_at": int(time.time()) + 86400, "gmtime": gm}
     if "get-latest-ver-url" in p:
         return {"versions": [], "count": 0, "gmtime": gm}
     if "get_master_switch" in p:
@@ -97,7 +114,14 @@ def fake_result(path):
     if "get_master_config_area" in p:
         return dict(AREA, gmtime=gm)
     if "get-global-config" in p:
-        return {"config": {}, "gmtime": gm}
+        # A list of items {config_id, config_item, bmt_value, default_value}
+        # (strings; from the app's GetGlobalConfigRsp tags and its merge loop,
+        # which matches config_item by name). mqtt_broker_router_url is the
+        # "middle layer" the app then asks for its broker: GET <url>/auth/broker_url.
+        items = {"server_env": "release", "mqtt_broker_router_url": ROUTER}
+        cfg = [{"config_id": str(i + 1), "config_item": k, "bmt_value": v, "default_value": v}
+               for i, (k, v) in enumerate(items.items())]
+        return cfg if GLOBAL_SHAPE == "list" else {"config": cfg, "gmtime": gm}
     if "get-balance-contract-status" in p:
         return {"is_pause": False, "is_signed": True, "revenue_type": 3,
                 "gmtime": gm}

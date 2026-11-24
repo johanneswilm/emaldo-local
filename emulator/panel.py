@@ -8,12 +8,13 @@ already use:
   commands   e2e_try.py (charge, sell-back, manual selling, override slots)
   readings   the app's spy feed (spy.out), the tap log (setpoints), e2e power flow
   messages   what the app sent "to the cloud": sandbox API log, e2e relay log,
-             DNS and NTP logs
+             MQTT broker log, DNS and NTP logs
 
   GET  /              the page
   GET  /api/state     house variables, setpoints, readings, power flow
   POST /api/plant     {"LOAD1": 500, "PV": 1500, "LINE": 0, "SOC": 60}
-  POST /api/cmd       {"cmd": "charge on"}   (see COMMANDS)
+  POST /api/cmd       {"cmd": "charge on"}   (see COMMANDS; "mqtt {json}" publishes
+                      to the app's MQTT command topic)
   GET  /api/messages  ?n=300  newest last, repeats folded
 
 usage: panel.py            (PANEL_PORT, default 8088; listens on all addresses)
@@ -32,7 +33,7 @@ COMMANDS = re.compile(r"^(charge (on|off)|sellback (on|off)|sell (on \d+(\.\d+)?
                       r"slots (clear|\d+|0x[0-9a-fA-F]+)|raw 0x[0-9a-fA-F]+( [0-9a-fA-F]*)?)$")
 LOGS = (("api", SB + "/api.log"), ("api", "/var/log/sandbox_api.log"),
         ("e2e", SB + "/relay_live.log"), ("dns", "/var/log/dns_queries.log"),
-        ("ntp", "/var/log/ntp_stub.log"))
+        ("ntp", "/var/log/ntp_stub.log"), ("mqtt", SB + "/mqtt.log"))
 
 
 def tail(path, size=400_000):
@@ -129,6 +130,16 @@ def messages(n):
                     item = ("api", "call " + path_, r.get("plain") or json.dumps(r.get("decoded", {})))
                 else:
                     continue
+            elif chan == "mqtt":
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                t, ev = r.pop("t", ""), r.pop("ev", "?")
+                if r.get("client") == "sandbox-pub" and ev != "publish":
+                    continue                   # the test publisher's own connects
+                who = "sandbox" if r.get("client") == "sandbox-pub" else "app"
+                item = ("mqtt", "%s %s %s" % (who, ev, r.get("topic", "")), r.get("payload") if ev == "publish" else json.dumps(r))
             else:
                 m = re.match(r"(\d\d:\d\d:\d\d) (.*)", line)
                 if not m:
@@ -169,6 +180,14 @@ def apply_plant(values):
 
 def run_cmd(cmd):
     cmd = " ".join(str(cmd).split())
+    if cmd.startswith("mqtt "):                # JSON payload to iot/<device id>/down/cmd
+        try:
+            payload = json.dumps(json.loads(cmd[5:]), separators=(",", ":"))
+        except ValueError as e:
+            return {"ok": False, "output": "not JSON: %s" % e}
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(E2E_TRY), "mqtt_pub.py"), payload],
+                           capture_output=True, text=True, timeout=30)
+        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr[-600:]).strip()}
     if not COMMANDS.match(cmd):
         return {"ok": False, "output": "not a known command: " + cmd}
     r = subprocess.run([sys.executable, E2E_TRY] + cmd.split(), capture_output=True, text=True, timeout=40)
@@ -217,6 +236,8 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
   <button onclick="cmd('sell on '+kwh.value)">Start</button><button onclick="cmd('sell off')">Stop</button></div>
  <div class="row"><b>Raw</b><input id="rawt" value="0x81" style="width:70px;padding:4px 6px"><input id="rawp" placeholder="payload hex" style="width:150px;padding:4px 6px">
   <button onclick="cmd('raw '+rawt.value+' '+rawp.value)">Send</button></div>
+ <div class="row"><b>MQTT command</b><input id="mq" value='{"cmd":"hello"}' style="width:230px;padding:4px 6px">
+  <button onclick="cmd('mqtt '+mq.value)">Publish</button></div>
  <pre id="cmdOut" class="mute">Replies appear here.</pre>
 </section>
 <section><h2>Power flow as the firmware reports it <span id="flowAge" class="mute"></span></h2>
@@ -228,6 +249,7 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
 <section class="wide"><h2>Messages from the firmware to the "cloud"</h2>
  <div class="row"><label><input type="checkbox" class="f" value="api" checked> API calls</label>
  <label><input type="checkbox" class="f" value="e2e" checked> Command channel</label>
+ <label><input type="checkbox" class="f" value="mqtt" checked> MQTT</label>
  <label><input type="checkbox" class="f" value="dns" checked> DNS</label>
  <label><input type="checkbox" class="f" value="ntp" checked> Time</label>
  <label><input type="checkbox" id="replies"> show the sandbox's replies</label>

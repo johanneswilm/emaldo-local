@@ -631,7 +631,7 @@ What it does, in order:
    is already there, and a first SOC of 60 %.
 4. Installs the units that are missing (`serial-tap`, `fake-bms`, `spy-sink`,
    `sandbox-api`, `e2e-relay`, `ntp-stub`, `mcu-sysfs-stub`, `panel`,
-   `portal204`) and three drop-ins: `TAP_MODBUS=store`, `BMS_CABINETS=1:3`,
+   `portal204`, `mqtt-broker`) and three drop-ins: `TAP_MODBUS=store`, `BMS_CABINETS=1:3`,
    `SB_LOG=/sandbox/api.log`. Existing units and drop-ins are kept.
 5. Points the vendor names and the probe names at the guest's eth0 address
    (10.0.2.15) in `/etc/hosts` and `/etc/dnssink.conf`.
@@ -659,8 +659,54 @@ guest, with `/bin/systemctl`.
 `PV` / `LOAD` set all three phases. The fake packs keep their SOC in
 `/sandbox/bak_soc` across restarts; a number written to `/sandbox/bak_soc.set`
 (what the panel does) sets it while running. There is no login on the panel;
-it is meant for the host only. The app's MQTT leg is not in the list: the
-sandbox hands out no broker address, so the app never connects one.
+it is meant for the host only.
+
+### MQTT: the app's cloud command channel
+
+The app has a second cloud channel besides the API and the e2e relay: an MQTT 5
+client (`hps-mqtt`). With the three pieces below it connects to a broker in the
+sandbox and answers commands.
+
+How it finds its broker (all measured on v2.35.3):
+
+1. `get-global-config` returns a JSON **list** of items
+   `{config_id, config_item, bmt_value, default_value}` (all strings). The app
+   picks items by `config_item`; `mqtt_broker_router_url` is the one that
+   matters here. With a `{"config": {}}` object, as the sandbox answered
+   before, the app waits forever in `BrokerURLSource.Fetch`. The
+   `mqtt_broker_url` key that exists for `config.toml` did not change this.
+2. It POSTs `<mqtt_broker_router_url>/auth/broker_url/` in the usual gm2
+   envelope, body `{"id": "<device id>"}`, and reads `broker_url` from the
+   reply.
+3. It POSTs `/bmt/access/auth/<app id>` (same body) for a token. The sandbox
+   offers a JWT-shaped string under `token`, `access_token` and `jwt`; which
+   of the three the app reads is not known.
+4. It connects: MQTT 5 over TLS, client id = user name = device id, password =
+   that token, keep-alive 60 s, session expiry 600 s, and subscribes to
+   `iot/<device id>/down/cmd`.
+
+`mqtt_broker.py` (`mqtt-broker.service`, TLS on 8883 with the sandbox
+certificate) accepts any client, logs every CONNECT, SUBSCRIBE and PUBLISH to
+`/sandbox/mqtt.log` and routes publishes between its clients. `mqtt_pub.py`
+sends one message and prints what comes back:
+
+```
+$ python3 /sandbox/mqtt_pub.py '{"cmd":"hello_sandbox"}'
+got iot/<id>/up/resp -> {"cmd":"hello_sandbox","code":-1}
+$ python3 /sandbox/mqtt_pub.py '{"cmd":"set_fcr_schedule"}'
+got iot/<id>/up/resp -> {"cmd":"set_fcr_schedule","code":0,"result":{"bmt_id":"<id>","task_ids":[""]}}
+```
+
+Commands are JSON with a `cmd` field; the handlers registered in the binary
+are `set_fcr_schedule`, `set_complex_fcr_schedule` and `set_mfrr_schedule`
+(grid-service schedules). Replies go to `iot/<device id>/up/resp` at QoS 1.
+In several minutes connected the app published nothing on its own. The
+parameters of the schedule commands are not worked out, and I do not know
+what the empty `set_fcr_schedule` above left behind in the app (it answered
+with one empty task id).
+
+The panel lists the MQTT traffic with the other cloud messages and has a field
+to publish a command.
 
 ## Build from scratch
 

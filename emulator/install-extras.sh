@@ -21,7 +21,8 @@ keep() { [ -e "$1.bak-extras" ] || cp -p "$1" "$1.bak-extras"; }
 # 1. programs
 mkdir -p $SB
 for f in serial_tap.py fake_bms.py fake_bak.py ws_sink.py sandbox_api.py \
-         e2e_relay.py e2e_try.py plant.py plant_run.py panel.py; do
+         e2e_relay.py e2e_try.py plant.py plant_run.py panel.py \
+         mqtt_broker.py mqtt_pub.py; do
   cp "$HERE/$f" $SB/
 done
 cp "$HERE/dnssink.py" "$HERE/ntp_stub.py" "$HERE/portal204.py" /usr/local/bin/
@@ -47,7 +48,7 @@ fi
 [ -e $SB/bak_soc ] || echo 60 > $SB/bak_soc
 
 # 4. units and drop-ins (existing ones are left alone)
-for u in serial-tap fake-bms spy-sink sandbox-api e2e-relay ntp-stub mcu-sysfs-stub panel portal204; do
+for u in serial-tap fake-bms spy-sink sandbox-api e2e-relay ntp-stub mcu-sysfs-stub panel portal204 mqtt-broker; do
   [ -e $SD/$u.service ] || cp "$HERE/$u.service" $SD/
 done
 dropin() {   # unit file-name line
@@ -67,6 +68,8 @@ if grep -q '^127\.0\.0\.1 .*emaldo\.com' /etc/hosts; then
 fi
 grep -q 'api\.emaldo\.com' /etc/hosts || \
   echo "$ADDR api.emaldo.com dp.emaldo.com files.oms.emaldo.com e2e2.emaldo.com e2e.emaldo.com master.emaldo.com iot.emaldo.com" >> /etc/hosts
+# the broker name the sandbox hands out (covered by *.emaldo.com in the cert and the DNS sink)
+grep -q 'mqtt\.emaldo\.com' /etc/hosts || sed -i '/api\.emaldo\.com/s/$/ mqtt.emaldo.com/' /etc/hosts
 if [ -e /etc/dnssink.conf ]; then
   keep /etc/dnssink.conf
   for n in '\.emaldo\.com' 'emaldo\.com' 'cp\.cloudflare\.com' 'www\.gstatic\.com'; do
@@ -98,8 +101,8 @@ fi
 SC=/bin/systemctl                    # plain "systemctl" is the emulator's stub
 $SC daemon-reload
 $SC stop emaldo 2>/dev/null || true
-$SC enable serial-tap fake-bms spy-sink sandbox-api e2e-relay ntp-stub mcu-sysfs-stub panel portal204 >/dev/null 2>&1
-$SC restart mcu-sysfs-stub dns-sink portal204 ntp-stub sandbox-api e2e-relay spy-sink serial-tap fake-bms panel
+$SC enable serial-tap fake-bms spy-sink sandbox-api e2e-relay ntp-stub mcu-sysfs-stub panel portal204 mqtt-broker >/dev/null 2>&1
+$SC restart mcu-sysfs-stub dns-sink portal204 ntp-stub sandbox-api mqtt-broker e2e-relay spy-sink serial-tap fake-bms panel
 sleep 2
 $SC start emaldo
 say "services restarted; the app needs about 90 s. Panel: port 8088."
