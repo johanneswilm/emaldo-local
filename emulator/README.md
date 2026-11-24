@@ -506,7 +506,7 @@ meter, a house load and PV; `fake_bak.py` reads the resulting battery power
 from `/sandbox/bak_power` and turns it into pack current.
 
 ```
-python3 /sandbox/plant.py PV=1500 LOAD=500     # W per inverter / per phase
+python3 /sandbox/plant.py PV=1500 LOAD=500     # W per inverter / per phase (PV2=..., LOAD3=... for one)
 WAIT=60 python3 /sandbox/plant_run.py "PV=0 LOAD=500" "PV=1500 LOAD=500"
 ```
 
@@ -574,6 +574,38 @@ Notes:
 - `plant_run.py` reads the flow about a minute after a change; right after a
   command the figures are still moving (the `charge on` row's battery and load
   figures were not settled).
+
+### Test panel (house, commands, cloud messages)
+
+`panel.py` is one page and a small JSON API on port 8088 of the guest
+(`panel.service`; `start-vm.sh` forwards the port to the host). It adds no
+mechanism of its own: it edits the `var` lines of `tap_regs`, calls
+`e2e_try.py`, and reads the logs the fakes already write.
+
+- **House:** load and solar per phase, whether the load is on the inverters'
+  line output or only on the grid meter side (`var LINE`), battery SOC.
+- **Commands:** emergency charge, discharge override, sell back to grid,
+  manual selling, raw command.
+- **Readings:** the app's own power flow (over e2e), its decoded inverter,
+  meter and battery readings (spy feed), the setpoints it writes.
+- **Messages:** what the app sends "to the cloud" - sandbox API calls with the
+  decrypted request body (and, optionally, the sandbox's reply), e2e relay
+  frames, DNS lookups, time sync. Repeats are folded into one line with a
+  count. The panel's own power-flow polling shows up in the e2e list as
+  `app ...` lines.
+
+```
+GET  /api/state      house variables, setpoints, readings, power flow
+POST /api/plant      {"LOAD1": 500, "PV": 1500, "LINE": 0, "SOC": 60}
+POST /api/cmd        {"cmd": "charge on"}
+GET  /api/messages   ?n=300
+```
+
+`PV` / `LOAD` set all three phases. The fake packs keep their SOC in
+`/sandbox/bak_soc` across restarts; a number written to `/sandbox/bak_soc.set`
+(what the panel does) sets it while running. There is no login on the panel;
+it is meant for the host only. The app's MQTT leg is not in the list: the
+sandbox hands out no broker address, so the app never connects one.
 
 ## Build from scratch
 

@@ -5,7 +5,7 @@ Answers the module app's gm1/gm2 HTTP API inside the container. No vendor
 forwarding - everything is served locally with plausible or captured content.
 The e2e-bmt-login points the app at a sandbox relay (127.0.0.1:1050).
 """
-import base64, http.server, json, os, secrets, socketserver, string, ssl, sys, time
+import base64, http.server, json, os, secrets, socketserver, string, ssl, sys, time, urllib.parse
 try:
     from Crypto.Cipher import AES
     from Crypto.Util.Padding import pad, unpad
@@ -159,9 +159,20 @@ class H(http.server.BaseHTTPRequestHandler):
         rec = {"t": time.strftime("%H:%M:%S"), "path": self.path,
                "gm": raw.get("gm"),
                "decoded": {k: v[:200] for k, v in dec.items()}}
+        if raw.get("gm") == "2" and "iv" in raw and "json" in raw:
+            # gm2: json = base64(AES-CBC(app secret, iv)); log it readable
+            try:
+                ct = base64.b64decode(urllib.parse.unquote(raw["json"]))
+                rec["plain"] = unpad(AES.new(APP_SECRET, AES.MODE_CBC, raw["iv"].encode()).decrypt(ct), 16).decode("utf-8", "replace")[:6000]
+            except Exception as e:
+                rec["plain_error"] = repr(e)
+        elif "json" in dec:
+            rec["plain"] = dec["json"][:6000]
         with open(LOG, "a", buffering=1) as f:
             f.write(json.dumps(rec) + "\n")
         result = fake_result(self.path)
+        with open(LOG, "a", buffering=1) as f:
+            f.write(json.dumps({"t": rec["t"], "path": self.path, "reply": result}) + "\n")
         is_gm2 = (raw.get("gm") == "2" and "iv" in raw)
         if is_gm2:
             iv = raw["iv"].encode()

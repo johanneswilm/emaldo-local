@@ -16,6 +16,7 @@ Modbus RTU requests can be answered so the app keeps talking:
                       USB0:4017     a register of another port
                       $NAME         a variable, set by a line "var NAME value"
                       1000          a constant
+                    Factors may be joined with "*": $LINE*$LOAD1.
                     e.g. "USB1 0x0067 =$LOAD+USB0:4017" - grid meter phase 1 =
                     house load + what inverter 1 takes from the grid.
                     A line "out PATH =terms" writes the sum to a file whenever
@@ -57,13 +58,16 @@ STORE, OUTS, SENT = {}, {}, {}
 def signed(v): return v - 0x10000 if v & 0x8000 else v
 def expr(link, e, var, depth):
     total = 0
-    for sign, t in re.findall(r"([+-]?)([^+-]+)", e):
-        if t[0] == "$": v = var.get(t[1:], 0)
-        elif ":" in t:
-            port, a = t.split(":")
-            other = next((l for l in LINKS if port in l), link) if port else link
-            v = signed(value(other, int(a, 0), depth + 1))
-        else: v = int(t, 0)
+    for sign, term in re.findall(r"([+-]?)([^+-]+)", e):
+        v = 1
+        for t in term.split("*"):
+            if t[0] == "$": f = var.get(t[1:], 0)
+            elif ":" in t:
+                port, a = t.split(":")
+                other = next((l for l in LINKS if port in l), link) if port else link
+                f = signed(value(other, int(a, 0), depth + 1))
+            else: f = int(t, 0)
+            v *= f
         total += -v if sign == "-" else v
     return total
 def value(link, addr, depth=0):

@@ -1,0 +1,11 @@
+[Unit]
+Description=Emaldo emulator: test panel (house model, commands, cloud messages) on :8088
+After=serial-tap.service sandbox-api.service e2e-relay.service
+
+[Service]
+ExecStart=/usr/bin/python3 /sandbox/panel.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

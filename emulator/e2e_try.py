@@ -5,7 +5,7 @@ Needs /sandbox/emaldo_re/{e2e,const,exceptions}.py (copies of the repo's
 emaldo_re files, with an empty __init__.py; on Debian change the import in
 e2e.py from "Crypto" to "Cryptodome") and /sandbox/sandbox_e2e.json.
 
-usage: e2e_try.py status | charge on|off | sell on [kWh]|off | slots <value>|clear
+usage: e2e_try.py status | flow | charge on|off | sell on [kWh]|off | slots <value>|clear
        e2e_try.py sellback on|off   the "sell back to grid" setting; manual selling
                                     is refused while it is off (reply error 0x0800)
        e2e_try.py raw <type> [payload hex]   send any command, print every reply decrypted
@@ -70,6 +70,8 @@ elif cmd[0] == "sell":
 elif cmd[0] == "slots":
     v = 0x80 if cmd[1] == "clear" else int(cmd[1], 0)
     print("override slots", v, "->", e.send_override(creds, bytes([v] * 96), timeout=3.0))
+elif cmd[0] == "flow":
+    print(json.dumps(e.read_power_flow(creds, timeout=3.0)))
 else:
     print("power flow:", e.read_power_flow(creds, timeout=3.0))
     print("overrides:", str(e.read_overrides(creds, timeout=3.0))[:160])

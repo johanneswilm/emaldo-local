@@ -50,6 +50,9 @@ Environment:
     BAK_POWER_FILE  file holding the total battery power in W (+ = charging),
                   shared evenly by all packs; replaces BAK_CURRENT_A while it
                   exists (default /sandbox/bak_power; serial_tap.py can write it)
+    BAK_SOC_FILE  the packs' SOC is saved here and read back at start (default
+                  /sandbox/bak_soc; BAK_SOC is only the first-ever value). To
+                  set it while running write a number to <file>.set
     BAK_OFF_FILE  file listing pack ids that stay silent (default /sandbox/bak_off;
                   on the CAN tunnel the id is cabinet << 4 | seat, e.g. 19 = 1_3)
     BAK_FLAGS_FILE  file with raw hex for the flag blocks (default /sandbox/bak_flags:
@@ -74,6 +77,7 @@ DEV_DIR = E("BAK_DEV_DIR", "/dev")
 OFF_FILE = E("BAK_OFF_FILE", "/sandbox/bak_off")
 FLAGS_FILE = E("BAK_FLAGS_FILE", "/sandbox/bak_flags")
 POWER_FILE = E("BAK_POWER_FILE", "/sandbox/bak_power")
+SOC_FILE = E("BAK_SOC_FILE", "/sandbox/bak_soc")
 STALE_S = 0.5              # a partial frame older than this is discarded
 OTA_RESET = b"\x7ereset\r"
 
@@ -149,11 +153,17 @@ def set_current():
 
 class Pack:
     count = 0
+    saved = 0.0
 
     def __init__(self, addr):
         Pack.count += 1
+        self.set_seen = self._set_mtime()
         self.addr = addr
         self.soc = SOC
+        try:
+            with open(SOC_FILE) as f: self.soc = float(f.read())
+        except (OSError, ValueError):
+            pass
         self.cycles = 12 + addr
         self.charge_mos = True
         self.discharge_mos = True
@@ -173,7 +183,28 @@ class Pack:
         now = time.monotonic()
         dt, self.t = now - self.t, now
         self.soc += self.current() * dt / 3600 / CAPACITY_AH * 100
+        m = self._set_mtime()
+        if m != self.set_seen:                 # a new value in <SOC_FILE>.set
+            self.set_seen = m
+            try:
+                with open(SOC_FILE + ".set") as f: self.soc = float(f.read())
+            except (OSError, ValueError):
+                pass
         self.soc = min(100.0, max(0.0, self.soc))
+        if now - Pack.saved > 10:
+            Pack.saved = now
+            try:
+                with open(SOC_FILE + ".tmp", "w") as f: f.write("%.3f\n" % self.soc)
+                os.replace(SOC_FILE + ".tmp", SOC_FILE)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _set_mtime():
+        try:
+            return os.stat(SOC_FILE + ".set").st_mtime
+        except OSError:
+            return None
 
     def basic_data(self):
         self.step()

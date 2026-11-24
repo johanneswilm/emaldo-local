@@ -40,7 +40,7 @@ nohup qemu-system-arm -M virt -m 1024 -smp "$SMP" \
   -kernel "$EMU/debian/boot/vmlinuz-6.1.0-50-armmp" -initrd "$EMU/debian/boot/initrd.img-6.1.0-50-armmp" \
   -append "root=/dev/vda rw console=ttyAMA0 systemd.unit=multi-user.target panic=1" \
   -drive if=none,id=hd0,file="$RUN/rootfs2.img",format=raw -device virtio-blk-device,drive=hd0 \
-  -netdev user,id=n0,restrict=on,hostfwd=tcp::10022-:22,hostfwd=tcp::16060-:6060,hostfwd=tcp::16062-:16061 -device virtio-net-device,netdev=n0 \
+  -netdev user,id=n0,restrict=on,hostfwd=tcp::10022-:22,hostfwd=tcp::16060-:6060,hostfwd=tcp::16062-:16061,hostfwd=tcp::8088-:8088 -device virtio-net-device,netdev=n0 \
   -display none \
   -serial unix:"$SERIAL",server=on,wait=off -serial unix:"$SERIAL2",server=on,wait=off \
   -monitor none > "$RUN/logs/vm_$NAME.log" 2>&1 &
