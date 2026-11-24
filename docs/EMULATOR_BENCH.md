@@ -205,9 +205,34 @@ Never commit that file: it contains live end/chat secrets.
   family. Serving `rc_enabled_by_default=true` alone did **not** start sshd;
   activation needs the e2e user command, which is now feasible because the
   captured real e2e response provides the session/chat secret.
+- Diagchan activation is **not** in the cloud `cloudr` magic-command set and not
+  in `/bmt/*` (there is no command-fetch endpoint). It comes from the vendor
+  support SDK (`com.dinsafer.dssupport.msctlib`) over the user channel; diagchan
+  has an `obfus.go`/`dec` layer, so the method is obfuscated. Use the injector
+  above to replay it once identified.
 - `/bmt/get-global-config` returns a **list** of `{config_id, config_item,
   default_value, bmt_value, note}` items (see `vendor_get-global-config.json`),
   not an object under `config`.
+### Command injection (validated 2026-11-24)
+
+`emulator/e2e_inject.py` builds a PROTOCOL.md §4.3 command frame and sends it
+through the fake relay with a distinct app sender identity. The relay forwards
+it to the device session and routes the answer back:
+
+```
+app 10.0.2.15 30a0 len 225
+FWD app->dev 30a0 to ('10.0.2.15',51601)
+dev 10.0.2.15 30a0 len 211
+FWD dev->app and_... to ('10.0.2.15',42806)
+```
+
+So the emulated firmware **executes injected commands**; the `0x30` power-flow
+subscribe answered with a 22-byte payload. The device does not check the sender
+against a roster on this path. It uses its own session nonce for the response,
+so decrypt with the nonce from its `alive` (a wrong IV only garbles the first
+block). This is the transport needed to replay a diagchan activation once its
+command is known.
+
 - OTA: `/bmt/get-latest-ver-url` -> download -> md5 -> `[RootfsUpgrade]` /
   `versions`, with `user-ota-preference`. The sandbox can serve our own image
   for the flash/rollback test; nothing leaves the VM.
