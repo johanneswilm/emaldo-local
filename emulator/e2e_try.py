@@ -8,6 +8,10 @@ e2e.py from "Crypto" to "Cryptodome") and /sandbox/sandbox_e2e.json.
 usage: e2e_try.py status | flow | charge on|off | sell on [kWh]|off | slots <value>|clear
        e2e_try.py sellback on|off   the "sell back to grid" setting; manual selling
                                     is refused while it is off (reply error 0x0800)
+       e2e_try.py fuse [<amps> | <spec> <kW>]   the main-fuse setting (no argument: read it).
+                                    <amps> stands for three phases at 230 V: 25 -> "3x25A", 17.2 kW.
+                                    It cannot be cleared again: an empty spec is refused and
+                                    a capacity of 0 keeps the old one - set a large fuse instead
        e2e_try.py raw <type> [payload hex]   send any command, print every reply decrypted
   slots: write today's 96 override slots, e.g. 236 = discharge while above 20 %,
   100 = charge to 100 %, clear = 0x80 (no override)
@@ -28,6 +32,8 @@ creds = dict(home_end_id=r(), home_group_id=c["group_id"], home_end_secret=r(),
              host="127.0.0.1:1050")
 cmd = sys.argv[1:] or ["status"]
 
+import os
+
 def raw(type_, payload=b"", wait=2.5):
     """Send one command and return every reply datagram, decrypted where possible."""
     import socket, time
@@ -46,6 +52,7 @@ def raw(type_, payload=b"", wait=2.5):
     while time.time() < end:
         try: d = sock.recvfrom(4096)[0]
         except socket.timeout: continue
+        if os.environ.get("E2E_HEX"): print("datagram", d.hex())
         out.append((len(d), e.decrypt_response(d, creds["chat_secret"], payload_validator=lambda b: True, silent=True)))
     return out
 
@@ -67,6 +74,16 @@ elif cmd[0] == "sell":
     kwh = int(float(cmd[2])) if len(cmd) > 2 else 5
     print("manual selling", cmd[1], "-> reply", sorted({b.hex() for _, b in raw(0x80, struct.pack("<BIB", on, kwh if on else 0, 0)) if b}))
     print("state [first use, enabled, target 0.1 kWh, sold 0.1 kWh]:", sorted({b.hex() for _, b in raw(0x81) if b}))
+elif cmd[0] == "fuse":
+    # set 0x38: [len, spec, capacity in 0.1 kW as u32 LE (the app reads u16)]; read 0x39: [len, spec, u16 LE]
+    import struct
+    if len(cmd) > 1:
+        if len(cmd) > 2: spec, cap = cmd[1], round(float(cmd[2]) * 10)
+        else: spec, cap = "3x%sA" % cmd[1], int(3 * float(cmd[1]) * 230 / 100)
+        raw(0x38, bytes([len(spec)]) + spec.encode() + struct.pack("<I", cap))
+    for b in sorted({b for _, b in raw(0x39) if b}):
+        n = b[0]; cap = struct.unpack_from("<H", b, 1 + n)[0]
+        print("fuse:", repr(b[1:1 + n].decode()), "capacity %.1f kW" % (cap / 10) if cap else "no limit")
 elif cmd[0] == "slots":
     v = 0x80 if cmd[1] == "clear" else int(cmd[1], 0)
     print("override slots", v, "->", e.send_override(creds, bytes([v] * 96), timeout=3.0))

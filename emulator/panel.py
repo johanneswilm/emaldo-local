@@ -29,7 +29,7 @@ PORT = int(os.environ.get("PANEL_PORT", "8088"))
 SOC_SET = os.environ.get("BAK_SOC_FILE", SB + "/bak_soc") + ".set"
 E2E_TRY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "e2e_try.py")
 INVERTER_PORTS = ("USB0", "USB2", "USB3")
-COMMANDS = re.compile(r"^(charge (on|off)|sellback (on|off)|sell (on \d+(\.\d+)?|off)|"
+COMMANDS = re.compile(r"^(charge (on|off)|sellback (on|off)|sell (on \d+(\.\d+)?|off)|fuse( \d{1,3})?|"
                       r"slots (clear|\d+|0x[0-9a-fA-F]+)|raw 0x[0-9a-fA-F]+( [0-9a-fA-F]*)?)$")
 LOGS = (("api", SB + "/api.log"), ("api", "/var/log/sandbox_api.log"),
         ("e2e", SB + "/relay_live.log"), ("dns", "/var/log/dns_queries.log"),
@@ -237,6 +237,8 @@ pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-mo
  <div class="row"><b>Discharge override</b><label>above % <input type="number" id="dis" value="20" min="1" max="100" style="width:64px"></label>
   <button onclick="cmd('slots '+(256-(+dis.value)))">Set</button><button onclick="cmd('slots clear')">Clear</button></div>
  <div class="row"><b>Sell back to grid</b><button onclick="cmd('sellback on')">On</button><button onclick="cmd('sellback off')">Off</button></div>
+ <div class="row"><b>Main fuse</b><label>3 x <input type="number" id="fa" value="25" min="6" max="200" style="width:60px"> A</label>
+  <button onclick="cmd('fuse '+fa.value)">Set</button><button onclick="cmd('fuse')">Read</button></div>
  <div class="row"><b>Manual selling</b><label>kWh <input type="number" id="kwh" value="5" min="1" style="width:64px"></label>
   <button onclick="cmd('sell on '+kwh.value)">Start</button><button onclick="cmd('sell off')">Stop</button></div>
  <div class="row"><b>Raw</b><input id="rawt" value="0x81" style="width:70px;padding:4px 6px"><input id="rawp" placeholder="payload hex" style="width:150px;padding:4px 6px">

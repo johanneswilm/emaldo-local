@@ -500,6 +500,7 @@ python3 /sandbox/e2e_try.py slots 236    # override: discharge while above 20 %
 python3 /sandbox/e2e_try.py slots clear
 python3 /sandbox/e2e_try.py sellback on  # the "sell back to grid" setting
 python3 /sandbox/e2e_try.py sell on 5    # manual selling, 5 kWh (needs sellback on)
+python3 /sandbox/e2e_try.py fuse 25      # main fuse 3x25A (no argument: read it)
 python3 /sandbox/e2e_try.py raw 0x81     # any command, replies decrypted
 ```
 
@@ -596,6 +597,32 @@ Notes:
   the grid, and the state (`0x81`) counts up: target 5.0 kWh, sold 0.1, 0.3 ...
   `sell off` puts `0x0FDD` back to 3600 at once and `0x0FD8` to 0 about 80 s
   later; the model keeps exporting during that gap because it follows `0x0FD8`.
+- **Main fuse.** The app's "fuse" setting is command `0x38` (set: `[length,
+  spec text, capacity]`, capacity in 0.1 kW, the phone app sends it as u32 LE
+  and the firmware reads u16) and `0x39` (read: `[length, spec, u16 LE]`);
+  codes and layout from the phone app (`set_fuse_specs` / `get_fuse_specs`),
+  which shows it as "spec - capacity kW" and gets the list to choose from at
+  `/bmt/get-fuse-power-caps-v2/`. `e2e_try.py fuse 25` sets `3x25A`, 17.2 kW
+  (3 x 25 A x 230 V - my convention; the real list was not seen). A fresh
+  device answers an empty spec and capacity 0, which means no limit. After a
+  set the app posts it to `/bmt/submit-bmt-fuse/`. The usable power is 80 % of
+  the capacity (`settings.(*FuseData).GetFuseMaxPower`: capacity x 0.8 x 100
+  W), shared equally over the phases. Measured with the load only behind the
+  meter, 3000 W per phase:
+
+  | Fuse | Mode | App writes `0x0FD8` | Grid meter, 3 phases |
+  |---|---|---|---|
+  | 17.2 kW | `charge on` | 1586 (not 3600) | 13.8 kW = 80 % of the fuse |
+  | 10 kW, 6 kW | `charge on` | 0 | 9.0 kW: charging stops, the load is not covered from the battery |
+  | 10 kW | normal | -2666 (not -3000) | 1.0 kW |
+  | 10 kW | normal, load 4000 | -2666 | 4.0 kW |
+
+  So the limit also caps what an inverter may deliver: 8 kW / 3 per phase in
+  the last two rows. It cannot be cleared by command: an empty spec is
+  refused, and capacity 0 changes the text but keeps the old capacity. The
+  emulator is left at `3x63A`, 43.4 kW, which is above anything the three
+  inverters can do. Commands `0x6A` / `0x6B` (`WriteFuseSpecs` /
+  `ReadFuseSpecs` in the "cluster" router) and `0x49` got no answer here.
 - `e2e_try.py raw <type> [hex]` sends any command and prints every reply
   decrypted - how the error bits above were found.
 - `plant_run.py` reads the flow about a minute after a change; right after a
