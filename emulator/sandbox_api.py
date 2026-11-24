@@ -3,7 +3,11 @@
 
 Answers the module app's gm1/gm2 HTTP API inside the container. No vendor
 forwarding - everything is served locally with plausible or captured content.
-The e2e-bmt-login points the app at a sandbox relay (127.0.0.1:1050).
+The e2e-bmt-login points the app at a sandbox relay on an eth0 address
+(10.0.2.3:1050): the firmware binds its sockets to eth0, so loopback is
+unreachable. A captured real server response can be replayed from
+/sandbox/e2e_login_real.json ("plain" object); the module rejects
+self-issued identities and then re-runs the login every 10 s.
 """
 import base64, http.server, json, os, secrets, socketserver, string, ssl, sys, time
 try:
@@ -74,10 +78,26 @@ PRICE_TPL = {"smart_reserve": 76, "emergency_reserve": 15, "plenty_reserve": 98,
                                "c3": 0, "s1": 0, "s2": 5, "type": "Non-PV"}],
              "name": "Sweden SE4"}
 
+REAL_E2E = None
+try:
+    # Optional: replay the captured real e2e-bmt-login answer. The module
+    # validates the issued identity against the home roster; this is what
+    # stops the 10 s login-retry loop. Never commit the creds file.
+    REAL_E2E = json.load(open("/sandbox/e2e_login_real.json"))["plain"]
+except Exception:
+    pass
+
 def fake_result(path):
     p = path.lower()
     gm = int(time.time() * 1000) * 10**6
     if "e2e-bmt-login" in p:
+        if REAL_E2E:
+            r = dict(REAL_E2E)
+            r["host"] = "10.0.2.3:1050"
+            r["util_host"] = "10.0.2.3:1051"
+            r["addtime"] = gm
+            r["gmtime"] = gm
+            return r
         r = dict(E2E)
         r["addtime"] = gm
         return r

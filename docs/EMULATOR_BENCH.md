@@ -49,6 +49,8 @@ signal (the appwizard/netmonitor loggers never emit — see traps).
 | `hps-net-state.service` | synthesizes `/run/hps/networking/eth0.env` (boot gate #2) |
 | `screen-mcu-stub.service` | `/run/screen_state`, `/dev/mcu1*`, backlight overlay (gate #3) |
 | `ttymxc2-stub.service` | pty-backed `/dev/ttymxc2`, the MCU UART (gate #5) |
+| `vmfb-file.service` | fake `/dev/fb0` as a regular file `/sandbox/fb0.raw` (the display ABI mmaps 15001 B, no ioctls) |
+| `bt-stub.service` + `bt-preload.sh` | insmod the HCI stack by path, `btattach` on `/dev/ttyAMA1`, retry until `hci0` is UP |
 | `vcan.service`, `fake-bms.service` | virtual CAN + fake cabinet/BMS |
 | `bt-stub.service`, `bt-mod-stub.service` | virtual Bluetooth controller + module names (gate #4) |
 | `exp-hb.service` | starts the app outside systemd (`exp-hb.sh`), plus the screen heartbeat |
@@ -152,14 +154,64 @@ first. Default decompiler style only (`normalize`/`paramid` return no C).
 `createFunction` with explicit bodies from the pclntab is safe because Go lays
 text out in functab order.
 
+## The display and the MCU are different things
+
+- **Display** = `/dev/fb0`. The app opens it, mmaps **15001 bytes** (400x300,
+  1 bpp, row stride 50) and draws packed pixels; it uses **no ioctls**, so a
+  regular file is enough. `vmfb-file.service` creates `/sandbox/fb0.raw` and
+  symlinks `/dev/fb0` to it before the app starts. Capture with
+  `base64 -w0 /sandbox/fb0.raw`, then render MSB-first, 1=black:
+  the panel shows Solar/Grid/Battery on the left, Vehicle/KeepOn/Addition on
+  the right, status icons across the top and an empty centre box.
+  Do **not** use a real fbdev driver: `register_framebuffer` makes fbcon take
+  over and `soft_cursor -> sys_imageblit` oopses with this vmalloc screen
+  (`fbcon=nodefer` does not help; it forces the takeover).
+- **MCU** = `/dev/ttymxc2`, the **Modbus RTU bus** to the inverter(s) (slave 1)
+  and the battery (247), 9600 8N1 (`docs/REGISTERS.md`). The app polls it every
+  ~4 s (`00 00 01 06 00 15 00 05 10 00 00 06`, 12-13 bytes, increasing seq) and
+  **expects replies**; `ttymxc2-stub.py` logs the requests but does not answer,
+  which is why every value on the panel is 0 kW. `/dev/mcu1` + `/sys/class/mcu`
+  is the separate front-panel MCU (screen state/backlight).
+
+## e2e login: why it retries every 10 s
+
+A healthy module does **not** call `/bmt/e2e-bmt-login` every 10 s: that is the
+module's retry loop when the issued identity is rejected (documented live in
+`docs/PROTOCOL.md`: self-issued end_ids/groups/chat_secrets are rejected,
+endless 10 s loop; replaying the real server response works). The emulator's
+sandbox returns self-issued creds, so the app retries; serving a captured real
+response (`/sandbox/e2e_login_real.json`) stopped the loop in one run, and the
+relay then saw `dev 10.0.2.15 alive` every 10 s. Replay acceptance depends on the
+module's roster state and is not stable across reboots - treating the captured
+response as a *seed* (with a matching relay ACK) is the reliable next step.
+Never commit that file: it contains live end/chat secrets.
+
+## Remote access surfaces in the firmware (route for shell access)
+
+- `internal/diagchan` is the vendor diagnostics channel: an outbound SSH client
+  (`dialServer`, `startReverseForward`, `ensureTunnelLink`) that can also
+  `ensureSvcRunning("sshd")`, `ensureSSHDir`, `generateKeypair`,
+  `appendKeyEntry`, `grantPrivRule`, `ensurePrivBinarySetuid` and
+  `setRCEnabledByDefault`. It is driven from the configured/e2e user channel
+  (`e2e-user-server` / `e2e-user-client` commands, `applyBootSvcPolicy`).
+- `/bmt/get-global-config` carries `rc_enabled_by_default` (literally "whether
+  sshd is enabled by default") and `access_security_level`. Serving
+  `{"config":{"rc_enabled_by_default":"true"}}` from the sandbox is the cheapest
+  experiment: if the module starts sshd/installs the diag unit, the emulator
+  gives us shell access with keys it generates (readable under `/etc/ssh`, the
+  diag state file, and `/var/log/stubs.log`).
+- OTA: `/bmt/get-latest-ver-url` -> download -> md5 -> `[RootfsUpgrade]` /
+  `versions`, with `user-ota-preference`. The sandbox can serve our own image
+  for the flash/rollback test; nothing leaves the VM.
+
 ## What is still not emulated
 
-- **MCU UART replies.** `ttymxc2-stub.py` logs the app's 4 s poll frames but
-  does not answer them; MCU-dependent behaviour (display content, some control
-  paths) is therefore one-way.
+- **MCU UART replies.** `ttymxc2-stub.py` logs the app's 4 s Modbus poll frames
+  but does not answer them; the panel therefore shows 0 kW everywhere and the
+  inverter/BMS values are absent.
 - **e2e/MSCT handshake.** The device leg reaches the relay over eth0
-  (`relay_live.log: dev 10.0.2.15 alive`), but the app still calls
-  `e2e-bmt-login` every ~10 s; the relay does not complete the tunnel.
+  (`relay_live.log: dev 10.0.2.15 alive`), but the login loop only stops while
+  the module accepts the replayed identity; making that deterministic is open.
 - **Cloud semantics.** The sandbox API returns canned JSON (login creds, price
   template, config); it is not a faithful emulator of auth/crypto or of the
   data the real cloud expects. OTA/update, MQTT/cloudr and FCR flows are not

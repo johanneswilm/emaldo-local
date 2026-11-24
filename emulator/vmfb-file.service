@@ -1,0 +1,11 @@
+[Unit]
+Description=Emaldo emulator: fake /dev/fb0 (regular file for the display ABI)
+Before=exp-hb.service emaldo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/fb0-file.sh
+
+[Install]
+WantedBy=multi-user.target

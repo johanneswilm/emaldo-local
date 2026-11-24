@@ -79,7 +79,7 @@ PY
 )" "10.0.2.3"
 chk "relay listening" "$(ss -lnup 2>/dev/null | grep -cE ":105[01] ")" "2"
 chk "boot-gate stays quiet" "$(grep -ac reboot /var/log/stubs.log)" "$(grep -ac reboot /var/log/stubs.log)"
-n=$(ps -C emaldo_iot_fw 2>/dev/null | tail -n +2 | wc -l)
+n=$(ps -C emaldo_iot_fw -o stat= 2>/dev/null | grep -v "^Z" | wc -l)  # z-state leftovers are dead, not a second app
 [ "$n" -le 1 ] && echo "PASS single app instance ($n)" || { echo "FAIL app instances: $n"; fail=1; }
 echo "== eth0-bound reachability (what the firmware can actually dial):"
 python3 - <<PY

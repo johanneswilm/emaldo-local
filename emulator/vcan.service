@@ -5,7 +5,13 @@ Before=emaldo.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/modprobe vcan
+# modprobe is unusable here (the execlog wrapper resolves kmod as insmod), so
+# load by path. can-raw is needed for AF_CAN SOCK_RAW (fake_bms); its on-demand
+# request_module also goes through modprobe and would fail.
+ExecStart=/sbin/insmod /lib/modules/6.1.0-50-armmp/kernel/net/can/can.ko
+ExecStart=/sbin/insmod /lib/modules/6.1.0-50-armmp/kernel/drivers/net/can/dev/can-dev.ko
+ExecStart=/sbin/insmod /lib/modules/6.1.0-50-armmp/kernel/drivers/net/can/vcan.ko
+ExecStart=/sbin/insmod /lib/modules/6.1.0-50-armmp/kernel/net/can/can-raw.ko
 ExecStart=/sbin/ip link add dev can0 type vcan
 ExecStart=/sbin/ip link set can0 up
 

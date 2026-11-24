@@ -4,7 +4,7 @@ Description=Emaldo emulator: virtual BLE adapter via btattach on ttyAMA1
 # VM's second serial port (-serial unix:serial2.sock). The shim answers
 # every HCI command with Command Complete success - the kernel sees a
 # healthy hci0 and the app's BLE bring-up gets an adapter.
-Before=emaldo.service
+Before=emaldo.service exp-hb.service
 
 [Service]
 Type=oneshot
@@ -13,8 +13,11 @@ RemainAfterExit=yes
 # without KillMode=process systemd would kill it when the script exits and
 # hci0 would be unregistered again.
 KillMode=process
-# hci_uart must be loaded before btattach's protocol ioctl
-ExecStartPre=/sbin/modprobe hci_uart
+# The HCI stack must be loaded before btattach's protocol ioctl. modprobe
+# cannot be used here: /sbin/modprobe is a logger that execs
+# /usr/local/lib/modprobe, which the execlog wrapper misruns as insmod (argv0),
+# so module names are never resolved. bt-preload.sh insmods by path.
+ExecStartPre=/usr/local/bin/bt-preload.sh
 ExecStart=/usr/local/bin/bt-stub-run.sh
 
 [Install]

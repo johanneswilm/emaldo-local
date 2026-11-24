@@ -34,7 +34,25 @@ and protocol experiments.
 > provides a pty and the app polls it every ~4 s. `baseinfo_v1` is the app's
 > own filedb bucket store and grows when the identity is persisted - do not try
 > to forge it. Full analysis: `docs/EMALDO_STATE_GATE.md`; bench notes:
-> `~/src/homeassistant/emaldo-capture/HANDOFF_EMULATOR.md` §4b.
+> `~/src/homeassistant/emaldo-capture/HANDOFF_EMULATOR.md` §4b.>
+> **Update 2 (2026-11-24 20:45): the panel is readable and the e2e loop is
+> understood.** The app renders into `/dev/fb0` with a plain `mmap` (15001
+> bytes, 400x300 1 bpp, no ioctls), so `vmfb-file.service` backs it with a
+> regular file (`/sandbox/fb0.raw`) - never register a real fbdev, fbcon
+> takeover oopses in `sys_imageblit`. Read the file back (MSB-first, 1=black)
+> and the official UI appears: Solar/Grid/Battery, Vehicle/KeepOn/Addition,
+> status icons, centre box; all values are 0 kW because `/dev/ttymxc2` is the
+> Modbus inverter/BMS bus and the stub does not answer its 4 s polls.
+> `/bmt/e2e-bmt-login` every 10 s is the module's *rejection retry* (see
+> `docs/PROTOCOL.md`), not live behaviour; replaying a captured real response
+> (`/sandbox/e2e_login_real.json`, never commit) stopped the loop and the relay
+> saw `dev 10.0.2.15 alive` every 10 s. The reboot also showed what was only
+> done by hand before: the DoH literals `1.1.1.1/32`/`8.8.8.8/32` are now in
+> `20-emu.network`, `vcan`/`can-raw` and the HCI stack are loaded by path (the
+> modprobe/execlog wrapper cannot resolve module names), the fake `/dev/fb0`
+> and pty stub are units ordered before `exp-hb`, and portal204/e2e-relay/
+> bt-stub are enabled. Containment-check is 20/20 PASS after a clean boot.
+>
 >
 > QEMU user-mode was abandoned midway (timing races); the supported path is
 > **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom -
