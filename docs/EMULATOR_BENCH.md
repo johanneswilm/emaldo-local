@@ -166,12 +166,17 @@ text out in functab order.
   Do **not** use a real fbdev driver: `register_framebuffer` makes fbcon take
   over and `soft_cursor -> sys_imageblit` oopses with this vmalloc screen
   (`fbcon=nodefer` does not help; it forces the takeover).
-- **MCU** = `/dev/ttymxc2`, the **Modbus RTU bus** to the inverter(s) (slave 1)
-  and the battery (247), 9600 8N1 (`docs/REGISTERS.md`). The app polls it every
-  ~4 s (`00 00 01 06 00 15 00 05 10 00 00 06`, 12-13 bytes, increasing seq) and
-  **expects replies**; `ttymxc2-stub.py` logs the requests but does not answer,
-  which is why every value on the panel is 0 kW. `/dev/mcu1` + `/sys/class/mcu`
-  is the separate front-panel MCU (screen state/backlight).
+- **MCU** = `/dev/ttymxc2`. The captured frames are a **vendor socket/tower
+  RPC**, not raw Modbus: `00 00 01 <type 06|07> <seq:2> <payload 5-6B>
+  <XOR of bytes 3..len-2>` (verified on every frame; no Modbus CRC anywhere).
+  `internal/mcuclient` is a tower RPC client (Command enums), while
+  `socket/modbus.(*rtuClient)` is the underlying driver (real Modbus framing:
+  `[slave][func][addr2][count2]`, response length `2*count+5`). The app polls
+  every ~4 s (`... 06 00 52 00 00 10 00 00 44`) and **expects replies**; the
+  stub logs only, so the panel shows 0 kW. A fake must answer the tower
+  commands (0x00/0x03/0x05/0x0a/0x0e/0x11/0x13/0x15/0x17/0x18) or the app must
+  be fed through another peripheral path. `/dev/mcu1` + `/sys/class/mcu` is the
+  separate front-panel MCU.
 
 ## e2e login: why it retries every 10 s
 
@@ -188,18 +193,21 @@ Never commit that file: it contains live end/chat secrets.
 
 ## Remote access surfaces in the firmware (route for shell access)
 
-- `internal/diagchan` is the vendor diagnostics channel: an outbound SSH client
-  (`dialServer`, `startReverseForward`, `ensureTunnelLink`) that can also
-  `ensureSvcRunning("sshd")`, `ensureSSHDir`, `generateKeypair`,
-  `appendKeyEntry`, `grantPrivRule`, `ensurePrivBinarySetuid` and
-  `setRCEnabledByDefault`. It is driven from the configured/e2e user channel
-  (`e2e-user-server` / `e2e-user-client` commands, `applyBootSvcPolicy`).
-- `/bmt/get-global-config` carries `rc_enabled_by_default` (literally "whether
-  sshd is enabled by default") and `access_security_level`. Serving
-  `{"config":{"rc_enabled_by_default":"true"}}` from the sandbox is the cheapest
-  experiment: if the module starts sshd/installs the diag unit, the emulator
-  gives us shell access with keys it generates (readable under `/etc/ssh`, the
-  diag state file, and `/var/log/stubs.log`).
+- `internal/diagchan` is an on-demand **reverse SSH tunnel**, not a listener:
+  `Activate` takes a `Config` (actor/host/seed) from the e2e user channel, then
+  `dialServer` + `startReverseForward`, `spawnUnit`/`buildUnitName`,
+  `startChild`/`childHandshake`, `provisionAcct` (GECOS-marked system account),
+  `ensureSSHDir` + `generateKeypair` + `appendKeyEntry`, `grantPrivRule`,
+  `ensurePrivBinarySetuid`, `ensureSvcRunning("sshd")`/`enableSvcAutostart`,
+  with state in `statePath`/`writeState`. Global config only carries policy
+  (`rc_enabled_by_default` = "sshd enabled by default", `access_security_level`)
+  and the app probes `systemctl list-units ... dc-*.service` for the diag unit
+  family. Serving `rc_enabled_by_default=true` alone did **not** start sshd;
+  activation needs the e2e user command, which is now feasible because the
+  captured real e2e response provides the session/chat secret.
+- `/bmt/get-global-config` returns a **list** of `{config_id, config_item,
+  default_value, bmt_value, note}` items (see `vendor_get-global-config.json`),
+  not an object under `config`.
 - OTA: `/bmt/get-latest-ver-url` -> download -> md5 -> `[RootfsUpgrade]` /
   `versions`, with `user-ota-preference`. The sandbox can serve our own image
   for the flash/rollback test; nothing leaves the VM.

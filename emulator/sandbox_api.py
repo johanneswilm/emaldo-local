@@ -112,7 +112,15 @@ def fake_result(path):
     if "get_master_config_area" in p:
         return dict(AREA, gmtime=gm)
     if "get-global-config" in p:
-        return {"config": {}, "gmtime": gm}
+        # The real response is a list of config items, not {"config": {...}}.
+        # rc_enabled_by_default means "sshd enabled by default"; the vendor
+        # defaults are false/critical. See vendor_get-global-config.json.
+        return {"config": [
+            {"config_id": "emulator-1", "config_item": "rc_enabled_by_default",
+             "default_value": "false", "bmt_value": "", "note": "sshd"},
+            {"config_id": "emulator-2", "config_item": "access_security_level",
+             "default_value": "critical", "bmt_value": "", "note": "access"},
+        ], "gmtime": gm}
     if "get-balance-contract-status" in p:
         return {"is_pause": False, "is_signed": True, "revenue_type": 3,
                 "gmtime": gm}
