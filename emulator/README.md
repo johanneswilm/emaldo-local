@@ -501,6 +501,7 @@ python3 /sandbox/e2e_try.py slots clear
 python3 /sandbox/e2e_try.py sellback on  # the "sell back to grid" setting
 python3 /sandbox/e2e_try.py sell on 5    # manual selling, 5 kWh (needs sellback on)
 python3 /sandbox/e2e_try.py fuse 25      # main fuse 3x25A (no argument: read it)
+python3 /sandbox/e2e_try.py peak limit 8000   # peak shaving: on|off, limit W, reserve % %
 python3 /sandbox/e2e_try.py raw 0x81     # any command, replies decrypted
 ```
 
@@ -542,8 +543,9 @@ output, 0 when only the grid meter sees it (the app's "additional load"):
 So the line output is treated as passed through from the grid side, and S as
 the power the inverter converts between AC and its battery/PV side. That is
 what the app's reactions fit: with the load on the line output it writes S =
--load, not 0. It is a model, not a capture from real hardware, and it does
-not apply the battery limit in `0x0FDD`.
+-load, not 0. It is a model, not a capture from real hardware. S is held
+within the battery limit in `0x0FDD` when both have the same sign (see "Peak
+shaving" below); the measurements in the next table were made before that.
 
 An earlier version had 4017 with the opposite sign and left 4015 and 4020 at
 0. The app then ignored the inverters' grid and battery power, which gave
@@ -623,6 +625,36 @@ Notes:
   emulator is left at `3x63A`, 43.4 kW, which is above anything the three
   inverters can do. Commands `0x6A` / `0x6B` (`WriteFuseSpecs` /
   `ReadFuseSpecs` in the "cluster" router) and `0x49` got no answer here.
+- **Peak shaving.** `e2e_try.py peak on`, `peak limit 8000` (one schedule,
+  all day, every day), `peak reserve 90 5` (peak reserve %, UPS reserve %),
+  `peak` to read. Commands `0x57` toggle, `0x58` reserves, `0x5A` add
+  schedule, `0x5B` / `0x5C` read. The schedule command is `[length, record]`
+  and the record is 26 bytes (`settings.(*PeakShavingSchedule).ParseBmtpData`):
+  all day u8, start s u32, end s u32, weekday bits u8, power W u32, created
+  i64, id i32, little-endian; the read reply is `[length u16, records]`. So
+  what `emaldo_re/e2e.py` calls the schedule id is the length: its
+  `set_peak_shaving_schedule` was acknowledged but stored nothing here.
+  Measured with a limit of 8000 W, load only behind the meter, packs at 70 %:
+
+  | Reserve | Load, 3 phases | App writes per inverter | Grid meter | Battery |
+  |---|---|---|---|---|
+  | 0 % (as found) | 6 kW | `0x0FD8` -2000 | 0 | 6.0 kW out |
+  | 90 % (above SOC) | 6 kW | `0x0FD8` +533 | 7.6 kW | 1.6 kW in |
+  | 90 % | 9 kW | `0x0FD8` -3000, `0x0FDD` -467 | 7.6 kW | 1.4 kW out |
+  | 90 % | 12 kW | `0x0FD8` -3600, `0x0FDD` -1467 | 7.6 kW | 4.4 kW out |
+  | 90 % | 15 kW | `0x0FD8` -3600, `0x0FDD` -2467 | 7.6 kW | 7.5 kW out |
+
+  With no reserve it changes nothing: the app covers the whole load from the
+  battery as it always does. With a reserve above the present charge it keeps
+  the battery for the peaks: under the limit it does not discharge and refills
+  the reserve from the grid, over the limit it releases just the excess. Both
+  ways the meter stays at 7.6 kW, 400 W under the limit; where that margin
+  comes from was not determined. The release is what the app writes to
+  `0x0FDD`, with `0x0FD8` at its maximum, so the house model now holds the
+  setpoint within `0x0FDD` when both have the same sign - an assumption about
+  the inverter; without it the model released 3.6 kW per inverter and the
+  meter fell to 1.2 kW. The schedule stays stored (no delete command here);
+  the emulator is left with peak shaving off and reserves 0.
 - `e2e_try.py raw <type> [hex]` sends any command and prints every reply
   decrypted - how the error bits above were found.
 - `plant_run.py` reads the flow about a minute after a change; right after a

@@ -17,7 +17,8 @@ Modbus RTU requests can be answered so the app keeps talking:
                       $NAME         a variable, set by a line "var NAME value"
                       1000          a constant
                     Factors may be joined with "*": $LINE*$LOAD1, and a term
-                    may end in an integer divisor: $FREQ/10.
+                    may end in an integer divisor: $FREQ/10. "a~b" is a held
+                    within b when both have the same sign (:0x0fd8~:0x0fdd).
                     e.g. "USB1 0x0067 =$LOAD+USB0:4017" - grid meter phase 1 =
                     house load + what inverter 1 takes from the grid.
                     A line "out PATH =terms" writes the sum to a file whenever
@@ -64,13 +65,18 @@ def expr(link, e, var, depth):
         if "/" in term:                        # trailing integer divisor: $FREQ/10
             term, d = term.rsplit("/", 1)
             div = int(d, 0) or 1
-        for t in term.split("*"):
-            if t[0] == "$": f = var.get(t[1:], 0)
-            elif ":" in t:
+        def atom(t):
+            if t[0] == "$": return var.get(t[1:], 0)
+            if ":" in t:
                 port, a = t.split(":")
                 other = next((l for l in LINKS if port in l), link) if port else link
-                f = signed(value(other, int(a, 0), depth + 1))
-            else: f = int(t, 0)
+                return signed(value(other, int(a, 0), depth + 1))
+            return int(t, 0)
+        for t in term.split("*"):
+            if "~" in t:                           # a~b: a, held within b when both have the same sign
+                a, b = (atom(x) for x in t.split("~"))
+                f = max(a, b) if a < 0 and b < 0 else min(a, b) if a > 0 and b > 0 else a
+            else: f = atom(t)
             v *= f
         v = int(v / div)
         total += -v if sign == "-" else v

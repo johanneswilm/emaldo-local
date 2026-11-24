@@ -12,6 +12,9 @@ usage: e2e_try.py status | flow | charge on|off | sell on [kWh]|off | slots <val
                                     <amps> stands for three phases at 230 V: 25 -> "3x25A", 17.2 kW.
                                     It cannot be cleared again: an empty spec is refused and
                                     a capacity of 0 keeps the old one - set a large fuse instead
+       e2e_try.py peak [on | off | limit <W> | reserve <peak %> <ups %> | redundancy <n>]
+                                    peak shaving (no argument: read it); "limit" writes
+                                    schedule 1 as all day, every day
        e2e_try.py raw <type> [payload hex]   send any command, print every reply decrypted
   slots: write today's 96 override slots, e.g. 236 = discharge while above 20 %,
   100 = charge to 100 %, clear = 0x80 (no override)
@@ -84,6 +87,19 @@ elif cmd[0] == "fuse":
     for b in sorted({b for _, b in raw(0x39) if b}):
         n = b[0]; cap = struct.unpack_from("<H", b, 1 + n)[0]
         print("fuse:", repr(b[1:1 + n].decode()), "capacity %.1f kW" % (cap / 10) if cap else "no limit")
+elif cmd[0] == "peak":
+    a = cmd[1:]
+    if a[:1] == ["on"] or a[:1] == ["off"]: print("toggle ->", e.toggle_peak_shaving(creds, a[0] == "on"))
+    elif a[:1] == ["limit"]:
+        # 0x5A: [length, record]; record (settings.(*PeakShavingSchedule).ParseBmtpData, 26 bytes) =
+        # all day u8, start s u32, end s u32, weekday bits u8, power W u32, created i64, id i32 (all LE)
+        import struct, time
+        rec = struct.pack("<BIIBIqi", 1, 0, 86399, 0x7F, int(a[1]), int(time.time()), int(a[2]) if len(a) > 2 else 0)
+        raw(0x5A, bytes([len(rec)]) + rec)
+    elif a[:1] == ["reserve"]: print("points ->", e.set_peak_shaving_points(creds, int(a[1]), int(a[2])))
+    elif a[:1] == ["redundancy"]: print("redundancy ->", e.set_peak_shaving_redundancy(creds, int(a[1])))
+    print("config  :", sorted({b.hex() for _, b in raw(0x5B) if b}))
+    print("schedule:", sorted({b.hex() for _, b in raw(0x5C) if b}))
 elif cmd[0] == "slots":
     v = 0x80 if cmd[1] == "clear" else int(cmd[1], 0)
     print("override slots", v, "->", e.send_override(creds, bytes([v] * 96), timeout=3.0))
