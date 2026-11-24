@@ -8,7 +8,8 @@ Modbus RTU requests can be answered so the app keeps talking:
                     feed this shows which register ends up in which field
   TAP_MODBUS=file   values from TAP_REGS (default /sandbox/tap_regs: lines
                     "port-substring 0xADDR value", re-read on every request;
-                    registers not listed return 0)
+                    registers not listed return 0; a value "=0x0fd8" or
+                    "=-0x0fd8" follows / negates a register the app wrote)
   TAP_MODBUS=store  like file, but writes are remembered per port and read back
                     (what a real slave does; the app verifies its writes)
   unset             stay silent
@@ -32,7 +33,10 @@ def table(link):
     try:
         for line in open(REGS):
             p = line.split("#")[0].split()
-            if len(p) == 3 and p[0] in link: out[int(p[1], 0)] = int(p[2], 0) & 0xFFFF
+            if len(p) == 3 and p[0] in link:
+                # "=ADDR" / "=-ADDR": follow (or negate) another register, e.g.
+                # make a measured power track the setpoint the app wrote
+                out[int(p[1], 0)] = p[2] if p[2][0] == "=" else int(p[2], 0) & 0xFFFF
     except (OSError, ValueError):
         pass
     return out
@@ -40,7 +44,13 @@ STORE = {}
 def value(link, addr):
     if MODE == "addr": return addr
     if MODE == "store" and (link, addr) in STORE: return STORE[(link, addr)]
-    if MODE in ("file", "store"): return table(link).get(addr, 0)
+    if MODE in ("file", "store"):
+        v = table(link).get(addr, 0)
+        if isinstance(v, str):
+            neg = v[1] == "-"
+            v = STORE.get((link, int(v[2 if neg else 1:], 0)), 0)
+            if neg: v = -v & 0xFFFF
+        return v
     return 0
 def write(link, addr, vals):
     new = [(addr + i, v) for i, v in enumerate(vals) if STORE.get((link, addr + i)) != v]
