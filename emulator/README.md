@@ -329,7 +329,7 @@ fake-bms.service.d/*.conf:  Environment=BMS_CABINETS=1:3,2:5   # cab:batteries
 Not emulated: battery history, LIn-mode policy, battery and cabinet firmware
 update, inverters, b-sensor, the MCU.
 
-## Inverters (in progress, v2.35.3)
+## Inverters, cloud stage and commands (v2.35.3)
 
 The app drives three inverters over Modbus RTU, slave 1, one per port
 (`/dev/ttyCH9344USB0`, `2`, `3`), with the `hisolar` driver. Two things have to
@@ -466,13 +466,35 @@ Calls seen once it works: `e2e-bmt-login`, `iot-online`, `get-global-config`,
 `get-latest-ver-url`, `get-default-price-percent`,
 `get-balance-contract-status`, `metrics/auth/*`, `update-region-v2`.
 
-**Not working: commands.** `emaldo_re.e2e` packets (power-flow read `0x30`,
-emergency charge `0x01`, override subscribe `0x1b`, battery `0x06`) reach the
-app through the relay, with wake and heartbeat forwarded too, and the app
-sends nothing back. Sent straight to its UDP ports they are ignored as well.
-From the code: a frame's first byte is version/type (`0xD_` = request), the
-user path needs the proxy option and decrypts the body with AES; which check
-drops these frames is not known.
+- **Group id length.** The sandbox issued a 34-character `group_id` (32
+  random characters plus `@0`). Real ones are 32 including the `@0`, and e2e
+  clients write them into a fixed 32-byte option, so every command frame was
+  malformed and the app dropped it without a reply. `sandbox_api.py` now issues
+  30 + `@0`; fix an existing `/sandbox/sandbox_e2e.json` by hand.
+- **wake / heartbeat** from the client are forwarded to the device as well as
+  acknowledged by the relay.
+
+### Commanding a charge (works)
+
+`e2e_try.py`, run inside the guest, uses the repo's `emaldo_re.e2e` client
+against the relay on `127.0.0.1:1050`:
+
+```
+python3 /sandbox/e2e_try.py status       # power flow, override slots, battery info
+python3 /sandbox/e2e_try.py charge on    # emergency charge
+python3 /sandbox/e2e_try.py charge off
+```
+
+Measured: `charge on` is acknowledged, and within 2 s the app writes
+`0x0FD8`=3600 and `0x0FDD`=3600 to each of the three inverters (3.6 kW each).
+`charge off` brings both back to 0 within 1 s. Repeated three times with the
+same result. With the follow rule in `tap_regs` (`4017 =0x0fd8`,
+`4022 =0x0fd8`) the inverter then reports `PowerOnGrid` 3600 and
+`PowerOnBattery` -3600. `status` returns the fake packs' data through the app
+(voltage, current, SOC, temperatures).
+
+Not done: discharge on command, and the app-side `power flow` still reads 0 W
+while charging (the fake inverter's remaining fields are not filled in).
 
 ## Build from scratch
 

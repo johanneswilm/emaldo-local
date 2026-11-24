@@ -31,7 +31,9 @@ CREDS_PATH = os.path.join(SB, "sandbox_e2e.json")
 if os.path.exists(CREDS_PATH):
     E2E = json.load(open(CREDS_PATH))
 else:
-    E2E = {"id": "bmt", "group_id": rand32() + "@0", "end_id": rand32(),
+    # group ids are 32 characters INCLUDING the "@0" suffix; e2e clients write
+    # them into a fixed 32-byte option, so a longer one corrupts their frames.
+    E2E = {"id": "bmt", "group_id": rand32()[:30] + "@0", "end_id": rand32(),
            "end_secret": rand32(), "chat_secret": rand32(),
            "host": RELAY + ":1050", "util_host": RELAY + ":1051"}
     json.dump(E2E, open(CREDS_PATH, "w"), indent=1)
