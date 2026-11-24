@@ -226,12 +226,14 @@ dev 10.0.2.15 30a0 len 211
 FWD dev->app and_... to ('10.0.2.15',42806)
 ```
 
-So the emulated firmware **executes injected commands**; the `0x30` power-flow
-subscribe answered with a 22-byte payload. The device does not check the sender
-against a roster on this path. It uses its own session nonce for the response,
-so decrypt with the nonce from its `alive` (a wrong IV only garbles the first
-block). This is the transport needed to replay a diagchan activation once its
-command is known.
+**Correction (2026-11-24 23:55): the device ACKs the frame but does not execute
+it.** A side-effect test with the device's own `request_check_update` method
+produced no OTA request, and 168 app support opcodes plus 15 ASCII support/diag
+names produced no diagchan footprint. The 211-byte reply is the msct transport
+ACK, not an application response. The e2e layer needs the real session
+establishment/trust handshake (app end_id/secret status exchange), which the
+fake relay does not implement. Next step: replay a complete real app->device
+session from the captures byte-for-byte, then re-test a documented command.
 
 - OTA: `/bmt/get-latest-ver-url` -> download -> md5 -> `[RootfsUpgrade]` /
   `versions`, with `user-ota-preference`. **Rootfs updates are APT-based**
