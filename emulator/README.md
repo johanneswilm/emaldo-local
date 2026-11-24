@@ -343,7 +343,7 @@ itself; choose how with `TAP_MODBUS`:
 | `zero` (default) | every register reads 0 |
 | `store` | 0 until the app writes a register, then the written value |
 | `addr` | each register reads its own address (for mapping fields) |
-| `file` | values from `/sandbox/tap_regs`, lines `port-substring 0xADDR value` |
+| `file` | values from `/sandbox/tap_regs`, lines `port-substring 0xADDR value`; a value may be an expression, see `tap_regs.example` |
 
 The tap logs a repeated frame only the 1st, 2nd, 100th, 200th ... time, so a
 steady poll shows as `(100x, ...)`, not as many lines.
@@ -400,10 +400,9 @@ Inverter registers, from a run with `TAP_MODBUS=addr` (decimal addresses):
 | `0x0FD3` block | `AccessToGrid/Battery/MPPT/LineEnabled` |
 
 Not mapped: `State`, `FanStatus` (201 in that run), `VoltageOnBattery`
-(8784 in that run), `RealPowerOnMPPT`, `IsPVSurplus`. In `tap_regs` a value
-`=0x0fd8` makes a register follow one the app wrote, so measured power can
-track the setpoint. Simulated grid import or export on the b-sensor (3 kW
-either way) did not change the app's setpoints.
+(8784 in that run), `RealPowerOnMPPT`, `IsPVSurplus`. Signs and the plant
+model that makes these registers consistent are in "A house around the
+inverters" below.
 
 ### Grid meter (b-sensor), port `/dev/ttyCH9344USB1`
 
@@ -483,18 +482,86 @@ against the relay on `127.0.0.1:1050`:
 python3 /sandbox/e2e_try.py status       # power flow, override slots, battery info
 python3 /sandbox/e2e_try.py charge on    # emergency charge
 python3 /sandbox/e2e_try.py charge off
+python3 /sandbox/e2e_try.py slots 236    # override: discharge while above 20 %
+python3 /sandbox/e2e_try.py slots clear
+python3 /sandbox/e2e_try.py sell on 5    # manual selling (no effect so far)
 ```
 
 Measured: `charge on` is acknowledged, and within 2 s the app writes
 `0x0FD8`=3600 and `0x0FDD`=3600 to each of the three inverters (3.6 kW each).
-`charge off` brings both back to 0 within 1 s. Repeated three times with the
-same result. With the follow rule in `tap_regs` (`4017 =0x0fd8`,
-`4022 =0x0fd8`) the inverter then reports `PowerOnGrid` 3600 and
-`PowerOnBattery` -3600. `status` returns the fake packs' data through the app
+`charge off` brings both back to 0 within 1 s. Repeated four times with the
+same result. `status` returns the fake packs' data through the app
 (voltage, current, SOC, temperatures).
 
-Not done: discharge on command, and the app-side `power flow` still reads 0 W
-while charging (the fake inverter's remaining fields are not filled in).
+### A house around the inverters: load, solar, discharge
+
+Single register values are not enough for the app's control loop: it regulates
+the grid meter to zero, so the meter has to react to the setpoints. In
+`tap_regs` a value may be an expression over registers of any port and
+variables (see the header of `serial_tap.py`), and an `out` line writes a sum
+to a file. `tap_regs.example` uses that to model three inverters, the grid
+meter, a house load and PV; `fake_bak.py` reads the resulting battery power
+from `/sandbox/bak_power` and turns it into pack current.
+
+```
+python3 /sandbox/plant.py PV=1500 LOAD=500     # W per inverter / per phase
+WAIT=60 python3 /sandbox/plant_run.py "PV=0 LOAD=500" "PV=1500 LOAD=500"
+```
+
+The model, with S = the setpoint the app writes to `0x0FD8` (signed, W, + =
+take from the grid):
+
+| Register | Model | Meaning that fits the app's reactions |
+|---|---|---|
+| 4017 `PowerOnGrid` | `-S` | + = the inverter delivers to the AC side |
+| 4022 `PowerOnBattery` | `-(S + PV)` | register + = discharging (the feed shows the opposite sign) |
+| 4027 `PowerOnLine` | `LOAD` | the load on the inverter's output |
+| 4032 `PowerOnMPPT` | `PV` | PV power; 4030 `VoltageOnPV` non-zero sets `AccessToMPPTEnabled` |
+| meter `0x0067`-`0x0069` | `LOAD - reg 4017` | grid power per phase, + = import |
+
+This is a model that the app's behaviour is consistent with, not a capture
+from real hardware. With the opposite sign on 4017 the app overshoots and
+exports; with 4027 tied to the setpoint it runs away to -3600 W.
+
+Measured with it (fake packs at about 50 % SOC, values per inverter, power
+flow as the app reports it over e2e, three inverters summed):
+
+| PV | Load | App writes `0x0FD8` | App's power flow |
+|---|---|---|---|
+| 0 | 0 | 0 | all 0 |
+| 0 | 500 | -500 | battery 1500 discharging, load 1500, grid 0 |
+| 1500 | 500 | -500 | solar 4500, battery 3000 charging, load 1500, grid 0 |
+| 1500 | 0 | 0 | solar 4500, battery 4500 charging, grid 0 |
+| 1500 | 500, `charge on` | 2100 (= 3600 - PV) | grid 7800 import |
+
+So solar input works: the app sees the PV power, lets it charge the battery
+and covers the load from it, and an emergency charge tops the PV up to 3.6 kW
+per inverter from the grid.
+
+Discharge on command, measured earlier on a simpler model (packs at 100 %,
+load visible only on the grid meter as 1 kW import per phase):
+
+- no override: the setpoints stay 0;
+- `e2e_try.py slots 236` (all of today's override slots = "discharge while
+  above 20 %"): the app steps `0x0FD8` and `0x0FDD` by about -980 W every 10 s
+  down to -3600 W per inverter, and back up when the meter shows export;
+- `e2e_try.py slots clear`: setpoints return to 0 and stay there.
+
+Notes:
+
+- `0x0FDD` is not a copy of `0x0FD8`: 3600 when idle, 200 while discharging
+  into a load, 1071-1700 with PV and load, 533 at start. Its meaning is open.
+- With 4027 left at 0 the app showed a load of 200 W and a solar figure of
+  battery + 200 W whatever the real values. The battery figure in the power
+  flow comes from the packs' current, not from the inverter.
+- With full packs (100 % SOC) and PV, the app reports 200 W solar and writes
+  nothing.
+- `e2e_try.py sell on 5` (manual selling) is acknowledged but changes nothing,
+  and reading its state back returns nothing. `manualSelling.validatePreconditions`
+  has several checks; which one fails is not known.
+- `plant_run.py` reads the flow about a minute after a change; right after a
+  command the figures are still moving (the `charge on` row's battery and load
+  figures were not settled).
 
 ## Build from scratch
 

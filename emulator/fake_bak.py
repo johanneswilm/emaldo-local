@@ -47,6 +47,9 @@ Environment:
     BAK_VERSION   version string (default 2.1.3)
     BAK_CELLS, BAK_CAPACITY_AH, BAK_SOC, BAK_CURRENT_A (+ = charging),
     BAK_TEMP_C, BAK_FLAG_WORDS (u16 count of blocks 6 and 10, default 5)
+    BAK_POWER_FILE  file holding the total battery power in W (+ = charging),
+                  shared evenly by all packs; replaces BAK_CURRENT_A while it
+                  exists (default /sandbox/bak_power; serial_tap.py can write it)
     BAK_OFF_FILE  file listing pack ids that stay silent (default /sandbox/bak_off;
                   on the CAN tunnel the id is cabinet << 4 | seat, e.g. 19 = 1_3)
     BAK_FLAGS_FILE  file with raw hex for the flag blocks (default /sandbox/bak_flags:
@@ -70,6 +73,7 @@ FLAG_WORDS = int(E("BAK_FLAG_WORDS", "5"))
 DEV_DIR = E("BAK_DEV_DIR", "/dev")
 OFF_FILE = E("BAK_OFF_FILE", "/sandbox/bak_off")
 FLAGS_FILE = E("BAK_FLAGS_FILE", "/sandbox/bak_flags")
+POWER_FILE = E("BAK_POWER_FILE", "/sandbox/bak_power")
 STALE_S = 0.5              # a partial frame older than this is discarded
 OTA_RESET = b"\x7ereset\r"
 
@@ -134,8 +138,20 @@ def block(id_, words):
     return out
 
 
+def set_current():
+    """Amps per pack: from BAK_POWER_FILE (W over all packs) or BAK_CURRENT_A."""
+    try:
+        with open(POWER_FILE) as f:
+            return float(f.read()) / max(1, Pack.count) / (CELLS * 3.28)
+    except (OSError, ValueError):
+        return CURRENT_A
+
+
 class Pack:
+    count = 0
+
     def __init__(self, addr):
+        Pack.count += 1
         self.addr = addr
         self.soc = SOC
         self.cycles = 12 + addr
@@ -147,7 +163,7 @@ class Pack:
         self.t = time.monotonic()
 
     def current(self):
-        i = CURRENT_A
+        i = set_current()
         if (i > 0 and (not self.charge_mos or self.soc >= 100)) or \
            (i < 0 and (not self.discharge_mos or self.soc <= 0)):
             i = 0.0

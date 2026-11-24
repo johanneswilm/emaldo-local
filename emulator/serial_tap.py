@@ -8,8 +8,19 @@ Modbus RTU requests can be answered so the app keeps talking:
                     feed this shows which register ends up in which field
   TAP_MODBUS=file   values from TAP_REGS (default /sandbox/tap_regs: lines
                     "port-substring 0xADDR value", re-read on every request;
-                    registers not listed return 0; a value "=0x0fd8" or
-                    "=-0x0fd8" follows / negates a register the app wrote)
+                    registers not listed return 0)
+                    A value starting with "=" is a signed sum of terms, so the
+                    fake hardware can be made consistent with itself:
+                      :0x0fd8       a register of the same port (e.g. one the
+                                    app wrote - measured power follows setpoint)
+                      USB0:4017     a register of another port
+                      $NAME         a variable, set by a line "var NAME value"
+                      1000          a constant
+                    e.g. "USB1 0x0067 =$LOAD+USB0:4017" - grid meter phase 1 =
+                    house load + what inverter 1 takes from the grid.
+                    A line "out PATH =terms" writes the sum to a file whenever
+                    it changes, for another fake to read (fake_bak.py takes
+                    the battery power from BAK_POWER_FILE).
   TAP_MODBUS=store  like file, but writes are remembered per port and read back
                     (what a real slave does; the app verifies its writes)
   unset             stay silent
@@ -17,7 +28,7 @@ Writes (fn 0x06, 0x10) are acknowledged; each new value is logged.
 
 usage: serial_tap.py /dev/ttymxc2 /dev/ttyCH9344USB0 ...   (log: /sandbox/tap.out)
 """
-import os, select, sys, time, tty
+import os, re, select, sys, time, tty
 MODE = os.environ.get("TAP_MODBUS")
 REGS = os.environ.get("TAP_REGS", "/sandbox/tap_regs")
 log = open(os.environ.get("TAP_LOG", "/sandbox/tap.out"), "a", buffering=1)
@@ -29,29 +40,53 @@ def crc(b):
         for _ in range(8): c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
     return bytes([c & 0xFF, c >> 8])
 def table(link):
-    out = {}
+    """Register lines for this port, and the "var" lines."""
+    out, var = {}, {}
     try:
         for line in open(REGS):
             p = line.split("#")[0].split()
-            if len(p) == 3 and p[0] in link:
-                # "=ADDR" / "=-ADDR": follow (or negate) another register, e.g.
-                # make a measured power track the setpoint the app wrote
+            if len(p) != 3: continue
+            if p[0] == "var": var[p[1]] = int(p[2], 0)
+            elif p[0] == "out": OUTS[p[1]] = p[2][1:]
+            elif p[0] in link:
                 out[int(p[1], 0)] = p[2] if p[2][0] == "=" else int(p[2], 0) & 0xFFFF
     except (OSError, ValueError):
         pass
-    return out
-STORE = {}
-def value(link, addr):
+    return out, var
+STORE, OUTS, SENT = {}, {}, {}
+def signed(v): return v - 0x10000 if v & 0x8000 else v
+def expr(link, e, var, depth):
+    total = 0
+    for sign, t in re.findall(r"([+-]?)([^+-]+)", e):
+        if t[0] == "$": v = var.get(t[1:], 0)
+        elif ":" in t:
+            port, a = t.split(":")
+            other = next((l for l in LINKS if port in l), link) if port else link
+            v = signed(value(other, int(a, 0), depth + 1))
+        else: v = int(t, 0)
+        total += -v if sign == "-" else v
+    return total
+def value(link, addr, depth=0):
     if MODE == "addr": return addr
     if MODE == "store" and (link, addr) in STORE: return STORE[(link, addr)]
-    if MODE in ("file", "store"):
-        v = table(link).get(addr, 0)
-        if isinstance(v, str):
-            neg = v[1] == "-"
-            v = STORE.get((link, int(v[2 if neg else 1:], 0)), 0)
-            if neg: v = -v & 0xFFFF
+    if MODE in ("file", "store") and depth < 4:
+        regs, var = table(link)
+        v = regs.get(addr, 0)
+        if isinstance(v, str): v = max(-0x8000, min(0x7FFF, expr(link, v[1:], var, depth))) & 0xFFFF
         return v
     return 0
+def outputs(link):
+    """Write each "out" sum to its file when the value changes."""
+    if not OUTS: return
+    var = table(link)[1]
+    for path, e in list(OUTS.items()):
+        v = expr(link, e, var, 0)
+        if SENT.get(path) != v:
+            SENT[path] = v
+            try:
+                with open(path + ".tmp", "w") as f: f.write(f"{v}\n")
+                os.replace(path + ".tmp", path)
+            except OSError: pass
 def write(link, addr, vals):
     new = [(addr + i, v) for i, v in enumerate(vals) if STORE.get((link, addr + i)) != v]
     for a, v in new: STORE[(link, a)] = v
@@ -71,6 +106,7 @@ def answer(link, d):
         write(link, addr, vals)
         return d[:6] + crc(d[:6])
     return None
+LINKS = sys.argv[1:]
 ports, seen = {}, {}
 for link in sys.argv[1:]:
     m, s = os.openpty(); tty.setraw(s)
@@ -85,4 +121,5 @@ while True:
             say(f"{ports[fd]} ({seen[k]}x, {len(d)}B): {d[:96].hex()}")
         if MODE:
             r = answer(ports[fd], d)
+            outputs(ports[fd])
             if r: os.write(fd, r)
