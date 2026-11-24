@@ -39,7 +39,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 80
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # all addresses: the app's sockets are bound to eth0, loopback is not enough
+    srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
     srv.serve_forever()
 
 

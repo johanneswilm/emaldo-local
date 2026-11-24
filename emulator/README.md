@@ -577,6 +577,8 @@ Notes:
 
 ### Test panel (house, commands, cloud messages)
 
+![The test panel: house inputs, commands, the app's power flow, batteries, inverters and cloud messages](panel.png)
+
 `panel.py` is one page and a small JSON API on port 8088 of the guest
 (`panel.service`; `start-vm.sh` forwards the port to the host). It adds no
 mechanism of its own: it edits the `var` lines of `tap_regs`, calls
@@ -600,6 +602,59 @@ POST /api/plant      {"LOAD1": 500, "PV": 1500, "LINE": 0, "SOC": 60}
 POST /api/cmd        {"cmd": "charge on"}
 GET  /api/messages   ?n=300
 ```
+
+#### Installing it (and everything it relies on)
+
+`install-extras.sh` puts the inverter, cloud-stage and panel pieces of this
+section into a guest that already boots the app with the egress jail (the
+"Build from scratch" steps below). It runs inside the guest:
+
+```sh
+# on the host, in the repo checkout, with the VM running
+G="ssh -p 10022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1"
+tar -cf - emulator emaldo_re | $G "rm -rf /tmp/emu; mkdir /tmp/emu; tar -C /tmp/emu -xf -"
+$G "sh /tmp/emu/emulator/install-extras.sh"
+```
+
+What it does, in order:
+
+1. Copies the fakes and tools to `/sandbox` (`serial_tap.py`, `fake_bms.py`,
+   `fake_bak.py`, `ws_sink.py`, `sandbox_api.py`, `e2e_relay.py`,
+   `e2e_try.py`, `plant.py`, `plant_run.py`, `panel.py`), `dnssink.py`,
+   `ntp_stub.py` and `portal204.py` to `/usr/local/bin`, and the MCU stub to
+   `/usr/local/sbin/mcu-sysfs-stub`.
+2. Copies the three client files `e2e_try.py` needs (`emaldo_re/e2e.py`,
+   `const.py`, `exceptions.py`) to `/sandbox/emaldo_re` with an empty
+   `__init__.py`, and switches the import to `Cryptodome` where Debian's
+   package is the one installed.
+3. Installs `tap_regs.example` as `/sandbox/tap_regs` unless a per-phase model
+   is already there, and a first SOC of 60 %.
+4. Installs the units that are missing (`serial-tap`, `fake-bms`, `spy-sink`,
+   `sandbox-api`, `e2e-relay`, `ntp-stub`, `mcu-sysfs-stub`, `panel`,
+   `portal204`) and three drop-ins: `TAP_MODBUS=store`, `BMS_CABINETS=1:3`,
+   `SB_LOG=/sandbox/api.log`. Existing units and drop-ins are kept.
+5. Points the vendor names and the probe names at the guest's eth0 address
+   (10.0.2.15) in `/etc/hosts` and `/etc/dnssink.conf`.
+6. Reissues `/sandbox/sandbox.crt` with the DoH and probe names and the
+   resolver IPs as SANs, if it does not have them (needs `/sandbox/ca.key`).
+7. Enables the units, restarts the fakes and then the app.
+8. Prints a `CHECK` line for what it leaves to you: `app_secret`, `app_id` and
+   `hermes_spy` in `/root/config.toml` (see `config.toml.example`), and the
+   length of the relay group id.
+
+Changed files are saved once as `<name>.bak-extras`. Tested by running it on
+an already configured guest (services came back, the panel and commands
+worked); steps 5 and 6 were tested on scratch copies only, because that guest
+already had the names and the certificate. It has not been run on a freshly
+built guest.
+
+Reaching the panel from the host: `start-vm.sh` forwards host port 8088 to the
+guest. On a VM that was started before that line was added, open a tunnel
+instead: `ssh -p 10022 -N -L 0.0.0.0:8088:127.0.0.1:8088 root@127.0.0.1`.
+
+If the inverters stay off afterwards (the app remembers an earlier alarm):
+`systemctl stop emaldo; rm -rf /root/db/*; systemctl start emaldo` in the
+guest, with `/bin/systemctl`.
 
 `PV` / `LOAD` set all three phases. The fake packs keep their SOC in
 `/sandbox/bak_soc` across restarts; a number written to `/sandbox/bak_soc.set`
