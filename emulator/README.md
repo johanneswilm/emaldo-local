@@ -40,6 +40,9 @@ and protocol experiments.
 > **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom -
 > they will save you from re-trying it.
 
+> Bench operations (units, gates checklist, log map, probes, network map, open
+> gaps): [`../docs/EMULATOR_BENCH.md`](../docs/EMULATOR_BENCH.md).
+
 ## Architecture
 
 ```
@@ -83,7 +86,8 @@ whether it has internet. Four layers, all inside this repo:
 Consequence for the topology: with `restrict=on` the guest cannot reach the host
 either (`10.0.2.2:19999` -> `ECONNREFUSED`), so every responder - API sandbox,
 e2e relay, portal - runs **inside** the guest: `sandbox_api.py` defaults to
-`E2E_RELAY=127.0.0.1` and the relay runs as `e2e-relay.service` with
+`E2E_RELAY=10.0.2.3` (an eth0 address; loopback is unreachable to the app) and
+the relay runs as `e2e-relay.service` with
 `E2E_BASE=/sandbox` and `EMALDO_VENDOR_LEG=0` (the bridge toward the vendor
 relay would resolve to the guest itself and loop). The tripwire is
 `/var/log/dns_queries.log`: it records every name the firmware asks for, so the
@@ -200,7 +204,11 @@ tail -20 /var/log/dns_queries.log                                               
    `00 00 01 06 00 15 00 05 10 00 00 06`). The stub does not answer yet; the
    app still proceeds and runs the cloud stage.
    Notes: `baseinfo_v1` is the app's own filedb bucket store and grows when the
-   identity is persisted (1900 -> 2743 B) - do not forge it. The netmonitor
+   identity is persisted (1900 -> 2743 B) - do not forge it. One more loopback
+   trap at this stage: the e2e credentials the API hands out must name an eth0
+   address (`E2E_RELAY=10.0.2.3` in `sandbox-api.service`); with
+   `127.0.0.1:1050` the eth0-bound app can never reach the relay and re-runs
+   `e2e-bmt-login` forever. The netmonitor
    classifies a link up via `BaseLink.Online()` (cached bool), refreshed only
    while the base link's `LinkState` is `ok`, from the prober's `internetOK`:
    a successful DoH exchange through the 1.1.1.1/8.8.8.8 fronts, or an HTTP 204.
@@ -214,11 +222,12 @@ gate open (gate #5) it also runs `staterunners.(*Configured)` +
 `OperationCommon` + `ConfiguredDisplay` + `cloudr/updater` + `msct/e2e` and
 issues `/bmt/e2e-bmt-login`, `/bmt/get-electricity-price-percents-v2`,
 `/bmt/metrics/auth/get-forecast-solar` to the sandbox API on `10.0.2.3:443`
-(DoH front on `10.0.2.15:443`; the two used to collide on `10.0.2.3:443`). `sandbox_api.py` hands out e2e creds with
-`host 10.0.2.2:1050 / util_host 10.0.2.2:1051` - under QEMU user-net 10.0.2.2 is
-the host, where the production relay (`../emaldo-capture/e2e_relay.py`, UDP
-1050/1051) already runs; set `E2E_RELAY=127.0.0.1` to keep the tunnel in the
-guest instead. Instrument that stage with `SB_LOG` (set it to `/sandbox/...`, not
+(DoH front on `10.0.2.15:443`; the two used to collide on `10.0.2.3:443`). The
+sandbox hands out e2e creds naming `10.0.2.3:1050` (`util 10.0.2.3:1051`) and the
+guest relay (`e2e-relay.service`) accepts them; `/sandbox/relay_live.log` then
+shows `dev 10.0.2.15 alive` every ~10 s. Do not point the creds at the host
+(`10.0.2.2`) or loopback: with `restrict=on` and `SO_BINDTODEVICE eth0` the app
+cannot reach either. Instrument that stage with `SB_LOG` (set it to `/sandbox/...`, not
 `/var/log`: gotcha 3), because the relay has not yet reported a device session
 from the VM. Next milestone: get the MSCT tunnel up (relay join), then FCR/MQTT
 pokes and the OTA round-trip.
@@ -382,9 +391,12 @@ qemu-system-arm -M virt -m 1024 \
   `/var/log/app.log` (zap) and `/sandbox/api.log` (sandbox request log).
 - **SSH**: `ssh -p 10022 root@localhost` (when sshd is happy; the serial
   console is the reliable path).
-- **Cloud calls**: `tail -f /sandbox/api.log` inside the VM. The app calls
-  reg-token-ack / get-base-info / e2e-bmt-login / iot-online / price endpoints
-  against the sandbox within a minute of boot.
+- **Cloud calls**: `tail -f /sandbox/api_req.log` inside the VM. Once the state
+  gate is open (gate #5) the app calls `/bmt/e2e-bmt-login`,
+  `/bmt/get-electricity-price-percents-v2`, `/bmt/metrics/auth/...`,
+  `/bmt/iot-online` etc. against the sandbox API on `10.0.2.3:443`. The file is
+  append-only across API restarts and some lines are lab probes - use
+  `apiprobe.sh` to attribute them.
 - **App self-restarts**: by design (the vendor app reboots on failed
   subsystems). systemd `Restart=always` keeps it alive; each cycle gets
   further. Do not "fix" the restart - observe what the NEXT cycle reaches.

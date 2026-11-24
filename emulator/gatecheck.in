@@ -1,0 +1,22 @@
+echo "== app:"
+ps -o pid,etimes,args -C emaldo_iot_fw | tail -n +2
+echo "== app sockets (want: no SYN-SENT):"
+ss -tanup | grep emaldo || echo none
+echo "== listeners:"
+ss -lntp | grep -E ":443 |:53 |:80 |:1050 |:1051 "
+echo "== interfaces:"
+ip -4 addr show dev eth0 | grep inet
+ip -4 addr show dev lo | grep inet
+echo "== zone answers (want 10.0.2.3 inside the zone):"
+for p in cp.cloudflare.com clients3.google.com www.google.com detectportal.firefox.com connectivitycheck.gstatic.com api.emaldo.com files.oms.emaldo.com e2e.emaldo.com dp.emaldo.com; do
+  printf "%-30s %s\n" "$p" "$(timeout 5 python3 -c 'import socket,sys;print(socket.gethostbyname(sys.argv[1]))' "$p" 2>/dev/null || echo NXDOMAIN)"
+done
+echo "== last 6 UDP queries:"
+grep -vE "doh front|dnssink up|doh sink|doh 10" /var/log/dns_queries.log | tail -6
+echo "== last 4 DoH queries:"
+grep "doh " /var/log/dns_queries.log | tail -4
+echo "== tap accepts:"
+tail -4 /var/log/dnshijack.log
+echo "== API request lines (lab-client noise possible, see landmine 24):"
+wc -l < /sandbox/api_req.log
+tail -2 /sandbox/api_req.log

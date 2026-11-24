@@ -23,7 +23,7 @@ SB_BIND = os.environ.get("SB_BIND", "127.0.0.1")
 # run/vmstart.sh boots QEMU with user-net `restrict=on`, so guest connections to
 # the gateway (10.0.2.2 = the host) are refused - keep the tunnel on the guest's
 # own loopback and run the relay in the guest.
-RELAY = os.environ.get("E2E_RELAY", "127.0.0.1")
+RELAY = os.environ.get("E2E_RELAY", "10.0.2.3")
 
 def rand32():
     return "".join(secrets.choice(ALNUM) for _ in range(32))

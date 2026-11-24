@@ -4,6 +4,10 @@ Before=emaldo.service
 StartLimitIntervalSec=0
 
 [Service]
+# The firmware's HTTP/2 client sets SO_BINDTODEVICE eth0: a loopback listener
+# or loopback e2e creds are unreachable to it.
+Environment=SB_BIND=10.0.2.3
+Environment=E2E_RELAY=10.0.2.3
 ExecStart=/usr/bin/python3 /sandbox/sandbox_api.py
 Restart=always
 RestartSec=1
