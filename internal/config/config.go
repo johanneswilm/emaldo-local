@@ -34,10 +34,13 @@ type WebConfig struct {
 }
 
 type HardwareConfig struct {
-	SerialPort string `toml:"serial_port"` // default: /dev/ttymxc2
+	// SerialPort is the inverter's Modbus port. The vendor puts inverters
+	// A/B/C on /dev/ttyCH9344USB3/0/2; /dev/ttymxc2 is the housekeeping MCU
+	// link, not Modbus (docs/REGISTERS.md).
+	SerialPort string `toml:"serial_port"` // default: /dev/ttyCH9344USB3 (inverter A)
 	SerialBaud int    `toml:"serial_baud"` // default: 9600 (Modbus RTU)
-	InverterSlaveID  int `toml:"inverter_slave_id"`  // default: 1
-	BatterySlaveID   int `toml:"battery_slave_id"`   // default: 247 (BMS)
+	InverterSlaveID  int `toml:"inverter_slave_id"`  // default: 1 (INVT)
+	BatterySlaveID   int `toml:"battery_slave_id"`   // default: 2 (Emaldo BMS)
 	PollIntervalSecs int `toml:"poll_interval_secs"` // default: 5
 	// Simulate feeds synthetic telemetry (PV curve + SOC drift) instead of
 	// reading the serial bus. For demos/development only - never on a real
@@ -78,7 +81,7 @@ func Default() *Config {
 			HomeAssistantDiscovery: true, DiscoveryPrefix: "homeassistant",
 		},
 		Web:      WebConfig{ListenAddr: ":80"},
-		Hardware: HardwareConfig{SerialPort: "/dev/ttymxc2", SerialBaud: 9600, InverterSlaveID: 1, BatterySlaveID: 247, PollIntervalSecs: 5},
+		Hardware: HardwareConfig{SerialPort: "/dev/ttyCH9344USB3", SerialBaud: 9600, InverterSlaveID: 1, BatterySlaveID: 2, PollIntervalSecs: 5},
 		OTA:      OTAConfig{CheckIntervalHours: 24},
 	}
 }

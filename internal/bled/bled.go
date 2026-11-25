@@ -3,9 +3,14 @@
 //
 // Package bled is the BLE provisioning channel (FW-1: placeholder).
 //
-// Design: reuse the vendor's BLE GATT surface (fixed AES-256-CBC key/IV,
-// plain JSON {"cmd":...,"data":...}) and EXTEND the vocabulary for
-// headless provisioning and recovery:
+// Design: reuse the vendor's BLE GATT surface and EXTEND the vocabulary for
+// headless provisioning and recovery. Recovered from the stock binary
+// (see docs/BLE-GATT.md): one service + one write characteristic (props
+// 0x0C) + one notify characteristic (0x10), selected per model from nine
+// UUID literals; the service UUID and the crypto layer are config keys
+// (ble_service_uuid, no_ble_crypto), so the fixed AES-256-CBC key/IV is the
+// default path rather than a constant. Payloads are plain JSON
+// {"cmd":...,"data":...}. Vocabulary we add:
 //
 //	get_version | get_model            (as vendor)
 //	get_config                           (secrets masked)

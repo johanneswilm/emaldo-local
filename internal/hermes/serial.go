@@ -95,41 +95,61 @@ func baudToConst(b int) uint32 {
 
 // Modbus RTU framing.
 const (
-	fcReadInputRegisters = 0x04
-	fcReadHolding        = 0x03
+	fcReadHolding = 0x03
 )
 
-// ReadInputRegisters performs a Modbus RTU read of `count` input
-// registers starting at `addr`, returning the register payload
-// (count*2 bytes, big-endian register order — register-internal byte
-// order follows the device: the 0x3600 block is LE per the vendor docs).
-func ReadInputRegisters(rw io.ReadWriter, slave byte, addr uint16, count uint16) ([]byte, error) {
-	req := []byte{slave, fcReadInputRegisters, byte(addr >> 8), byte(addr), byte(count >> 8), byte(count)}
+// ReadHoldingRegisters performs a Modbus RTU FC03 read of `count`
+// registers starting at `addr` and returns the raw payload (count*2
+// bytes). Every register is big-endian, and multi-register values put the
+// high word first. The vendor firmware only ever uses FC03/06/16; FC04
+// (input registers) is never issued (docs/REGISTERS.md).
+func ReadHoldingRegisters(rw io.ReadWriter, slave byte, addr uint16, count uint16) ([]byte, error) {
+	if count == 0 || count > 125 {
+		return nil, fmt.Errorf("modbus: invalid quantity %d", count)
+	}
+	req := []byte{slave, fcReadHolding, byte(addr >> 8), byte(addr), byte(count >> 8), byte(count)}
 	req = append(req, crc16(req)...)
 	if _, err := rw.Write(req); err != nil {
 		return nil, err
 	}
-	resp := make([]byte, 5+count*2)
-	rw.(interface{ SetReadDeadline(time.Time) error }).SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := io.ReadFull(rw, resp); err != nil {
+	if d, ok := rw.(interface{ SetReadDeadline(time.Time) error }); ok {
+		d.SetReadDeadline(time.Now().Add(2 * time.Second))
+	}
+	// Read the 3-byte header first so an exception reply (5 bytes total)
+	// is reported straight away instead of waiting for the full length.
+	hdr := make([]byte, 3)
+	if _, err := io.ReadFull(rw, hdr); err != nil {
 		return nil, err
 	}
-	if resp[0] != slave {
+	if hdr[0] != slave {
 		return nil, errors.New("modbus: wrong slave in response")
 	}
-	if resp[1]&0x80 != 0 {
-		return nil, fmt.Errorf("modbus exception 0x%02x", resp[2])
+	if hdr[1] == fcReadHolding|0x80 {
+		tail := make([]byte, 2)
+		if _, err := io.ReadFull(rw, tail); err != nil {
+			return nil, err
+		}
+		if !equal(tail, crc16(hdr)) {
+			return nil, errors.New("modbus: crc mismatch")
+		}
+		return nil, fmt.Errorf("modbus exception 0x%02x", hdr[2])
 	}
-	n := int(resp[2])
-	if n != int(count)*2 || len(resp) < 3+n+2 {
+	if hdr[1] != fcReadHolding {
+		return nil, fmt.Errorf("modbus: unexpected function 0x%02x", hdr[1])
+	}
+	n := int(hdr[2])
+	if n != int(count)*2 {
 		return nil, errors.New("modbus: bad length")
 	}
-	body := resp[3 : 3+n]
-	got := resp[3+n : 3+n+2]
-	if !equal(got, crc16(resp[:3+n])) {
+	rest := make([]byte, n+2)
+	if _, err := io.ReadFull(rw, rest); err != nil {
+		return nil, err
+	}
+	frame := append(hdr, rest[:n]...)
+	if !equal(rest[n:], crc16(frame)) {
 		return nil, errors.New("modbus: crc mismatch")
 	}
-	return body, nil
+	return rest[:n], nil
 }
 
 func crc16(b []byte) []byte {

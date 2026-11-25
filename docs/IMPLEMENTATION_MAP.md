@@ -37,9 +37,11 @@ e2e compatibility is ever needed. **FW-3** (only if app-compat wanted).
 
 ### hermes (hal + peripherals) — PORT, the core of FW-1
 The hardware abstraction: battery BMS, inverter(s) up to 3, cabinets,
-EV gun, b-sensor, over Modbus RTU on `/dev/ttymxc2` plus vendor framing
-(XOR-checked battery frames). Starting map in `docs/REGISTERS.md`
-(0x3600–0x3660 LE block, control regs 0x3018/0x3021). **FW-1**:
+EV gun, b-sensor, over Modbus RTU on the CH9344 USB-UART channels
+(`/dev/ttyCH9344USB*`, 9600 baud; `/dev/ttymxc2` is the MCU link) plus
+vendor framing for `bst`/`bak` batteries. Map in `docs/REGISTERS.md`
+(INVT FC03 block 0x3600–0x3660 big-endian, power on/off 0x3018, model
+0x3021, Emaldo battery slave 2 at 0x1000). **FW-1**:
 read-only telemetry (SOC, power, temps, faults, inverter state).
 **FW-2**: control writes (charge/discharge limits, mode switches).
 Validation requires the USB-RS485 dongle (checklist in REGISTERS.md).
@@ -137,6 +139,10 @@ emaldo-local should do better, within hard constraints:
 ## Grid services
 
 ### frr / fcrctrl / fcr (FCR/mFRR balancing) — NO (default), FW-3 opt-in
+Transport note: the vendor runs a **second control bus on CAN** (`can0`,
+`socket.CanSetBaudRateSocket`, config `can_restart_ms` /
+`can_check_interval`) alongside Modbus RTU — see `docs/REGISTERS.md` § CAN.
+Any FCR work would need that path, not just the register polls.
 Grid-balancing for enrolled users. Revenue_type-3 contracts are
 cloud-mediated; without the vendor cloud this needs a new aggregator
 relationship. Out of scope until someone needs it. The MQTT topics the
@@ -185,10 +191,15 @@ takeover repo if the stock firmware ever needs redirecting to a local
 broker while it still runs.
 
 ### BLE GATT server — FRESH, FW-1.1
-Vendor BLE: fixed AES-256-CBC JSON dispatcher (commands documented:
-get_version, get_model, set_http_host, set_data_host, check_update,
-reboot_iot). emaldo-local extends the same wire format with config
+Vendor BLE: one service + **one write characteristic (props 0x0C)** + **one
+notify characteristic (0x10)**, selected per model (`INVT10_1_0`,
+`INVT15_1_0`, `BST_1_0`, default) from nine UUID literals; 25 dispatcher
+verbs recovered. Full detail: `docs/BLE-GATT.md`.
+The service UUID and the crypto layer are **config keys**
+(`ble_service_uuid`, `no_ble_crypto`), so "fixed key/IV" is the default
+path, not a constant. emaldo-local extends the same wire format with config
 commands (set_mqtt_broker, wifi_set, get_config masked, factory_reset).
+Still unknown: the AES key/IV itself (no literal in `.rodata`).
 PORT the transport crypto from PROTOCOL.md.
 
 ## Update & maintenance
@@ -196,6 +207,13 @@ PORT the transport crypto from PROTOCOL.md.
 ### ota / checkupdate — REPLACED (done, `internal/ota`)
 Vendor: manifest → md5 → stage → ~60 min timer → self-swap (fully
 documented in OTA.md, including the md5-skip and apply-delay quirks).
+Vendor force flag, recovered from the binary: retry limit **5**
+(`ota.(*Item).IsForceUpdateRetryLimitReached` compares against 5), a
+persisted `HasForceUpgraded` counter (`ResetForceUpdateRetry` zeroes it),
+and an unfinished forced update **blocks "fully registered"**
+(`Force upgrade status not set yet, device may not complete registration`).
+Relevant to our rollback path: a module carrying a stuck force flag will
+report itself unregistered until it clears.
 emaldo-local: ed25519-signed manifest → sha256 → atomic self-replace →
 re-exec, with .bak rollback. This must be live-tested (updater smoke
 build) before any production flash.
