@@ -9,8 +9,9 @@ OFF by default** (`control.writes_enabled=false`) — with writes off every
 command is validated and journaled as a dry-run. No OTA, no vendor cloud,
 vendor app and identity files untouched.
 
-Context and constraints: [`../docs/RUST_DRIVER_HANDOVER.md`](../docs/RUST_DRIVER_HANDOVER.md).
-Register map status: [`../docs/REGISTERS.md`](../docs/REGISTERS.md).
+Context and constraints: see [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md) and
+[`../docs/REGISTERS.md`](../docs/REGISTERS.md). Register map status:
+[`../docs/REGISTERS.md`](../docs/REGISTERS.md).
 
 ## Layout
 
@@ -48,7 +49,7 @@ sudo apt-get install gcc-arm-linux-gnueabihf
 ```
 
 ```bash
-cd rust
+cd driver
 cargo test                                            # unit + PTY fake-slave tests (host)
 cargo build --release --target armv7-unknown-linux-gnueabihf
 # -> target/armv7-unknown-linux-gnueabihf/release/emaldo-driver

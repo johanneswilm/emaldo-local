@@ -3,7 +3,7 @@
 Fix for ISSUES #1 (panel blank after takeover). RE of `app.bin`
 `internal/display/abi` shows the vendor never issues an fb ioctl: it maps
 `/dev/fb0` and its only update call is `mappedFramebuffer.Sync` =
-`os.(*File).Sync` after each frame. `rust/src/display.rs` now `msync(MS_SYNC)`s
+`os.(*File).Sync` after each frame. `driver/src/display.rs` now `msync(MS_SYNC)`s
 the written mapping on the live char device and skips it on the emulator's
 regular-file backend; the old no-op `FBIOPUT_VSCREENINFO` guess is gone. Two
 new unit tests (71 total). Still needs a live check, with the strace/modinfo

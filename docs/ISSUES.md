@@ -25,7 +25,7 @@ app retired). Each has the symptom, the evidence, and the current status.
   the mapping**, which on the char device reaches the kernel fb driver's
   `fb_ops` fsync hook (which schedules the deferred screen copy). Our old
   `FBIOPUT_VSCREENINFO` "flush" was a no-op guess.
-- **Fix:** `rust/src/display.rs` now `msync(MS_SYNC)`s the dirty mapping
+- **Fix:** `driver/src/display.rs` now `msync(MS_SYNC)`s the dirty mapping
   after each diff write when FBIOGET_* succeed (char device); on the
   emulator regular file it is a no-op (mode logged as `refresh=file`).
 - **Status:** FIXED IN CODE, NEEDS LIVE CHECK. If the panel still stays

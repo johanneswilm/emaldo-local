@@ -153,7 +153,7 @@ hardware:
   3262–3272 mV cells, 52.27–52.29 V, −6.4/−7.3/−7.9 A, SOC
   56/75/67 % (mean 66 %; vendor display showed 70 % usable), cycles
   317/349/365, health 98–100 %, 15–27 °C. This is now decoded by
-  `rust/src/can.rs` and shown in the driver UI.
+  `driver/src/can.rs` and shown in the driver UI.
 
 ## MCU sysfs (validated live 2026-11-25)
 
@@ -251,7 +251,7 @@ hardware.
 - `/dev/mcu1` has the write quirk: `write()` returns the driver's packet
   size (20) for a 12-byte Bmtp frame; `std::io::Write::write_all` panics.
   The driver now uses a single-write loop that tolerates this (fixed in
-  `rust/src/serial.rs`).
+  `driver/src/serial.rs`).
 - With the vendor app stopped (`systemctl stop monitor-dog.service
   monitor.service; pkill -x app`), the driver sent the read set and read
   continuously. **No bytes arrived** — not even for the driver's own
