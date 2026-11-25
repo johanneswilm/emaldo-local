@@ -166,17 +166,74 @@ text out in functab order.
   Do **not** use a real fbdev driver: `register_framebuffer` makes fbcon take
   over and `soft_cursor -> sys_imageblit` oopses with this vmalloc screen
   (`fbcon=nodefer` does not help; it forces the takeover).
-- **MCU** = `/dev/ttymxc2`. The captured frames are a **vendor socket/tower
-  RPC**, not raw Modbus: `00 00 01 <type 06|07> <seq:2> <payload 5-6B>
-  <XOR of bytes 3..len-2>` (verified on every frame; no Modbus CRC anywhere).
-  `internal/mcuclient` is a tower RPC client (Command enums), while
-  `socket/modbus.(*rtuClient)` is the underlying driver (real Modbus framing:
-  `[slave][func][addr2][count2]`, response length `2*count+5`). The app polls
-  every ~4 s (`... 06 00 52 00 00 10 00 00 44`) and **expects replies**; the
-  stub logs only, so the panel shows 0 kW. A fake must answer the tower
-  commands (0x00/0x03/0x05/0x0a/0x0e/0x11/0x13/0x15/0x17/0x18) or the app must
-  be fed through another peripheral path. `/dev/mcu1` + `/sys/class/mcu` is the
-  separate front-panel MCU.
+- **MCU** = `/dev/ttymxc2` (emulator) / `/dev/mcu1` (live). The captured
+  frames are **Bmtp over the vendor tower serial codec**, not raw Modbus
+  (corrected 2026-11-25):
+
+  ```
+  00 tt 01              ProtocolVersion, Type (00 req/01 resp/02 err), Platform
+  LL LL                 Length u16le = 6 + len(Data)
+  ii ii                 Id/sequence (echoed)
+  cc cc                 Command u16 (0x10xx read set)
+  vv ee                 CommandVersion, Encryption
+  dd..                  Data
+  xx                    XOR of bytes[3..len-1)
+  ```
+
+  The old note read byte 3 (`06`/`07`) as a type; it is the low byte of the
+  little-endian **Length**. Total = Length+6. See `../docs/REGISTERS.md`
+  "MCU protocol" for the full command/response map and the 0x1012 register
+  bridge (no Modbus RTU frames are tunneled).
+
+  `internal/mcuclient` + `bmtp/codec`/`bmtp/xorsum` implement this; on live
+  `mcu_driver.ko` wraps `/dev/mcu1` writes in a DIN frame
+  (`Din_data_packing(0xF0)`) and queues parsed DIN TLVs on read.
+  `emulator/fake_mcu.py` answers the read-only poll set and was accepted by
+  the vendor app (SOC moved 0→74 %, no error icon). The app's power tiles
+  remain 0 because they are fed by the master/cloud state, not the local
+  MCU responses; SOC/battery data is local.
+
+## Bench-validating the MCU and CAN paths (2026-11-25)
+
+MCU responder (replaces the logging stub; stop the app first because a pty
+slave has one read queue):
+
+```bash
+systemctl stop exp-hb.service ttymxc2-stub.service
+pkill -x emaldo_iot_fw; pkill -f /sandbox/fake_mcu.py
+python3 /sandbox/fake_mcu.py --path /dev/ttymxc2 --soc 73   --battery-w 500 --pv-w 1500 --grid-w -1000 --load-w 900 &
+setsid /app/emaldo_iot_fw </dev/null >/tmp/app_mcu.log 2>&1 &
+# wait ~40 s for the app's MCU client, then check /sandbox/fake_mcu.log
+```
+
+Restore the original bench (do not leave `fake_mcu.py` running):
+
+```bash
+pkill -x emaldo_iot_fw; pkill -f /sandbox/fake_mcu.py
+systemctl restart ttymxc2-stub.service
+setsid /app/emaldo_iot_fw </dev/null >/tmp/app_hb.log 2>&1 &
+```
+
+Driver-side MCU probe (no writes; `--mcu-probe` also reads 0x0FA0/0x0FAF
+through 0x1012 unless `--no-mcu-registers`):
+
+```bash
+/sandbox/emaldo-driver-new --config /tmp/no-such.toml   --mcu-probe --mcu-port /dev/ttymxc2
+# raw RX diagnostic (opens /dev/mcu1 or a pty, sends no user frames)
+/sandbox/emaldo-driver-new --config /tmp/no-such.toml   --mcu-raw-dump 5 --mcu-port /dev/ttymxc2
+```
+
+CAN listener against the emulator's `can0`:
+
+```bash
+# fake_bms.py only replies to canapp polls; replay a real capture instead
+python3 /sandbox/can_replay.py --iface can0 --count 60 --interval 0.1 &
+/sandbox/emaldo-driver-new --config /tmp/no-such.toml   --can-probe --can-iface can0 --can-seconds 4
+```
+
+Expected: 3 packs (or 1 replayed pack), 16 cells, cell mV, pack voltage,
+current, SOC, cycles, health and temperatures. The replay data is the
+live 130-byte type-7 report from 2026-11-25.
 
 ## e2e login: why it retries every 10 s
 
@@ -248,14 +305,18 @@ observed (the 211-byte reply is the transport ACK).
 
 ## What is still not emulated
 
-- **MCU UART replies.** `ttymxc2-stub.py` logs the app's 4 s Modbus poll frames
-  but does not answer them; the panel therefore shows 0 kW everywhere and the
-  inverter/BMS values are absent.
+- **MCU UART replies by default.** `ttymxc2-stub.py` only logs the app's
+  ~4 s Bmtp poll frames, so the panel shows 0 kW. `fake_mcu.py` answers the
+  read-only set and the app accepts it (SOC/battery local data moves); the
+  power tiles still need the master/cloud state. The live unit's MCU path is
+  quiescent (see REGISTERS.md), so the emulator is currently the only place
+  the MCU read set can be exercised end to end.
 - **e2e/MSCT handshake.** The device leg reaches the relay over eth0
-  (`relay_live.log: dev 10.0.2.15 alive`), but command dispatch needs the
-  session establishment (`estab`) + alive/wake/heartbeat handshake. The fake
-  relay does not implement it yet; porting the working injector to the
-  emulator is the next step before judging any command result.
+  (`relay_live.log: dev 10.0.2.15 alive`). The relay-control path now works
+  without `estab` (see the diagchan proof), and `dc_act` was verified end to
+  end on the emulator; the *app-style* injector (`e2e_inject.py`, which sends
+  through the relay's forward path) still needs the session establishment +
+  alive/wake/heartbeat handshake for arbitrary vendor commands.
 - **Cloud semantics.** The sandbox API returns canned JSON (login creds, price
   template, config); it is not a faithful emulator of auth/crypto or of the
   data the real cloud expects. OTA/update, MQTT/cloudr and FCR flows are not

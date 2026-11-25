@@ -192,21 +192,42 @@ cleanly. The Modbus sweep in that window (all ttyUSB + ttymxc2, two
 bauds, slave walk) produced zero responses, which is how the
 MCU-architecture finding was made.
 
-## 8. Open items (updated after the 2026-11-25 live window)
+**2026-11-25 17:09–17:17 UTC — read-only MCU probe window** (same stop/
+restore, writes never enabled):
 
-- **MCU protocol (the new critical path).** The inverter is behind the
-  housekeeping MCU (`/dev/mcu1`). Recover the MCU command protocol:
-  emulator captures (`/sandbox/ttymxc2_traffic.log`), the tower-RPC
-  framing note in EMULATOR_BENCH (frame `00 00 01 <type> <seq:2>
-  <payload> <xor>`, command enums 0x00/0x03/0x05/0x0a/0x0e/0x11/0x13/
-  0x15/0x17/0x18), and the vendor binary's `internal/mcuclient` +
-  `socket/modbus.(*rtuClient)` (the MCU may wrap Modbus — check whether
-  HiSolar frames tunnel through it). Goal: read inverter telemetry and
-  eventually write limits through the MCU.
-- **CAN cabinet bus for battery data.** Wire format already known
-  (emulator README "DIN CAN wire format"; `fake_bms.py`;
-  `firmware/CANAPP_RE.md`). A read-only CAN listener could give SOC and
-  pack data without the vendor canapp.
+```bash
+# binary staged at /tmp/emaldo-driver; live config untouched
+/tmp/emaldo-driver-new --config /tmp/no-such.toml   --mcu-probe --mcu-port /dev/mcu1 --mcu-timeout-ms 1500
+/tmp/emaldo-driver-new --config /tmp/no-such.toml   --mcu-raw-dump 8 --mcu-port /dev/mcu1
+# optionally: echo 1 > /sys/class/mcu/mcu1/mcu_rst (vendor recovery pulse)
+```
+
+Result: no responses, including for the kernel driver's own open-time DIN
+queries and after `mcu_rst`; `mcu_status=1 1 1`, `mcu_mode=release_app`.
+The vendor display at the same time showed Solar 0 / Grid 0 (battery only),
+so the inverter/MCU telemetry path is absent on this unit. The vendor app
+was restarted after each window (`ps -C app` new PID, all services active).
+No writes were attempted. See `REGISTERS.md` for the recovered protocol.
+
+## 8. Open items (updated after the 2026-11-25 live window + MCU/CAN work)
+
+- **MCU protocol — recovered and bench-validated; live path blocked.**
+  Frame format (Bmtp, not Modbus), command set and response structs are
+  documented in `REGISTERS.md`. The HiSolar register map is reachable
+  through command 0x1012 (`[index,len,addr]` → big-endian u16s); no
+  Modbus RTU frames tunnel through the MCU. `emulator/fake_mcu.py`
+  answers the read set and the vendor app accepted it; `--mcu-probe`
+  decodes powers, battery, inverter and register blocks on the bench.
+  **Live:** `/dev/mcu1` (mcu_driver.ko) DIN-wraps writes; no responses
+  arrived for reads or for the driver's open-time DIN queries, before or
+  after `mcu_rst`, in the 2026-11-25 window. The vendor app's display also
+  showed Solar/Grid 0, i.e. the inverter telemetry path is absent on this
+  unit. Keep `hardware.mcu_protocol=false` on live.
+- **CAN cabinet bus — done (read-only).** `rust/src/can.rs` binds a
+  passive CAN_RAW socket, reassembles DIN pages, and decodes the BAK TLV
+  (cells, current, SOC, voltage, cycles, health, temperatures). Live
+  validated 2026-11-25 (3 packs; SOC 56/75/67 %, 52.3 V, −6…−8 A). This
+  is the working live telemetry source; no vendor cooperation needed.
 - Field-name confirmation inside the HiSolar 0x0FA0 block (offsets
   binary-verified; names/scales provisional) — needs a live read of the
   inverter bus, i.e. the MCU path or an RS485 tap.
@@ -217,6 +238,89 @@ MCU-architecture finding was made.
 - Sign conventions: grid/battery power directions.
 - Whether the vendor applies limits atomically (`BatchSetPowers`) or as
   separate writes.
+
+## 8b. Price + PV forecast (target: self-hosted optimizer; HA is a viewer)
+
+Decision (2026-11-25): the battery should run the optimizer itself — price,
+PV forecast and policy all on-box — and expose results over MQTT discovery, so
+neither `ha-battery-optimizer` nor the official `emaldo` HA integration is
+required for core operation. HA becomes a discoverable MQTT consumer.
+
+**Price — implemented (`rust/src/prices.rs`).**
+- Source: Nordpool Data Portal, keyless:
+  `GET https://dataportal-api.nordpoolgroup.com/api/DayAheadPrices?date=YYYY-MM-DD&market=DayAhead&deliveryArea=SE4&currency=EUR`.
+- 96 quarter-hour slots/day, **EUR/MWh** (÷1000 = EUR/kWh). Day is the *local*
+  delivery date. Tomorrow's day appears after the ~13:00 CET auction; a
+  not-yet-published day is HTTP **204** (empty) or a bare integer — both are
+  treated as "absent" and fall back to cache.
+- Responses are `Transfer-Encoding: chunked`; the driver decodes chunked
+  framing itself (no HTTP crate).
+- Cache: `prices-<area>-<date>.json` per day + `prices-<area>-latest.json`;
+  refetch ~6 h (or day rollover). Read-only outbound HTTPS.
+- Config `[prices]`: `enabled`, `area` (SE4 here), `currency` (EUR),
+  `tz_offset_secs` (3600), `refresh_secs` (21600).
+- CLI `--prices-probe` prints the fetched series; state exposes
+  `prices.{area,currency,today,tomorrow,today_mean_eur_mwh,
+  tomorrow_mean_eur_mwh,next_slots[]}`; MQTT/HA discovery publishes
+  `prices/{today_mean_eur_kwh,tomorrow_mean_eur_kwh,next_eur_kwh,...}`.
+- Verified live: 192 slots (today+tomorrow), today mean 268.9 EUR/MWh,
+  next slot 0.275 EUR/kWh at 19:30 local.
+
+**PV forecast — implemented (`rust/src/solar.rs`).**
+- `GET https://api.open-meteo.com/v1/forecast?latitude=..&longitude=..&hourly=
+  shortwave_radiation,direct_normal_irradiance,terrestrial_radiation,
+  cloud_cover,temperature_2m&forecast_days=3&timezone=UTC` (keyless).
+- Sun position (NOAA compact) → plane-of-array irradiance per string →
+  `P = kWp·(G/1000)·PR·temp-derate` (+6% bifacial); 96×15-min kW; cached to
+  `solar-forecast.json`; `--solar-probe` prints it; state under `solar.*`;
+  MQTT discovery `solar_forecast_{now,peak,today}`.
+- Config `[solar]`: `enabled`, `latitude`, `longitude`, `performance_ratio`,
+  `strings[]` (`name/panels/panel_wp/tilt_deg/azimuth_deg/bifacial`).
+  Installed defaults = the user's array: 5×435 W @ az 90 (east) + 5×435 W @
+  az 270 (west), tilt 16°, 4.35 kWp, Lund (55.72486 N, 13.17030 E).
+- Verified live on the device: peak 777 W, today 1.6 kWh (late-Nov), morning
+  east-dominant / afternoon west-dominant (geometry check).
+
+**On-box optimizer (implemented, `rust/src/optimizer.rs`).**
+- New policy mode `optimize`: 96-slot cost-aware plan from Nordpool price +
+  PV forecast + SOC. Greedy: discharge at the most-expensive slots above the
+  efficiency-adjusted replacement cost, refill from the cheapest slots, prefer
+  PV-surplus slots (free), respect reserve/margin and max-SOC. Emits the
+  current-slot setpoint through the existing gated controller (writes still off
+  by default). `[policy.optimizer]`: capacity_wh, min_spread_eur_kwh,
+  round_trip_eff, reserve_margin_percent, max_soc_percent.
+- Verified with live prices + PV at SOC 60%: charge ~6 kWh @ ≤0.20 EUR/kWh
+  (night), discharge ~6.75 kWh @ 0.30–0.39 EUR/kWh (evening peak), est. saving
+  ~0.57 EUR/horizon. `--plan-probe SOC` prints a plan for any SOC.
+- Plan exposed in state (`policy.plan`) and MQTT (`plan/now_intent`,
+  `plan/now_power_w`, `plan/est_saving_eur`; HA sensors `plan_power`,
+  `plan_intent`, `plan_est_saving`).
+
+**Grid/load meter + energy counters (implemented, `rust/src/meter.rs`).**
+- b-sensor on `/dev/ttyCH9344USB1` @9600 slave 1, block 0x61: per-phase V
+  (0.1 V), I (0.01 A), active power i16 (W). Windowed read every 15 s (open,
+  read once, close) so it coexists with the vendor app holding the port.
+- Daily import/export **kWh counters integrated in the driver** (trapezoid by
+  dt, capped for gaps, rolled at local midnight) — robust regardless of the
+  meter's kWh register encoding. Persisted to `meter-counters.json`.
+- State `meter.*`; MQTT/HA: `grid_import_today`, `grid_export_today` (kWh),
+  and grid power mirrored when the inverter path is silent.
+
+**Settings editor.** The web UI now edits the whole config (MQTT, prices,
+solar incl. per-string rows, battery/CAN, display) via GET/PUT
+`/api/v1/config`; PUT writes the TOML and applies live; secrets stay masked.
+
+**PV forecast (older note).**
+- Source: `https://api.open-meteo.com/v1/forecast` (keyless, verified), hourly
+  `shortwave_radiation`, `direct_normal_irradiance`, `terrestrial_radiation`,
+  `cloud_cover`, `temperature_2m`, 72 h+.
+- Model (per configured array: lat/lon, kWp, tilt, azimuth, per-string count):
+  sun vector (NOAA/SPA) → plane-of-array irradiance → `P = kWp·(G/1000)·PR·temp
+  derate`; emit 96×15-min kW (the optimizer's existing contract).
+- Learning: the existing actual-vs-planned EWMA (optimizer `solar_scale.py`
+  semantics) self-calibrates for soiling/shading/real derate once a real PV
+  power reading exists (blocked until inverter/b-sensor PV is live).
+- All config-driven, no account; outbound HTTPS only.
 
 ## 9. Evidence index
 

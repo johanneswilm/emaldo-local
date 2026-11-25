@@ -71,7 +71,18 @@ impl Engine {
                 continue;
             }
 
-            let (setpoint_w, reason) = compute_setpoint(&cfg, &st);
+            let setpoint_w;
+            let reason;
+            if cfg.policy.mode == "optimize" {
+                let (w, r, plan) = compute_optimized(&cfg, &st);
+                setpoint_w = w;
+                reason = r;
+                self.telem.update(|s| s.policy.plan = plan);
+            } else {
+                let (w, r) = compute_setpoint(&cfg, &st);
+                setpoint_w = w;
+                reason = r;
+            }
             let cs = self.ctrl.status();
             self.telem.update(|s| {
                 s.policy.mode = cfg.policy.mode.clone();
@@ -111,6 +122,72 @@ impl Engine {
             s.policy.setpoint_w = setpoint;
         });
     }
+}
+
+/// Run the cost-aware optimizer and return (setpoint W, reason, plan).
+pub fn compute_optimized(
+    cfg: &crate::config::Config,
+    st: &crate::telemetry::State,
+) -> (i32, String, crate::optimizer::Plan) {
+    let o = &cfg.policy.optimizer;
+    let now = crate::telemetry::now_unix() as i64;
+    let prices: Vec<(i64, f64)> = st
+        .prices
+        .next_slots
+        .iter()
+        .map(|s| (s.start as i64, s.eur_kwh))
+        .collect();
+    let pv: Vec<(i64, f64)> = st
+        .solar
+        .next_hours
+        .iter()
+        .map(|s| (s.start as i64, s.power_w))
+        .collect();
+    let load_w = if st.load.net_w > 0.0 {
+        st.load.net_w
+    } else if st.meter.available {
+        st.meter.import_w
+    } else {
+        0.0
+    };
+    let capacity_wh = if o.capacity_wh > 0.0 {
+        o.capacity_wh
+    } else if st.battery.capacity_wh > 0.0 {
+        st.battery.capacity_wh
+    } else {
+        15000.0
+    };
+    let inputs = crate::optimizer::Inputs {
+        prices: &prices,
+        pv: &pv,
+        load_w,
+        soc: st.battery.soc_percent,
+        capacity_wh,
+        reserve_percent: cfg.policy.reserve_percent,
+        reserve_margin_percent: o.reserve_margin_percent,
+        max_soc_percent: o.max_soc_percent,
+        charge_limit_w: if cfg.policy.charge_limit_w > 0 {
+            cfg.policy.charge_limit_w as f64
+        } else {
+            3000.0
+        },
+        discharge_limit_w: if cfg.policy.discharge_limit_w > 0 {
+            cfg.policy.discharge_limit_w as f64
+        } else {
+            3000.0
+        },
+        round_trip_eff: o.round_trip_eff,
+        min_spread: o.min_spread_eur_kwh,
+        now,
+        slot_secs: 900,
+    };
+    let plan = crate::optimizer::plan(&inputs);
+    let mut w = plan.now_power_w;
+    // Reserve clamp always wins.
+    if w < 0 && st.battery.soc_percent <= cfg.policy.reserve_percent {
+        w = 0;
+    }
+    (w, plan.reason.clone(), plan)
 }
 
 /// Compute the desired battery power setpoint in watts (+ = charge).

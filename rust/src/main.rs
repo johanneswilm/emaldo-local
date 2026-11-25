@@ -14,6 +14,7 @@
 #[allow(dead_code)] // exercised once the BMS frame layout is captured (docs/REGISTERS.md)
 mod bms;
 mod bus;
+mod can;
 mod commands;
 mod config;
 mod control;
@@ -22,13 +23,20 @@ mod display;
 mod dns;
 mod font;
 mod mcu;
+mod meter;
+mod mcu_proto;
 mod modbus;
 mod mqtt;
+mod optimizer;
 mod poll;
+mod prices;
+mod solar;
+mod timectl;
 mod policy;
 #[cfg(test)]
 mod ptytest;
 mod regs;
+mod rs485;
 mod serial;
 mod sim;
 mod telemetry;
@@ -73,6 +81,23 @@ fn main() {
 
     let mut cfg_path = PathBuf::from("/root/emaldo-driver.toml");
     let mut rollback_mode = false;
+    let mut mcu_probe = false;
+    let mut mcu_port: Option<String> = None;
+    let mut mcu_timeout_ms: Option<u64> = None;
+    let mut no_mcu_registers = false;
+    let mut can_probe = false;
+    let mut mcu_raw_dump: Option<u64> = None;
+    let mut can_iface: Option<String> = None;
+    let mut can_seconds = 5u64;
+    let mut rs485_probe = false;
+    let mut rs485_ports: Option<String> = None;
+    let mut rs485_bauds: Option<String> = None;
+    let mut rs485_slaves: Option<String> = None;
+    let mut rs485_sniff = 0u64;
+    let mut dump_state = false;
+    let mut prices_probe = false;
+    let mut solar_probe = false;
+    let mut plan_probe_soc: Option<f64> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -84,12 +109,81 @@ fn main() {
                 }
             }
             "--rollback" => rollback_mode = true,
+            "--mcu-probe" => mcu_probe = true,
+            "--mcu-raw-dump" => {
+                mcu_raw_dump = Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(5));
+                if args.get(i + 1).and_then(|v| v.parse::<u64>().ok()).is_some() {
+                    i += 1;
+                }
+            }
+            "--mcu-port" => {
+                if let Some(p) = args.get(i + 1) {
+                    mcu_port = Some(p.clone());
+                    i += 1;
+                }
+            }
+            "--mcu-timeout-ms" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    mcu_timeout_ms = Some(v);
+                    i += 1;
+                }
+            }
+            "--no-mcu-registers" => no_mcu_registers = true,
+            "--can-probe" => can_probe = true,
+            "--rs485-probe" => rs485_probe = true,
+            "--rs485-ports" => {
+                if let Some(v) = args.get(i + 1) {
+                    rs485_ports = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--rs485-bauds" => {
+                if let Some(v) = args.get(i + 1) {
+                    rs485_bauds = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--rs485-slaves" => {
+                if let Some(v) = args.get(i + 1) {
+                    rs485_slaves = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--rs485-sniff" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    rs485_sniff = v;
+                    i += 1;
+                }
+            }
+            "--state-dump" => dump_state = true,
+            "--prices-probe" => prices_probe = true,
+            "--solar-probe" => solar_probe = true,
+            "--plan-probe" => {
+                plan_probe_soc = Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(50.0));
+                if args.get(i + 1).and_then(|v| v.parse::<f64>().ok()).is_some() {
+                    i += 1;
+                }
+            }
+            "--can-iface" => {
+                if let Some(p) = args.get(i + 1) {
+                    can_iface = Some(p.clone());
+                    i += 1;
+                }
+            }
+            "--can-seconds" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    can_seconds = v;
+                    i += 1;
+                }
+            }
             "--version" => {
                 println!("emaldo-driver {VERSION}");
                 return;
             }
             other => {
-                eprintln!("unknown argument {other:?} (usage: emaldo-driver [--config PATH] [--rollback])");
+                eprintln!(
+                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
+                );
                 std::process::exit(2);
             }
         }
@@ -103,7 +197,272 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Runtime-only overrides (not persisted).
+    if mcu_port.is_some() || can_iface.is_some() {
+        let mut c = store.get();
+        if let Some(p) = &mcu_port {
+            c.hardware.mcu_port = p.clone();
+        }
+        if let Some(iface) = &can_iface {
+            c.hardware.can_iface = iface.clone();
+        }
+        store.set_runtime(c);
+    }
+
+    // One-shot raw RX dump (controlled live window): no user frames sent.
+    if let Some(secs) = mcu_raw_dump {
+        let cfg = store.get();
+        match mcu_proto::raw_dump(
+            &cfg.hardware.mcu_port,
+            cfg.hardware.mcu_baud,
+            std::time::Duration::from_secs(secs.max(1)),
+        ) {
+            Ok(n) => {
+                eprintln!("mcu raw dump: {n} bytes from {}", cfg.hardware.mcu_port);
+                return;
+            }
+            Err(e) => {
+                eprintln!("mcu raw dump: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(soc) = plan_probe_soc {
+        let c = store.get();
+        let dir = cfg_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let pr = prices::refresh_live(&dir, &c.prices.area, &c.prices.currency, c.prices.tz_offset_secs);
+        let so = if c.solar.enabled { solar::refresh(&dir, &c.solar).ok() } else { None };
+        let (price_slots, pv_slots) = match pr {
+            Ok(p) => {
+                let now = timectl::now_unix() as i64;
+                let ps: Vec<(i64, f64)> = p
+                    .slots
+                    .iter()
+                    .filter(|s| s.start + 900 > now)
+                    .map(|s| (s.start, s.eur_kwh()))
+                    .collect();
+                let vs: Vec<(i64, f64)> = so
+                    .as_ref()
+                    .map(|f| f.hours.iter().copied().zip(f.power_w.iter().copied()).collect())
+                    .unwrap_or_default();
+                (ps, vs)
+            }
+            Err(e) => {
+                eprintln!("plan probe: prices: {e}");
+                std::process::exit(1);
+            }
+        };
+        let o = &c.policy.optimizer;
+        let inputs = optimizer::Inputs {
+            prices: &price_slots,
+            pv: &pv_slots,
+            load_w: 800.0,
+            soc,
+            capacity_wh: if o.capacity_wh > 0.0 { o.capacity_wh } else { 15000.0 },
+            reserve_percent: c.policy.reserve_percent,
+            reserve_margin_percent: o.reserve_margin_percent,
+            max_soc_percent: o.max_soc_percent,
+            charge_limit_w: if c.policy.charge_limit_w > 0 { c.policy.charge_limit_w as f64 } else { 3000.0 },
+            discharge_limit_w: if c.policy.discharge_limit_w > 0 { c.policy.discharge_limit_w as f64 } else { 3000.0 },
+            round_trip_eff: o.round_trip_eff,
+            min_spread: o.min_spread_eur_kwh,
+            now: timectl::now_unix() as i64,
+            slot_secs: 900,
+        };
+        let plan = optimizer::plan(&inputs);
+        println!("{}", serde_json::to_string_pretty(&plan).unwrap());
+        eprintln!("{}", plan.reason);
+        return;
+    }
+
+    if solar_probe {
+        let c = store.get();
+        let dir = cfg_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        match solar::refresh(&dir, &c.solar) {
+            Ok(f) => {
+                let now = timectl::now_unix();
+                let next: Vec<String> = f
+                    .hours
+                    .iter()
+                    .zip(&f.power_w)
+                    .filter(|(t, _)| **t + 3600 > now)
+                    .take(12)
+                    .map(|(t, w)| format!("{}={:.0}W", timectl::local_hhmm(*t, 3600), w))
+                    .collect();
+                println!(
+                    "kwp={:.2} peak={:.0}W today={:.1}kWh next: {}",
+                    f.kwp, f.peak_w, f.day_kwh, next.join(" ")
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("solar probe: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if prices_probe {
+        let c = store.get();
+        let dir = cfg_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        match prices::refresh_live(
+            &dir,
+            &c.prices.area,
+            &c.prices.currency,
+            c.prices.tz_offset_secs,
+        ) {
+            Ok(p) => {
+                println!("{}", serde_json::to_string_pretty(&p).unwrap());
+                return;
+            }
+            Err(e) => {
+                eprintln!("prices probe: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if rs485_probe {
+        let ports: Vec<String> = rs485_ports
+            .as_deref()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_else(|| {
+                (0..5).map(|i| format!("/dev/ttyCH9344USB{i}")).collect()
+            });
+        let bauds: Vec<u32> = rs485_bauds
+            .as_deref()
+            .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .unwrap_or_else(|| vec![9600, 19200, 115200]);
+        let slaves: Vec<u8> = rs485_slaves
+            .as_deref()
+            .map(|s| s.split(',').filter_map(|x| u8::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok().or_else(|| x.trim().parse().ok())).collect())
+            .unwrap_or_else(|| vec![1, 2, 3, 0x10, 0xF8, 0xFE, 0xFF]);
+        let report = rs485::run(&ports, &bauds, &slaves, rs485_sniff, 300);
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        return;
+    }
+
+    // One-shot read-only probes (controlled live window / emulator bench).
+    if mcu_probe {
+        let cfg = store.get();
+        let timeout = std::time::Duration::from_millis(
+            mcu_timeout_ms.unwrap_or(cfg.hardware.mcu_timeout_ms).max(100),
+        );
+        match mcu_proto::probe(&cfg.hardware.mcu_port, cfg.hardware.mcu_baud, timeout, !no_mcu_registers) {
+            Ok(snap) => {
+                let errors = snap.errors.clone();
+                let out = serde_json::json!({ "snapshot": snap, "errors": errors });
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+                if out["snapshot"]["responses"].as_u64().unwrap_or(0) == 0 {
+                    eprintln!("mcu probe: no responses from {}", cfg.hardware.mcu_port);
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Err(e) => {
+                eprintln!("mcu probe: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if can_probe {
+        let cfg = store.get();
+        match can::probe(
+            &cfg.hardware.can_iface,
+            std::time::Duration::from_secs(can_seconds.max(1)),
+        ) {
+            Ok(summary) => {
+                let ok = summary.frames > 0;
+                println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+                if !ok {
+                    eprintln!("can probe: no frames on {}", cfg.hardware.can_iface);
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Err(e) => {
+                eprintln!("can probe: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let telem = telemetry::Store::new();
+
+    if dump_state {
+        // Read-only snapshot: run the configured telemetry sources (passive
+        // CAN) for a few seconds and print the same JSON as /api/v1/state.
+        let c = store.get();
+        if c.hardware.can_listen {
+            can::start(c.hardware.can_iface.clone(), telem.clone());
+        }
+        let dump_dir = cfg_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if c.prices.enabled {
+            prices::start(
+                dump_dir.clone(),
+                c.prices.area.clone(),
+                c.prices.currency.clone(),
+                c.prices.tz_offset_secs,
+                c.prices.refresh_secs,
+                telem.clone(),
+            );
+        }
+        if c.solar.enabled {
+            solar::start(dump_dir.clone(), c.solar.clone(), 3600, telem.clone());
+        }
+        if c.hardware.meter_enabled {
+            meter::start(
+                dump_dir.clone(),
+                c.hardware.meter_port.clone(),
+                c.hardware.meter_baud,
+                c.hardware.meter_slave,
+                c.hardware.meter_interval_secs,
+                c.prices.tz_offset_secs,
+                telem.clone(),
+            );
+        }
+        let wait = std::time::Duration::from_secs(can_seconds.max(4));
+        let deadline = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < deadline {
+            let st = telem.current();
+            let bank_ok = !c.hardware.can_listen || st.battery.modules > 0;
+            let prices_ok = !c.prices.enabled || st.prices.slots > 0;
+            let solar_ok = !c.solar.enabled || st.solar.kwp > 0.0;
+            if bank_ok && prices_ok && solar_ok {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        if c.policy.enabled && c.policy.mode == "optimize" {
+            let st = telem.current();
+            let (w, reason, plan) = crate::policy::compute_optimized(&c, &st);
+            telem.update(|s| {
+                s.policy.mode = "optimize".into();
+                s.policy.setpoint_w = w;
+                s.policy.reason = reason;
+                s.policy.plan = plan;
+            });
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&telem.current()).unwrap()
+        );
+        return;
+    }
     let state_dir = cfg_path
         .parent()
         .map(|p| p.to_path_buf())
@@ -244,6 +603,59 @@ fn main() {
     // ---- Hardware ----
     let cfg0 = store.get();
     let poller = poll::Poller::new(store.clone(), telem.clone(), bus.clone());
+    if cfg0.hardware.can_listen {
+        eprintln!(
+            "can listener: {} (read-only DIN/BMS; no transmit)",
+            cfg0.hardware.can_iface
+        );
+        can::start(cfg0.hardware.can_iface.clone(), telem.clone());
+    }
+    if cfg0.prices.enabled {
+        eprintln!(
+            "prices: Nordpool {} {} (refresh {}s, cache {})",
+            cfg0.prices.area, cfg0.prices.currency, cfg0.prices.refresh_secs,
+            state_dir.display()
+        );
+        prices::start(
+            state_dir.clone(),
+            cfg0.prices.area.clone(),
+            cfg0.prices.currency.clone(),
+            cfg0.prices.tz_offset_secs,
+            cfg0.prices.refresh_secs,
+            telem.clone(),
+        );
+    }
+    if cfg0.hardware.meter_enabled {
+        eprintln!(
+            "meter: {} @{} slave {} every {}s (windowed; vendor app may own it)",
+            cfg0.hardware.meter_port, cfg0.hardware.meter_baud,
+            cfg0.hardware.meter_slave, cfg0.hardware.meter_interval_secs
+        );
+        meter::start(
+            state_dir.clone(),
+            cfg0.hardware.meter_port.clone(),
+            cfg0.hardware.meter_baud,
+            cfg0.hardware.meter_slave,
+            cfg0.hardware.meter_interval_secs,
+            cfg0.prices.tz_offset_secs,
+            telem.clone(),
+        );
+    }
+    if cfg0.solar.enabled {
+        eprintln!(
+            "solar forecast: {} strings, {:.2} kWp @ {:.4},{:.4}",
+            cfg0.solar.strings.len(),
+            cfg0.solar.strings.iter().map(|s| s.kwp()).sum::<f64>(),
+            cfg0.solar.latitude,
+            cfg0.solar.longitude
+        );
+        solar::start(
+            state_dir.clone(),
+            cfg0.solar.clone(),
+            3600,
+            telem.clone(),
+        );
+    }
     if cfg0.hardware.simulate {
         telem.add_event(
             "warn",
@@ -255,7 +667,20 @@ fn main() {
         telem.add_event(
             "info",
             "hermes",
-            "bus disabled: MCU-sysfs-only telemetry (vendor app owns the UART)",
+            if cfg0.hardware.mcu_protocol {
+                "bus disabled: MCU/Bmtp read-only telemetry"
+            } else if cfg0.hardware.can_listen {
+                "bus disabled: MCU-sysfs + passive CAN telemetry (vendor app owns the UART)"
+            } else {
+                "bus disabled: MCU-sysfs-only telemetry (vendor app owns the UART)"
+            },
+        );
+    }
+    if cfg0.hardware.mcu_protocol && cfg0.hardware.bus_enabled {
+        telem.add_event(
+            "warn",
+            "hermes",
+            "hardware.mcu_protocol overrides hardware.bus_enabled (single MCU master)",
         );
     }
 
@@ -323,7 +748,15 @@ fn main() {
         "emaldo-driver {VERSION} up: web {} (TLS), device id {}, bus {}, writes {}",
         cfg0.web.listen_addr,
         dev_id,
-        if cfg0.hardware.bus_enabled { "enabled" } else { "disabled (MCU sysfs only)" },
+        if cfg0.hardware.bus_enabled {
+            "enabled"
+        } else if cfg0.hardware.mcu_protocol {
+            "disabled (MCU/Bmtp read-only)"
+        } else if cfg0.hardware.can_listen {
+            "disabled (MCU sysfs + passive CAN)"
+        } else {
+            "disabled (MCU sysfs only)"
+        },
         if cfg0.control.writes_enabled { "ENABLED" } else { "dry-run (off)" }
     );
 

@@ -77,6 +77,36 @@ pub struct HardwareConfig {
     pub bus_enabled: bool,
     #[serde(default = "default_mcu_sysfs")]
     pub mcu_sysfs: String,
+    /// Read-only Bmtp polling over the housekeeping MCU
+    /// (`/dev/mcu1` on live, `/dev/ttymxc2` on the emulator). Off by
+    /// default: the MCU is single-master and the vendor app owns it while
+    /// the vendor stack runs. Only enable in a controlled window.
+    #[serde(default)]
+    pub mcu_protocol: bool,
+    #[serde(default = "default_mcu_port")]
+    pub mcu_port: String,
+    /// Only applied to a tty; /dev/mcu1 is a raw char device whose UART is
+    /// configured by the MCU kernel driver.
+    #[serde(default = "default_mcu_baud")]
+    pub mcu_baud: u32,
+    #[serde(default = "default_mcu_timeout_ms")]
+    pub mcu_timeout_ms: u64,
+    /// Read-only SocketCAN listener for the DIN cabinet/BMS bus.
+    #[serde(default)]
+    pub can_listen: bool,
+    #[serde(default = "default_can_iface")]
+    pub can_iface: String,
+    /// b-sensor (grid/load energy meter) sampling.
+    #[serde(default)]
+    pub meter_enabled: bool,
+    #[serde(default = "default_meter_port")]
+    pub meter_port: String,
+    #[serde(default = "default_meter_baud")]
+    pub meter_baud: u32,
+    #[serde(default = "default_meter_slave")]
+    pub meter_slave: u8,
+    #[serde(default = "default_meter_interval")]
+    pub meter_interval_secs: u64,
     #[serde(default = "default_fb")]
     pub framebuffer: String,
     #[serde(default = "default_true")]
@@ -135,6 +165,41 @@ pub struct PolicyConfig {
     pub override_high: u8,
     #[serde(default = "default_marker_low")]
     pub override_low: u8,
+    /// Cost-aware optimizer settings (used when mode = "optimize").
+    #[serde(default)]
+    pub optimizer: OptimizerConfig,
+}
+
+/// On-box optimizer: charge at cheap/PV-surplus slots, discharge at
+/// expensive slots, within reserve and power limits.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OptimizerConfig {
+    /// Capacity used for planning, Wh (0 = derive from telemetry capacity).
+    pub capacity_wh: f64,
+    /// Minimum price spread (EUR/kWh) between charge and discharge to act.
+    pub min_spread_eur_kwh: f64,
+    /// Energy efficiency of round-trip, 0..1 (warehouse of losses).
+    pub round_trip_eff: f64,
+    /// Reserve safety margin added to `policy.reserve_percent`.
+    pub reserve_margin_percent: f64,
+    /// Upper SOC to charge toward (%). 100 = full.
+    pub max_soc_percent: f64,
+    /// Prefer using PV surplus to charge before grid.
+    pub prefer_solar: bool,
+}
+
+impl Default for OptimizerConfig {
+    fn default() -> Self {
+        Self {
+            capacity_wh: 0.0,
+            min_spread_eur_kwh: 0.03,
+            round_trip_eff: 0.90,
+            reserve_margin_percent: 3.0,
+            max_soc_percent: 100.0,
+            prefer_solar: true,
+        }
+    }
 }
 
 /// Phase-2 write control. THE MASTER SWITCH for bus writes is
@@ -199,6 +264,7 @@ impl Default for PolicyConfig {
             override_slots: Vec::new(),
             override_high: default_marker_high(),
             override_low: default_marker_low(),
+            optimizer: OptimizerConfig::default(),
         }
     }
 }
@@ -215,7 +281,113 @@ impl Default for ControlConfig {
     }
 }
 
+/// Day-ahead price feed (Nordpool, keyless).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PricesConfig {
+    pub enabled: bool,
+    /// Nordpool delivery area, e.g. "SE4".
+    pub area: String,
+    pub currency: String,
+    /// Local UTC offset in seconds used to key delivery days (+3600 = CET/WET+1).
+    pub tz_offset_secs: i64,
+    /// Background refresh interval (seconds); day-ahead changes once a day.
+    pub refresh_secs: u64,
+}
+
+impl Default for PricesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            area: "SE4".into(),
+            currency: "EUR".into(),
+            tz_offset_secs: 3600,
+            refresh_secs: 6 * 3600,
+        }
+    }
+}
+
+/// PV array description for the own-model forecast (Open-Meteo driven).
+/// Multiple strings, each with its own orientation; total kWp is the sum.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SolarConfig {
+    pub enabled: bool,
+    pub latitude: f64,
+    pub longitude: f64,
+    /// System performance ratio (0..1). 0.8 is a safe default before tuning.
+    pub performance_ratio: f64,
+    /// Which inverter MPPT inputs are wired (informational, 1-based).
+    pub connected_mppts: Vec<u8>,
+    pub strings: Vec<SolarString>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SolarString {
+    pub name: String,
+    pub panels: u32,
+    /// STC watt-peak per panel.
+    pub panel_wp: u32,
+    /// Tilt from horizontal, degrees (0 = flat, 90 = vertical).
+    pub tilt_deg: f64,
+    /// Azimuth degrees clockwise from North (90 = east, 180 = south, 270 = west).
+    pub azimuth_deg: f64,
+    /// Bifacial panels collect rear-side gain; the model applies a modest bonus.
+    pub bifacial: bool,
+}
+
+impl Default for SolarString {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            panels: 0,
+            panel_wp: 0,
+            tilt_deg: 30.0,
+            azimuth_deg: 180.0,
+            bifacial: false,
+        }
+    }
+}
+
+impl SolarString {
+    pub fn kwp(&self) -> f64 {
+        self.panels as f64 * self.panel_wp as f64 / 1000.0
+    }
+}
+
+impl Default for SolarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            latitude: 55.72486,
+            longitude: 13.17030,
+            performance_ratio: 0.8,
+            connected_mppts: vec![1, 2],
+            strings: vec![
+                SolarString {
+                    name: "East".into(),
+                    panels: 5,
+                    panel_wp: 435,
+                    tilt_deg: 16.0,
+                    azimuth_deg: 90.0,
+                    bifacial: true,
+                },
+                SolarString {
+                    name: "West".into(),
+                    panels: 5,
+                    panel_wp: 435,
+                    tilt_deg: 16.0,
+                    azimuth_deg: 270.0,
+                    bifacial: true,
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     #[serde(default)]
     pub mqtt: MqttConfig,
@@ -231,6 +403,10 @@ pub struct Config {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub control: ControlConfig,
+    #[serde(default)]
+    pub prices: PricesConfig,
+    #[serde(default)]
+    pub solar: SolarConfig,
 }
 
 fn default_true() -> bool {
@@ -262,6 +438,30 @@ fn default_poll() -> u64 {
 }
 fn default_mcu_sysfs() -> String {
     "/sys/class/mcu/mcu1".into()
+}
+fn default_mcu_port() -> String {
+    "/dev/mcu1".into()
+}
+fn default_mcu_baud() -> u32 {
+    115200
+}
+fn default_mcu_timeout_ms() -> u64 {
+    crate::mcu_proto::DEFAULT_TIMEOUT_MS
+}
+fn default_can_iface() -> String {
+    "can0".into()
+}
+fn default_meter_port() -> String {
+    "/dev/ttyCH9344USB1".into()
+}
+fn default_meter_baud() -> u32 {
+    9600
+}
+fn default_meter_slave() -> u8 {
+    1
+}
+fn default_meter_interval() -> u64 {
+    15
 }
 fn default_fb() -> String {
     "/dev/fb0".into()
@@ -303,6 +503,17 @@ impl Default for HardwareConfig {
             map_unvalidated: false,
             bus_enabled: true,
             mcu_sysfs: default_mcu_sysfs(),
+            mcu_protocol: false,
+            mcu_port: default_mcu_port(),
+            mcu_baud: default_mcu_baud(),
+            mcu_timeout_ms: default_mcu_timeout_ms(),
+            can_listen: false,
+            can_iface: default_can_iface(),
+            meter_enabled: false,
+            meter_port: default_meter_port(),
+            meter_baud: default_meter_baud(),
+            meter_slave: default_meter_slave(),
+            meter_interval_secs: default_meter_interval(),
             framebuffer: default_fb(),
             display_enabled: true,
         }
@@ -319,6 +530,8 @@ impl Default for Config {
             admin: AdminConfig::default(),
             policy: PolicyConfig::default(),
             control: ControlConfig::default(),
+            prices: PricesConfig::default(),
+            solar: SolarConfig::default(),
         }
     }
 }
@@ -343,6 +556,12 @@ impl Store {
 
     pub fn get(&self) -> Config {
         self.inner.read().unwrap().clone()
+    }
+
+    /// Replace the in-memory config without writing the file (runtime-only
+    /// CLI overrides such as --mcu-port / --can-iface).
+    pub fn set_runtime(&self, cfg: Config) {
+        *self.inner.write().unwrap() = cfg;
     }
 
     /// Atomically writes the config, keeping one .bak.

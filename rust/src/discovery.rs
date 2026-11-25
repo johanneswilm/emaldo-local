@@ -28,6 +28,43 @@ pub fn publish_state(c: &Client, base: &str, st: &State) {
     p("battery/remaining_wh", st.battery.remaining_wh.into());
     p("pv/power_w", st.pv.power_w.into());
     p("load/net_w", st.load.net_w.into());
+    if st.prices.enabled || !st.prices.today.is_empty() {
+        p("prices/area", st.prices.area.clone().into());
+        p("prices/currency", st.prices.currency.clone().into());
+        p("prices/today", st.prices.today.clone().into());
+        match st.prices.today_mean_eur_mwh {
+            Some(v) => p("prices/today_mean_eur_kwh", (v / 1000.0).into()),
+            None => {}
+        }
+        match st.prices.tomorrow_mean_eur_mwh {
+            Some(v) => p("prices/tomorrow_mean_eur_kwh", (v / 1000.0).into()),
+            None => {}
+        }
+        if let Some(next) = st.prices.next_slots.first() {
+            p("prices/next_eur_kwh", next.eur_kwh.into());
+            p("prices/next_at", next.local_hhmm.clone().into());
+        }
+    }
+    if st.policy.mode == "optimize" {
+        p("plan/now_intent", format!("{:?}", st.policy.plan.now_intent).to_lowercase().into());
+        p("plan/now_power_w", st.policy.plan.now_power_w.into());
+        p("plan/est_saving_eur", st.policy.plan.est_saving_eur.into());
+        p("plan/reason", st.policy.reason.clone().into());
+    }
+    if st.meter.available {
+        p("grid/import_w", st.meter.import_w.into());
+        p("grid/export_w", st.meter.export_w.into());
+        p("grid/net_w", st.meter.net_w.into());
+        p("grid/import_today_kwh", st.meter.import_kwh.into());
+        p("grid/export_today_kwh", st.meter.export_kwh.into());
+        p("meter/day", st.meter.day.clone().into());
+    }
+    if st.solar.enabled {
+        p("solar/current_w", st.solar.current_w.into());
+        p("solar/peak_w", st.solar.peak_w.into());
+        p("solar/today_kwh", st.solar.today_kwh.into());
+        p("solar/kwp", st.solar.kwp.into());
+    }
     for inv in &st.inverters {
         p(&format!("inverter/{}/power_w", inv.index), inv.power_w.into());
         p(
@@ -86,6 +123,49 @@ pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name:
         "stat_t": format!("{base}/pv/power_w"), "unit_of_meas": "W", "dev_cla": "power", "stat_cla": "measurement"}));
     add("sensor", "load_net_power", "Load net power", serde_json::json!({
         "stat_t": format!("{base}/load/net_w"), "unit_of_meas": "W", "dev_cla": "power", "stat_cla": "measurement"}));
+    if st.prices.enabled || !st.prices.today.is_empty() {
+        add("sensor", "price_today_mean", "Price today (mean)", serde_json::json!({
+            "stat_t": format!("{base}/prices/today_mean_eur_kwh"),
+            "unit_of_meas": "EUR/kWh", "dev_cla": "monetary", "stat_cla": "measurement",
+            "icon": "mdi:currency-eur"}));
+        add("sensor", "price_tomorrow_mean", "Price tomorrow (mean)", serde_json::json!({
+            "stat_t": format!("{base}/prices/tomorrow_mean_eur_kwh"),
+            "unit_of_meas": "EUR/kWh", "dev_cla": "monetary", "stat_cla": "measurement",
+            "icon": "mdi:currency-eur"}));
+        add("sensor", "price_next", "Spot price (current slot)", serde_json::json!({
+            "stat_t": format!("{base}/prices/next_eur_kwh"),
+            "unit_of_meas": "EUR/kWh", "dev_cla": "monetary", "stat_cla": "measurement",
+            "icon": "mdi:flash"}));
+    }
+    if st.policy.mode == "optimize" {
+        add("sensor", "plan_power", "Optimizer setpoint", serde_json::json!({
+            "stat_t": format!("{base}/plan/now_power_w"), "unit_of_meas": "W",
+            "dev_cla": "power", "stat_cla": "measurement", "icon": "mdi:battery-sync"}));
+        add("sensor", "plan_intent", "Optimizer intent", serde_json::json!({
+            "stat_t": format!("{base}/plan/now_intent"), "icon": "mdi:state-machine"}));
+        add("sensor", "plan_est_saving", "Optimizer est. saving", serde_json::json!({
+            "stat_t": format!("{base}/plan/est_saving_eur"), "unit_of_meas": "EUR",
+            "dev_cla": "monetary", "stat_cla": "measurement", "icon": "mdi:cash-plus"}));
+    }
+    if st.meter.available {
+        add("sensor", "grid_import_today", "Grid import today", serde_json::json!({
+            "stat_t": format!("{base}/grid/import_today_kwh"), "unit_of_meas": "kWh",
+            "dev_cla": "energy", "stat_cla": "total_increasing", "icon": "mdi:transmission-tower-import"}));
+        add("sensor", "grid_export_today", "Grid export today", serde_json::json!({
+            "stat_t": format!("{base}/grid/export_today_kwh"), "unit_of_meas": "kWh",
+            "dev_cla": "energy", "stat_cla": "total_increasing", "icon": "mdi:transmission-tower-export"}));
+    }
+    if st.solar.enabled {
+        add("sensor", "solar_forecast_now", "PV forecast (next hour)", serde_json::json!({
+            "stat_t": format!("{base}/solar/current_w"), "unit_of_meas": "W",
+            "dev_cla": "power", "stat_cla": "measurement", "icon": "mdi:solar-power"}));
+        add("sensor", "solar_forecast_peak", "PV forecast peak", serde_json::json!({
+            "stat_t": format!("{base}/solar/peak_w"), "unit_of_meas": "W",
+            "dev_cla": "power", "stat_cla": "measurement", "icon": "mdi:solar-power"}));
+        add("sensor", "solar_forecast_today", "PV forecast today", serde_json::json!({
+            "stat_t": format!("{base}/solar/today_kwh"), "unit_of_meas": "kWh",
+            "dev_cla": "energy", "stat_cla": "total_increasing", "icon": "mdi:solar-power"}));
+    }
     for inv in &st.inverters {
         add(
             "sensor",

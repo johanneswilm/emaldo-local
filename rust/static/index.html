@@ -91,7 +91,7 @@
         <div>
           <label>Mode</label>
           <select id="p_mode" style="width:100%;padding:8px;border-radius:6px;background:#0d1117;color:var(--fg);border:1px solid #30363d">
-            <option>auto</option><option>idle</option><option>charge</option><option>discharge</option>
+            <option>auto</option><option>optimize</option><option>idle</option><option>charge</option><option>discharge</option>
           </select>
         </div>
         <div><label>Charge limit (W)</label><input id="p_charge" type="number" value="0"></div>
@@ -118,9 +118,63 @@
     </section>
 
     <section class="card">
-      <h2>Settings (read-only view)</h2>
-      <p class="mut">Phase 1 exposes the configuration read-only here; edit <code>/root/emaldo-driver.toml</code> on the device. Secrets are masked.</p>
-      <pre id="s_cfg">–</pre>
+      <h2>Settings</h2>
+      <p class="mut">Edit and save configuration; changes are written to the driver's TOML
+      and applied live where possible. Some hardware fields take effect after a restart.
+      Secrets are never shown.</p>
+
+      <h3>MQTT / Home Assistant</h3>
+      <div class="row">
+        <div><label>Broker URL</label><input id="cfg_mqtt_url" placeholder="mqtt://192.168.1.10:1883"></div>
+        <div><label>Topic prefix</label><input id="cfg_mqtt_prefix"></div>
+        <div><label>HA discovery</label><select id="cfg_mqtt_disc"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>Discovery prefix</label><input id="cfg_mqtt_dprefix"></div>
+      </div>
+
+      <h3>Prices (Nordpool)</h3>
+      <div class="row">
+        <div><label>Enabled</label><select id="cfg_prices_enabled"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>Area</label><input id="cfg_prices_area" placeholder="SE4"></div>
+        <div><label>Currency</label><input id="cfg_prices_currency" placeholder="EUR"></div>
+        <div><label>TZ offset (s)</label><input id="cfg_prices_tz" type="number" value="3600"></div>
+        <div><label>Refresh (s)</label><input id="cfg_prices_refresh" type="number" value="21600"></div>
+      </div>
+
+      <h3>PV array</h3>
+      <div class="row">
+        <div><label>Forecast enabled</label><select id="cfg_solar_enabled"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>Latitude</label><input id="cfg_solar_lat" type="number" step="0.00001"></div>
+        <div><label>Longitude</label><input id="cfg_solar_lon" type="number" step="0.00001"></div>
+        <div><label>Performance ratio</label><input id="cfg_solar_pr" type="number" step="0.01" value="0.8"></div>
+      </div>
+      <p class="mut">One row per string (panels × Wp, tilt°, azimuth° 90=E/180=S/270=W, bifacial).</p>
+      <table id="cfg_solar_strings"><tr><th>name</th><th>panels</th><th>Wp</th><th>tilt°</th><th>az°</th><th>bifacial</th><th></th></tr></table>
+      <button class="ghost" onclick="addSolarString()">+ add string</button>
+
+      <h3>Battery / CAN</h3>
+      <div class="row">
+        <div><label>Reserve (%)</label><input id="cfg_reserve" type="number" value="20"></div>
+        <div><label>Opt: capacity (Wh)</label><input id="cfg_opt_cap" type="number" value="0"></div>
+        <div><label>Opt: min spread (EUR/kWh)</label><input id="cfg_opt_spread" type="number" step="0.005" value="0.03"></div>
+        <div><label>Opt: round-trip eff</label><input id="cfg_opt_eta" type="number" step="0.01" value="0.9"></div>
+        <div><label>Opt: max SOC (%)</label><input id="cfg_opt_max" type="number" value="100"></div>
+        <div><label>CAN listen</label><select id="cfg_can"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>CAN iface</label><input id="cfg_can_iface" placeholder="can0"></div>
+        <div><label>Poll interval (s)</label><input id="cfg_poll" type="number" value="5"></div>
+      </div>
+
+      <h3>Display</h3>
+      <div class="row">
+        <div><label>Device name</label><input id="cfg_device_name"></div>
+        <div><label>Display enabled</label><select id="cfg_display"><option value="true">on</option><option value="false">off</option></select></div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <button class="ghost" onclick="saveSettings()">Save settings</button>
+        <button class="ghost" onclick="loadConfig()">Reload</button>
+      </div>
+      <p class="mut" id="cfg_msg"></p>
+      <details><summary class="mut">Raw configuration (read-only)</summary><pre id="s_cfg">–</pre></details>
     </section>
   </div>
 
@@ -175,7 +229,11 @@ function renderState(st) {
   $('s_grid').textContent = fmtW(st.grid && st.grid.net_w);
   $('s_pv').textContent = fmtW(st.pv && st.pv.power_w);
   $('s_load').textContent = fmtW(st.load && st.load.net_w);
+  const _mcu = st.mcu || {};
+  const _grid = _mcu.con_power === '1' ? 'grid connected'
+    : (_mcu.con_power ? 'grid state ' + _mcu.con_power : 'grid unknown');
   $('s_meta').textContent = 'updated ' + new Date((st.updated_at||0)*1000).toLocaleTimeString()
+    + ' · MCU ' + (_mcu.present ? 'present' : 'absent') + ' · ' + _grid
     + (st.faults && st.faults.length ? ' · FAULTS: ' + st.faults.join(', ') : '');
 
   let tree = 'module SoC (this driver)\n';
@@ -190,6 +248,23 @@ function renderState(st) {
     '#' + i.index + ' ' + (i.running?'ON':'off') + ' ' + (i.frequency_hz||0).toFixed(1) + 'Hz').join(', ');
   tree += '\n├─ battery: ' + (st.battery.soc_percent||0).toFixed(0) + '% '
     + (st.battery.remaining_wh||0).toFixed(0) + '/' + (st.battery.capacity_wh||0).toFixed(0) + ' Wh';
+  const can = st.can || {};
+  tree += '\n├─ battery source: ' + (st.battery && st.battery.modules ? 'CAN BMS (' + st.battery.modules + ' packs)' : (can.enabled ? 'CAN (no packs yet)' : 'none'));
+  if (st.battery && st.battery.modules) {
+    tree += '  ' + (st.battery.soc_percent||0).toFixed(1) + '%, '
+      + (st.battery.voltage_v||0).toFixed(1) + ' V, '
+      + (st.battery.current_a||0).toFixed(1) + ' A, '
+      + (st.battery.temp_c||0).toFixed(1) + ' °C, SOH ' + (st.battery.soh_percent||0).toFixed(0) + '%, '
+      + (st.battery.cycle_count||0) + ' cycles';
+  }
+  tree += '\n├─ CAN ' + (can.enabled ? '[' + (can.iface||'') + '] ' + (can.frames||0) + ' frames / ' + (can.messages||0) + ' msgs' : '[off]');
+  (can.batteries || []).forEach(b => {
+    tree += '\n│   ├─ cabinet ' + b.cabinet + ' pack ' + b.position + ': '
+      + (b.soc_percent||0) + '% ' + ((b.voltage_mv||0)/1000).toFixed(2) + ' V '
+      + ((b.current_ma||0)/1000).toFixed(2) + ' A, '
+      + b.cell_count + ' cells ' + b.cell_min_mv + '..' + b.cell_max_mv + ' mV, '
+      + (b.temp_min_c||0).toFixed(1) + '..' + (b.temp_max_c||0).toFixed(1) + ' °C';
+  });
   tree += '\n└─ display, b-sensor, EV gun: via bus (see raw registers)';
   $('s_tree').textContent = tree;
 
@@ -229,9 +304,119 @@ async function loadEvents() {
   setTimeout(loadEvents, 10000);
 }
 
+let CFG = null;
 async function loadConfig() {
   const r = await api('/api/v1/config');
-  if (r.ok) $('s_cfg').textContent = JSON.stringify(await r.json(), null, 2);
+  if (!r.ok) return;
+  CFG = await r.json();
+  $('s_cfg').textContent = JSON.stringify(CFG, null, 2);
+  const m = CFG.mqtt || {}, pr = CFG.prices || {}, so = CFG.solar || {},
+        hw = CFG.hardware || {}, po = CFG.policy || {}, dv = CFG.device || {};
+  $('cfg_mqtt_url').value = m.broker_url || '';
+  $('cfg_mqtt_prefix').value = m.topic_prefix || 'emaldo/powercore';
+  $('cfg_mqtt_disc').value = String(m.ha_discovery !== false);
+  $('cfg_mqtt_dprefix').value = m.discovery_prefix || 'homeassistant';
+  $('cfg_prices_enabled').value = String(!!pr.enabled);
+  $('cfg_prices_area').value = pr.area || 'SE4';
+  $('cfg_prices_currency').value = pr.currency || 'EUR';
+  $('cfg_prices_tz').value = pr.tz_offset_secs ?? 3600;
+  $('cfg_prices_refresh').value = pr.refresh_secs ?? 21600;
+  $('cfg_solar_enabled').value = String(!!so.enabled);
+  $('cfg_solar_lat').value = so.latitude ?? 55.72486;
+  $('cfg_solar_lon').value = so.longitude ?? 13.1703;
+  $('cfg_solar_pr').value = so.performance_ratio ?? 0.8;
+  renderSolarStrings(so.strings || []);
+  $('cfg_reserve').value = po.reserve_percent ?? 20;
+  const op = po.optimizer || {};
+  $('cfg_opt_cap').value = op.capacity_wh ?? 0;
+  $('cfg_opt_spread').value = op.min_spread_eur_kwh ?? 0.03;
+  $('cfg_opt_eta').value = op.round_trip_eff ?? 0.9;
+  $('cfg_opt_max').value = op.max_soc_percent ?? 100;
+  $('cfg_can').value = String(!!hw.can_listen);
+  $('cfg_can_iface').value = hw.can_iface || 'can0';
+  $('cfg_poll').value = hw.poll_interval_secs ?? 5;
+  $('cfg_device_name').value = dv.name || 'Power Core';
+  $('cfg_display').value = String(hw.display_enabled !== false);
+}
+
+function renderSolarStrings(list) {
+  const t = $('cfg_solar_strings');
+  t.querySelectorAll('tr.ss').forEach(e => e.remove());
+  list.forEach(st => {
+    const tr = document.createElement('tr');
+    tr.className = 'ss';
+    tr.innerHTML = '<td><input class="ss_name" value="' + (st.name||'') + '"></td>'
+      + '<td><input class="ss_panels" type="number" value="' + (st.panels||0) + '"></td>'
+      + '<td><input class="ss_wp" type="number" value="' + (st.panel_wp||0) + '"></td>'
+      + '<td><input class="ss_tilt" type="number" value="' + (st.tilt_deg||0) + '"></td>'
+      + '<td><input class="ss_az" type="number" value="' + (st.azimuth_deg||0) + '"></td>'
+      + '<td><select class="ss_bi"><option value="true">yes</option><option value="false">no</option></select></td>'
+      + '<td><button class="ghost" onclick="this.closest(\'tr\').remove()">×</button></td>';
+    t.appendChild(tr);
+    tr.querySelector('.ss_bi').value = String(!!st.bifacial);
+  });
+}
+
+function addSolarString() {
+  renderSolarStrings([...readSolarStrings(), {name:'', panels:0, panel_wp:0, tilt_deg:30, azimuth_deg:180, bifacial:false}]);
+}
+
+function readSolarStrings() {
+  const out = [];
+  $('cfg_solar_strings').querySelectorAll('tr.ss').forEach(tr => {
+    out.push({
+      name: tr.querySelector('.ss_name').value,
+      panels: parseInt(tr.querySelector('.ss_panels').value || '0'),
+      panel_wp: parseInt(tr.querySelector('.ss_wp').value || '0'),
+      tilt_deg: parseFloat(tr.querySelector('.ss_tilt').value || '0'),
+      azimuth_deg: parseFloat(tr.querySelector('.ss_az').value || '0'),
+      bifacial: tr.querySelector('.ss_bi').value === 'true',
+    });
+  });
+  return out;
+}
+
+async function saveSettings() {
+  if (!CFG) return;
+  const c = JSON.parse(JSON.stringify(CFG));
+  const b = (id) => $(id).value === 'true';
+  const n = (id, d) => { const v = parseFloat($(id).value); return isNaN(v) ? d : v; };
+  c.mqtt = Object.assign(c.mqtt || {}, {
+    broker_url: $('cfg_mqtt_url').value,
+    topic_prefix: $('cfg_mqtt_prefix').value,
+    ha_discovery: b('cfg_mqtt_disc'),
+    discovery_prefix: $('cfg_mqtt_dprefix').value,
+  });
+  c.prices = Object.assign(c.prices || {}, {
+    enabled: b('cfg_prices_enabled'), area: $('cfg_prices_area').value,
+    currency: $('cfg_prices_currency').value, tz_offset_secs: n('cfg_prices_tz', 3600),
+    refresh_secs: n('cfg_prices_refresh', 21600),
+  });
+  const so = c.solar || {};
+  so.enabled = b('cfg_solar_enabled');
+  so.latitude = n('cfg_solar_lat', 55.72486);
+  so.longitude = n('cfg_solar_lon', 13.1703);
+  so.performance_ratio = n('cfg_solar_pr', 0.8);
+  so.strings = readSolarStrings();
+  c.solar = so;
+  const pol = c.policy || {};
+  pol.reserve_percent = n('cfg_reserve', 20);
+  pol.optimizer = Object.assign(pol.optimizer || {}, {
+    capacity_wh: n('cfg_opt_cap', 0), min_spread_eur_kwh: n('cfg_opt_spread', 0.03),
+    round_trip_eff: n('cfg_opt_eta', 0.9), max_soc_percent: n('cfg_opt_max', 100),
+  });
+  c.policy = pol;
+  c.hardware = Object.assign(c.hardware || {}, {
+    can_listen: b('cfg_can'), can_iface: $('cfg_can_iface').value,
+    poll_interval_secs: n('cfg_poll', 5), display_enabled: b('cfg_display'),
+  });
+  c.device = Object.assign(c.device || {}, { name: $('cfg_device_name').value });
+  const msg = $('cfg_msg');
+  msg.textContent = ' saving…';
+  const r = await api('/api/v1/config', { method: 'PUT', body: JSON.stringify(c) });
+  const j = await r.json().catch(() => ({}));
+  msg.textContent = r.ok ? ' saved. Some changes (CAN/MQTT) may need a restart.' : (' ' + (j.error || ('HTTP ' + r.status)));
+  if (r.ok) { CFG = j; $('s_cfg').textContent = JSON.stringify(j, null, 2); }
 }
 
 async function doWalk() {

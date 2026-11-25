@@ -24,8 +24,8 @@ pub fn dispatch(cmd: &str, args: &serde_json::Value, ctx: &CmdCtx) -> Result<Str
     match cmd {
         "set_mode" => {
             let mode = args["mode"].as_str().ok_or("missing mode")?;
-            if !["auto", "idle", "charge", "discharge"].contains(&mode) {
-                return Err(format!("invalid mode {mode:?} (auto|idle|charge|discharge)"));
+            if !["auto", "idle", "charge", "discharge", "optimize"].contains(&mode) {
+                return Err(format!("invalid mode {mode:?} (auto|idle|charge|discharge|optimize)"));
             }
             update_config(ctx, |c| c.policy.mode = mode.to_string())?;
             Ok(format!("mode set to {mode}"))

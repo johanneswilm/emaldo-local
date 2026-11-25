@@ -18,6 +18,18 @@ impl SerialPort {
     /// Open a tty at the given baud in 8N1 raw mode, enabling RS485
     /// direction control when the driver supports it.
     pub fn open(port: &str, baud: u32) -> Result<SerialPort, String> {
+        Self::open_inner(port, baud, false)
+    }
+
+    /// Open a device that may be either a tty or a raw character device.
+    /// `/dev/mcu1` is a kernel char device (the UART is owned by the MCU
+    /// driver), so `tcgetattr` returns ENOTTY there; that is not an error
+    /// for the read-only MCU/Bmtp path. TTYs are still configured 8N1.
+    pub fn open_mcu(port: &str, baud: u32) -> Result<SerialPort, String> {
+        Self::open_inner(port, baud, true)
+    }
+
+    fn open_inner(port: &str, baud: u32, tolerate_notty: bool) -> Result<SerialPort, String> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -38,7 +50,16 @@ impl SerialPort {
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(fd, &mut t) != 0 {
-                return Err(format!("tcgetattr: {}", std::io::Error::last_os_error()));
+                let err = std::io::Error::last_os_error();
+                let notty = matches!(
+                    err.raw_os_error(),
+                    Some(libc::ENOTTY) | Some(libc::EINVAL)
+                );
+                if !(tolerate_notty && notty) {
+                    return Err(format!("tcgetattr: {err}"));
+                }
+                // Raw char device: the kernel driver already owns the UART.
+                return Ok(SerialPort { file });
             }
             libc::cfmakeraw(&mut t);
             t.c_cflag &= !(libc::PARENB | libc::CSTOPB | libc::CSIZE);
@@ -99,8 +120,27 @@ impl SerialPort {
 
     pub fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
         use std::io::Write;
-        self.file.write_all(data).map_err(|e| format!("write: {e}"))?;
-        self.file.flush().map_err(|e| format!("flush: {e}"))
+        // /dev/mcu1 is a message-oriented char device: its write() returns
+        // the driver's packet size (20 for a 12-byte Bmtp frame), not the
+        // number of user bytes consumed. std File::write_all would then
+        // slice past the end of the buffer and panic. Use one write() per
+        // chunk and stop when the driver reports >= the remaining bytes.
+        let mut off = 0usize;
+        while off < data.len() {
+            match self.file.write(&data[off..]) {
+                Ok(0) => return Err("write: zero bytes".into()),
+                Ok(n) => {
+                    if n >= data.len() - off {
+                        break; // driver consumed/reported the whole frame
+                    }
+                    off += n;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("write: {e}")),
+            }
+        }
+        let _ = self.file.flush();
+        Ok(())
     }
 
     /// Discard any pending RX bytes (inter-frame garbage).

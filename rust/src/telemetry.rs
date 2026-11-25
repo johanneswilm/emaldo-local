@@ -66,6 +66,8 @@ pub struct PolicyInfo {
     /// Current computed setpoint in watts (+ = charge).
     pub setpoint_w: i32,
     pub reason: String,
+    /// Cost-aware plan (present when mode = "optimize").
+    pub plan: crate::optimizer::Plan,
 }
 
 /// Phase-2 write controller status.
@@ -77,6 +79,100 @@ pub struct ControlInfo {
     pub snapshot_taken: bool,
 }
 
+/// Read-only SocketCAN view of the DIN cabinet/BMS bus. Filled by the
+/// listener in can.rs; battery entries are reassembled type-7 reports.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CanState {
+    pub enabled: bool,
+    pub iface: String,
+    pub frames: u64,
+    pub messages: u64,
+    pub batteries: Vec<CanBattery>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CanBattery {
+    pub cabinet: u8,
+    pub position: u8,
+    pub cell_count: u8,
+    pub cell_min_mv: u16,
+    pub cell_max_mv: u16,
+    pub cell_avg_mv: u16,
+    /// Decoded from the vendor BAK TLV (bak.parseBatteryBasicData).
+    pub voltage_mv: u16,
+    pub current_ma: i32,
+    pub soc_percent: u16,
+    pub full_charge: u16,
+    pub discharges: u16,
+    pub health_percent: u16,
+    pub temp_min_c: f64,
+    pub temp_max_c: f64,
+    pub last_seen: u64,
+}
+
+/// Day-ahead price summary (Nordpool). Cached slots live in the price file;
+/// this is the compact view for the UI / MQTT.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PricesState {
+    pub enabled: bool,
+    pub area: String,
+    pub currency: String,
+    pub today: String,
+    pub tomorrow: Option<String>,
+    pub updated_at: u64,
+    pub today_mean_eur_mwh: Option<f64>,
+    pub tomorrow_mean_eur_mwh: Option<f64>,
+    pub slots: usize,
+    /// Last >0..N slot summary in EUR/kWh for the next N quarter-hours.
+    pub next_slots: Vec<PriceSlot>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PriceSlot {
+    pub start: u64,
+    pub local_hhmm: String,
+    pub eur_kwh: f64,
+}
+
+/// Own-model PV forecast summary.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SolarState {
+    pub enabled: bool,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub kwp: f64,
+    pub updated_at: u64,
+    pub current_w: f64,
+    pub peak_w: f64,
+    pub today_kwh: f64,
+    pub next_hours: Vec<SolarSlot>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SolarSlot {
+    pub start: u64,
+    pub local_hhmm: String,
+    pub power_w: f64,
+}
+
+/// Grid/load energy meter (b-sensor) state and daily counters.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct MeterState {
+    pub available: bool,
+    pub updated_at: u64,
+    pub voltage_v: [f64; 3],
+    pub current_a: [f64; 3],
+    /// Grid import/export at the meter, W.
+    pub import_w: f64,
+    pub export_w: f64,
+    /// Signed net (+ = import).
+    pub net_w: f64,
+    /// Local day the counters cover.
+    pub day: String,
+    pub import_kwh: f64,
+    pub export_kwh: f64,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct State {
     pub updated_at: u64,
@@ -86,6 +182,10 @@ pub struct State {
     pub pv: PvState,
     pub load: PowerReading,
     pub mcu: McuState,
+    pub can: CanState,
+    pub prices: PricesState,
+    pub solar: SolarState,
+    pub meter: MeterState,
     pub faults: Vec<String>,
     pub policy: PolicyInfo,
     pub control: ControlInfo,

@@ -18,10 +18,10 @@ string-table guesses.
 >
 > Consequences:
 > - The HiSolar Modbus map below describes the inverter's own bus, which
->   sits **behind the MCU**. Direct control requires either speaking the
->   MCU protocol (`/dev/mcu1`, tower-RPC — frames captured in the
->   emulator, see EMULATOR_BENCH "MCU tower framing") or an external
->   RS485 tap on the inverter bus.
+>   sits **behind the MCU**. On this hardware it is reached with the MCU
+>   Bmtp protocol (`/dev/mcu1`) command 0x1012, not with Modbus RTU; see
+>   "MCU protocol" below. An external RS485 tap on the inverter bus would
+>   be the alternative.
 > - Battery data/control goes via the CAN cabinet bus (wire format
 >   already reverse-engineered — emulator README "DIN CAN wire format",
 >   `fake_bms.py`, `firmware/CANAPP_RE.md`).
@@ -31,13 +31,21 @@ string-table guesses.
 
 ## Buses
 
-- `/dev/ttymxc2` — main UART on the module SoC: Modbus RTU to inverter(s)
-  and battery BMS. This is the FW-1 poll target. Single-master: on the
-  live battery the vendor app owns it.
-- `/dev/mcu1`, `/dev/mcu1version`, `/sys/class/mcu/mcu1/*` — housekeeping
-  MCU sysfs (vendor kernel driver); independent of the UART. Node table
-  below (validated live).
-- `/dev/serial/by-path/...usb...` — USB-serial for accessories.
+- `/dev/ttymxc2` — UART 21e8000 on the module SoC. On the **live** unit
+  the vendor `mcu_driver.ko` owns this UART and exposes it as the
+  message-oriented char device `/dev/mcu1` plus `/sys/class/mcu/mcu1/*`;
+  the vendor app (`/root/bin/app`) uses `/dev/mcu1`, not the tty.
+  On the **emulator** the UART is replaced by a pty exposed as
+  `/dev/ttymxc2` (the vendor app's serial transport writes the same
+  frames). Single-master in both cases.
+- `/dev/mcu1` — housekeeping-MCU char device (`mcu_driver.ko`). Writes are
+  wrapped by the driver in a DIN frame (`Din_data_packing(0xF0, ...)`);
+  RX is parsed by `Din_data_analysis` and queued for `read()`.
+  `/sys/class/mcu/mcu1/*` is the separate status/IO interface.
+- `/dev/serial/by-path/...usb...` — USB-serial accessories (EV gun /
+  b-sensor), idle on this unit.
+- `can0` (500 kbit) — cabinet↔BMS DIN bus, bridged by `/root/bin/cabinet`
+  into `/run/cabinet/1/{1,2,3}/{in,out}` FIFOs. Read-only listener path.
 
 ## Inverter drivers: there are TWO families
 
@@ -115,25 +123,37 @@ Model string: `ToggleBoost` gates on the inverter model starting with
 - `invt/upgrade` implements a locked OTA (requestUnlock/sendKey/eraseFlash)
   — do not touch.
 
-## Battery BMS: BST (Pace-style ASCII protocol)
+## Battery BMS: our packs use BAK (CAN TLV), not BST ASCII
 
-Two battery drivers exist: `battery/bak` and `battery/bst`. The BST one
-matches the "XorCheck" strings and is the likely pack driver:
+The vendor has both `battery/bak` and `battery/bst`. **The live packs are
+BAK**: the passive CAN capture (2026-11-25) reassembles into type-7
+messages whose body matches `bak.(*BAK).parseBatteryBasicData` byte for
+byte (record types 1..11 below). BST remains the alternative for other
+hardware:
 
-- Frame: `~` (0x7E) + ASCII-hex payload + CRC + CR (0x0D)
-  (`genTotalCMDData`: hex-encode command bytes, append check + 2 trailer
-  bytes = `~\r`).
-- The "XOR check" is **plain CRC-16/MODBUS** computed via two 256-byte
-  tables (`bst.custumXorCheck`; verified: tables from the binary produce
-  CRC("123456789") = 0x374B). The earlier note about a distinct XOR
-  checksum is wrong for BST.
-- Command generators: `genGetBatteryBasicDataCMD`,
-  `genGetBatteryModuleDataCMD`, `genGetBatteryBMSVersion`,
-  `genGetCounterData`, `genGetCapacity`; parser `ParseBatteryRawData`;
-  MOS/heat-film/current-limit control exists (Phase 2+, not needed).
-- The BAK driver (alternative pack vendor) has binary frames with
-  `bak.XorCheck` — capture on the live bus decides which one our packs
-  use.
+- BST: `~` (0x7E) + ASCII-hex payload + CRC-16/MODBUS + CR.
+- BAK record stream (from `parseBatteryBasicData`): repeated
+  `[type u8][len_words u8][len_words*2 bytes]`, values **big-endian u16**.
+  The CAN type-7 payload is a 4-byte header (`7c 00 01 7c`) followed by
+  this stream; the reassembled live length is 130 bytes.
+  | type | meaning | decode |
+  |---|---|---|
+  | 1 | cell voltages | `len` words, mV |
+  | 2 | current | `(30000 - raw) * 10` mA, + = charge |
+  | 3 | SOC | `raw / 100` % |
+  | 4 | full charge | raw |
+  | 5 | 6 temperatures | low byte of each word: `deciK = (b-50)*10+2731` |
+  | 6 | state/error flags | vendor `checkBatteryStateAndErr` |
+  | 7 | discharge count | raw |
+  | 8 | pack voltage | `raw * 10` mV |
+  | 9 | health | `raw / 100` % |
+  | 10 | error protect | vendor error bits |
+  | 11 | (ignored; tail after it is not parsed) | |
+- Live values (can0, 2026-11-25 17:22 UTC): 3 packs, 16 cells each,
+  3262–3272 mV cells, 52.27–52.29 V, −6.4/−7.3/−7.9 A, SOC
+  56/75/67 % (mean 66 %; vendor display showed 70 % usable), cycles
+  317/349/365, health 98–100 %, 15–27 °C. This is now decoded by
+  `rust/src/can.rs` and shown in the driver UI.
 
 ## MCU sysfs (validated live 2026-11-25)
 
@@ -153,7 +173,109 @@ poll cycle; values are raw — semantics of the flags still vendor-specific):
 | `updata_mode` | `0` | rw | (sic) update mode flag |
 | `ev_green`, `ev_red` | `0` | rw | EV status LEDs — do not write |
 | `network_4g_power` | `0` | rw | do not write |
-| `mcu_rst` | — | **write-only** | never touch |
+| `mcu_rst` | — | **write-only** | vendor recovery reset (pulse); do not use in normal operation. Pulsed once in the 2026-11-25 MCU window; no responses followed. |
+
+## MCU protocol: Bmtp over the vendor "tower" serial codec (recovered 2026-11-25)
+
+The inverter is **not** reached with Modbus RTU on this unit. The app talks
+to the housekeeping MCU with the Bmtp message protocol; the MCU is a
+register bridge/IO controller. Evidence: `internal/mcuclient`,
+`bmtp/codec`, `bmtp/xorsum`, `sockets/devfile` in the vendor binary, the
+live `mcu_driver.ko`, and the emulator capture. The 0x0FA0/0x0FDx HiSolar
+map is still usable, but **through command 0x1012**, not as Modbus frames.
+
+### Wire frame (little-endian)
+
+```
+00                    ProtocolVersion
+tt                    Type: 00 request, 01 response, 02 error
+01                    Platform (MCU)
+LL LL                 Length u16 = 6 + len(Data)
+ii ii                 Id / sequence (echoed by the response)
+cc cc                 Command u16
+vv                    CommandVersion
+ee                    Encryption (00 in all observed traffic)
+dd...                 Data (Length-6 bytes)
+xx                    XOR of frame[3 .. len-1)
+```
+
+Length = 6 + data; total = Length + 6. `00 00 01` is **not** a preamble:
+it is ProtocolVersion/Type/Platform of a request. The previous bench note
+that called byte 3 `type 06|07` was misreading the low byte of the
+little-endian Length field. The codec is `bmtp/codec` + `bmtp/xorsum`;
+`bmtp/encoding` writes fields sequentially (no Go struct padding).
+
+### Commands (read-only set; observed poll order)
+
+| cmd | name | request data | response |
+|---|---|---|---|
+| 0x1000 | ReadGlobalErr | — | 13×u16 (inverter 7, ev, mppt, case accs, battery, overload, comm) |
+| 0x1001 | ReadOutputPower | — | 12×u16: flag, LOut1..3, EvGunOut, LIn1..3, Batt1..3, BSensor |
+| 0x1002 | ReadInputPower | — | 12×u16: flag, LIn1..3, Mppt1..3, EvGunIn, Batt1..3, BSensor |
+| 0x1003 | ReadMcuInfo | — | len-prefixed model, version, barcode |
+| 0x1004 | ReadInverterInfoByIndex | `[index]` | status, 7×u16 errors, model, version, fan |
+| 0x1005 | ReadTotalBatteryInfo | — | 7×u16, SOC, i32 current, charges/times, count |
+| 0x1006 | ReadBatteryInfoByIndex | `[index]` | status, 4 temps, voltage, i32 current, SOC, charge, cycles, health, strings, case/incase |
+| 0x1007 | ReadGlobalLoadStatus | — | u8 |
+| 0x1008 | ReadMpptStatus | — | u8 status + 3×u16 errors |
+| 0x1009 | ReadLInMode | — | 3×u8 + mode (+ optional policy) |
+| 0x100A | ReadEvGunStatus | — | op status, light, u16 error |
+| 0x100C | ReadBatteryAccsStatusByIndex | `[index]` | u8 |
+| 0x100D | ReadCaseAccsStatusByIndex | `[index]` | 4 bytes + version |
+| 0x100E | ReadCaseInfo | — | u8 total cabinets |
+| 0x100F | ReadSystemStatus | — | u8 |
+| 0x1010 | ReadBootStatus | — | 14 bytes (Dc, Case, BMS106/pack presence) |
+| 0x1011 | ReadHardwareVersion | — | len-prefixed version |
+| **0x1012** | **ReadInverterRegister** | `[index, len, addr_lo, addr_hi]` | `2*len` bytes, **big-endian u16** |
+| 0x1014 | ReadEvData | — | 14×i32 + flags + 2 strings |
+| 0x1015 | ReadBSensorRegister | `[index, len, addr]` | raw |
+| 0x1019 | ReadLInAdvancedData | — | raw |
+
+`0x1013` is the write counterpart of 0x1012 (not sent by the driver).
+Power fields in 0x1001/0x1002 are in **100 W units** (the vendor
+`iostate` stores them directly; `display.format100W` renders them).
+`ReadTotalBatteryInfo` voltage is mV and current mA. There is **no**
+combined "ReadPowers" command on the MCU: 0x1000 is global errors.
+
+### Does Modbus tunnel? No RTU frames; 0x1012 is the register bridge
+
+A 0x1012 request with `index=0, len=43, addr=0x0FA0` returns the same
+86 bytes the HiSolar Modbus block would contain, in Modbus register order
+(big-endian u16). `len` is a u8 (max 255 registers). The MCU owns the
+inverter bus and the slave address/CRC; the driver never speaks Modbus
+RTU. This is the correct way to apply the 0x0FA0/0x0FAF map on this
+hardware.
+
+### Live result (controlled window, 2026-11-25)
+
+- `/dev/mcu1` has the write quirk: `write()` returns the driver's packet
+  size (20) for a 12-byte Bmtp frame; `std::io::Write::write_all` panics.
+  The driver now uses a single-write loop that tolerates this (fixed in
+  `rust/src/serial.rs`).
+- With the vendor app stopped (`systemctl stop monitor-dog.service
+  monitor.service; pkill -x app`), the driver sent the read set and read
+  continuously. **No bytes arrived** — not even for the driver's own
+  open-time DIN version/status queries. An `mcu_rst` pulse (the vendor
+  recovery path) and a 3 s boot wait did not change that. The MCU sysfs
+  stayed `1 1 1`; `mcu_mode=release_app`.
+- The vendor app's own display at the same time showed **Solar 0 / Grid 0 /
+  Battery 2.6 kW / SOC 70 %**: the battery path works, the inverter/MCU
+  telemetry path does not on this unit. So the missing inverter data is
+  not a driver bug; the vendor app does not have it either.
+- Consequence: the MCU read set is implemented and bench-validated, but
+  `hardware.mcu_protocol` stays **false** on live. The working live
+  telemetry is the CAN/BMS path below.
+
+### Emulator validation of the MCU path
+
+`emulator/ttymxc2-stub.py` logs the vendor app's requests; the new
+`emulator/fake_mcu.py` answers the read set with synthetic values. With it,
+the vendor app accepted the frames (SOC moved from 0 to 74 %, no error
+icon) and the Rust `--mcu-probe` decoded input/output powers, registers,
+inverter info and battery info. The app's **power tiles** stayed 0 because
+they are fed by the master/cloud state, while SOC/battery data is local.
+The app version on the emulator is v2.35.3; live is v2.35.5 (same code
+layout/pclntab).
 
 ## TODO(validate) checklist
 
@@ -163,11 +285,20 @@ poll cycle; values are raw — semantics of the flags still vendor-specific):
       against live telemetry in the Phase-2 window (driver exposes raw
       blocks in `state.raw`; `hardware.map_unvalidated=true` applies the
       provisional mapping on the bench).
-- [ ] SOC register: candidate byte 0x36 in the 0x0FA0 block, scale /10 —
-      confirm live (compare with e2e power-flow SOC).
+- [x] MCU protocol: Bmtp framing, command set and response structs
+      recovered; register bridge 0x1012 documented above; bench-validated
+      with `emulator/fake_mcu.py`. Live MCU path blocked: no responses
+      from `/dev/mcu1` in the controlled window (vendor app has no
+      inverter telemetry either).
+- [~] SOC register: candidate byte 0x36 in the 0x0FA0 block, scale /10 —
+      still unconfirmed (live 0x1012 read unavailable). BMS SOC is now
+      available from CAN type 3; see below.
 - [~] Slave ids: walk tooling done (`POST /api/v1/walk`, verified on the
-      bench). Live walk pending the controlled window (bus single-master).
-- [~] BMS frame format: BST = Pace ASCII (`~`…CRC16…CR), binary-verified;
-      which driver (bst vs bak) our packs use + live capture pending.
+      bench). Live walk pending a working inverter transport.
+- [x] BMS frame format: our packs are **BAK** (CAN type-7 TLV), decoded
+      and live-validated; BST ASCII remains for other hardware.
 - [ ] RS485 vs plain UART on the service port (the dongle decides).
       Driver does `TIOCSRS485` best-effort with plain-UART fallback.
+- [x] CAN listener: passive SocketCAN + DIN page reassembly + BAK TLV
+      decode; `rust --can-probe` live-validated (3 packs, SOC/voltage/
+      current/temps).

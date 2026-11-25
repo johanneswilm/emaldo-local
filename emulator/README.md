@@ -53,6 +53,21 @@ and protocol experiments.
 > and pty stub are units ordered before `exp-hb`, and portal204/e2e-relay/
 > bt-stub are enabled. Containment-check is 20/20 PASS after a clean boot.
 >
+> **Update 3 (2026-11-25): the diagchan is reachable and gives a shell.** The
+> e2e connfork chooses the router **per message**, not per login: an
+> `A0="SERVER"` header sends the frame to the CloudConn (JSON-decoded,
+> `cloudr`), while `F1` (proxy) sends it to the UserConn (`usersr`). `dc_act`
+> lives in `cloudr`; appending a duplicate `A0="SERVER"` (and omitting `F1`)
+> makes an app-channel frame run `diagchan.Activate`. Pass **`lp=0`** so the
+> handler uses its default local port `0xE792 = 59282`, the module's diag
+> sshd; the reply `DcActRsp` carries the tunnel `cmd` and the child `pk`,
+> which is authorized on the jump sshd. A fresh local user (uid>=1000,
+> diagchan-created) and the full `ssh-ed25519 ...` key line are required.
+> Verified end to end on the emulator and on a live module **without an OTA**.
+> Recipe and exact frame in
+> [`../docs/EMULATOR_BENCH.md`](../docs/EMULATOR_BENCH.md) ("Diagchan
+> reachable on the app/users e2e channel").
+>
 >
 > QEMU user-mode was abandoned midway (timing races); the supported path is
 > **QEMU system-mode** (full ARM VM). The notes on why are kept at the bottom -
@@ -218,9 +233,12 @@ tail -20 /var/log/dns_queries.log                                               
    `iot.go:546 - failed to create mcu sock` = `openat("/dev/ttymxc2")`: the MCU
    UART must exist. `ttymxc2-stub.py` (unit `ttymxc2-stub.service`,
    `Before=emaldo`) creates a pty, symlinks it to `/dev/ttymxc2`, and logs the
-   app's frames to `/sandbox/ttymxc2_traffic.log` (~4 s cadence:
-   `00 00 01 06 00 15 00 05 10 00 00 06`). The stub does not answer yet; the
-   app still proceeds and runs the cloud stage.
+   app's frames to `/sandbox/ttymxc2_traffic.log` (~4 s cadence; the frames
+   are Bmtp, e.g. `00 00 01 06 00 15 00 05 10 00 00 06` = ProtocolVersion 0,
+   Type 0 (request), Platform 1, Length 6, Id 0x0015, Command 0x1005,
+   CommandVersion 0, Encryption 0, XOR 0x06). The stub does not answer; the
+   app still proceeds and runs the cloud stage. `fake_mcu.py` answers the
+   read-only set (see "MCU responder and CAN replay" below).
    Notes: `baseinfo_v1` is the app's own filedb bucket store and grows when the
    identity is persisted (1900 -> 2743 B) - do not forge it. One more loopback
    trap at this stage: the e2e credentials the API hands out must name an eth0
@@ -308,6 +326,22 @@ dst 0xFF, payload `[0x04]`, every ~2 s. Reply with src = `cab<<4`, dst 0x00:
 
 With that, the real canapp creates `/run/cabinet/{tree,1/in,1/out}` and the app
 attaches within one boot.
+
+## MCU responder and CAN replay (2026-11-25)
+
+`fake_mcu.py` is the reference Bmtp server: it creates a pty, symlinks it to
+`/dev/ttymxc2`, and answers the vendor app's read-only poll set with
+synthetic powers/battery/inverter data. Run it instead of
+`ttymxc2-stub.py` (the stub only logs), then restart the app so it opens the
+new pty. It is stdlib-only and logs to `/sandbox/fake_mcu.log`.
+
+`can_replay.py` replays a real 130-byte type-7 BMS report (live capture
+2026-11-25) onto `can0` using the DIN page packing in
+`firmware/CANAPP_RE.md`. Use it to test the driver's passive listener when
+`fake_bms.py` (a poll responder) has no canapp to poll.
+
+Both are documented step-by-step in `../docs/EMULATOR_BENCH.md`
+("Bench-validating the MCU and CAN paths").
 
 ## Build from scratch
 

@@ -64,7 +64,21 @@ so prefer IP literals for the MQTT broker.
 
 ```bash
 emaldo-driver [--config /root/emaldo-driver.toml]   # default path shown
+
+# read-only diagnostics (never write setpoints; safe to run while the
+# vendor app owns the MCU only if the port is free):
+emaldo-driver --mcu-probe [--mcu-port /dev/mcu1] [--mcu-timeout-ms N]
+emaldo-driver --mcu-raw-dump SECS [--mcu-port /dev/mcu1]
+emaldo-driver --can-probe [--can-iface can0] [--can-seconds N]
+emaldo-driver [--config PATH] --prices-probe
 ```
+
+`--mcu-probe` sends the vendor app's read-only Bmtp set (0x1000/1001/1002/
+1003/1004/1005/1006/1007/1008/1009/100A/100E/100F/1011) and reads the
+HiSolar 0x0FA0×43 / 0x0FAF×18 blocks through 0x1012, then prints JSON.
+`--mcu-raw-dump` opens the device and prints whatever the kernel driver
+queues (it sends no user frames). `--can-probe` passively reassembles DIN
+pages and decodes the BAK battery TLV.
 
 First boot: open `https://<device-ip>:8443/`, set the admin password and
 MQTT broker in the setup wizard. The TLS cert is self-generated on first
@@ -105,6 +119,24 @@ simulate = false          # synthetic telemetry; never on a real install
 bus_enabled = true        # false = MCU-sysfs-only (live battery next to the vendor app)
 map_unvalidated = false   # apply provisional register->field mapping (bench only)
 mcu_sysfs = "/sys/class/mcu/mcu1"
+mcu_protocol = false      # opt-in: read-only Bmtp over /dev/mcu1 (single-master!)
+mcu_port = "/dev/mcu1"    # emulator: /dev/ttymxc2
+mcu_baud = 115200         # only applied to a tty; /dev/mcu1 is a char device
+mcu_timeout_ms = 800
+can_listen = false        # passive SocketCAN DIN/BMS listener
+can_iface = "can0"
+meter_enabled = false     # b-sensor grid/load meter (windowed sampling)
+meter_port = "/dev/ttyCH9344USB1"
+meter_baud = 9600
+meter_slave = 1
+meter_interval_secs = 15
+
+[prices]                  # Nordpool day-ahead (keyless), cached on disk
+enabled = false
+area = "SE4"
+currency = "EUR"
+tz_offset_secs = 3600
+refresh_secs = 21600
 framebuffer = "/dev/fb0"
 display_enabled = true
 
@@ -136,14 +168,17 @@ Modbus RTU is **single-master**. On the live battery the vendor app owns
 `/dev/ttymxc2`, so a second bus master would collide. Two supported modes:
 
 1. **`bus_enabled = false`** (default for live use): the driver never opens
-   the UART. Telemetry comes from the MCU sysfs
-   (`/sys/class/mcu/mcu1/{inverter_0..2,mcu_status,con_power}`), which is
-   independent of the UART. Display, web, MQTT all work.
-2. **Exclusive bus** (only in a controlled window, reversible): stop the
-   vendor app (`systemctl stop emaldo` — verify with `ps -C emaldo_iot_fw`),
-   run the driver with `bus_enabled = true`, then restart the vendor app.
-   The driver itself never touches the vendor binary, its databases, or the
-   identity files.
+   the MCU UART. Telemetry comes from the MCU sysfs
+   (`/sys/class/mcu/mcu1/{inverter_0..2,mcu_status,con_power}`) and, with
+   `can_listen = true`, the passive CAN/BMS listener (`can0`). Display, web,
+   MQTT all work. This is the deployed live mode. `mcu_protocol` stays
+   false; see below.
+2. **Exclusive MCU/Modbus window** (only in a controlled window, reversible):
+   `systemctl stop monitor-dog.service monitor.service; pkill -x app`
+   (verify `ps -C app` is empty), run `--mcu-probe` or a driver with
+   `bus_enabled = true`, then
+   `systemctl start monitor.service monitor-dog.service`. The driver itself
+   never touches the vendor binary, its databases, or the identity files.
 
 The vendor identity (`/root/.device_id`) is read (read-only) for a stable
 device id; it is never regenerated or overwritten.
@@ -155,7 +190,7 @@ device id; it is never regenerated or overwritten.
 | `GET /` | embedded UI: status, device tree, raw registers, events, config view |
 | `POST /api/v1/setup` | first boot only: admin password + broker |
 | `POST /api/v1/login` | → bearer token + session cookie (30 d) |
-| `GET /api/v1/state` | full state incl. `raw` register windows |
+| `GET /api/v1/state` | full state incl. `raw` register windows and `can.batteries` |
 | `GET /api/v1/events` | event ring (last 200) |
 | `GET /api/v1/config` / `PUT` | masked config / update (atomic save) |
 | `GET /api/v1/stream` | SSE state stream (15 s keepalive) |
@@ -197,13 +232,22 @@ interfere with them.
 ## Live-hardware status (2026-11-25)
 
 Phase 1 runs on the live battery in `bus_enabled=false` mode (MCU sysfs
-telemetry, web UI on :8443). A controlled live window (vendor app
-stopped/started cleanly) established that **this unit has no direct
-Modbus inverter bus**: the inverter is behind the housekeeping MCU
-(`/dev/mcu1`) and the batteries behind a CAN bridge (`/run/cabinet/*`).
-The Modbus poll/write path is therefore bench-validated but has no live
-target on this hardware; the next step is the MCU protocol (see
-`../docs/RUST_DRIVER_PHASE2.md` §8). Restore-after-window:
+telemetry, web UI on :8443). A controlled live window established that
+**this unit has no direct Modbus inverter bus**: the inverter is behind
+the housekeeping MCU (`/dev/mcu1`) and the batteries behind a CAN bridge
+(`/run/cabinet/*`). The Bmtp MCU protocol was recovered and
+bench-validated, but the live `/dev/mcu1` path produced no responses (even
+for the kernel driver's own open-time DIN queries) in a controlled
+window, before and after an `mcu_rst` pulse. The vendor app's own display
+also showed Solar 0 / Grid 0, so the inverter telemetry path is absent on
+this unit, not just for us.
+
+The working live read-only telemetry is the **CAN/BMS path**:
+`hardware.can_listen=true` (or `--can-probe`) decodes the BAK TLV from the
+type-7 DIN reports. Live check 2026-11-25: 3 packs, 16 cells, 3.26 V
+cells, 52.3 V, −6…−8 A, SOC 56/75/67 %, 15–27 °C, 317–365 cycles,
+98–100 % health. Modbus/MCU writes remain bench-only and
+`control.writes_enabled=false` everywhere. Restore-after-window:
 `systemctl start monitor.service monitor-dog.service`.
 
 ## Phase 1 limitations / known unknowns
