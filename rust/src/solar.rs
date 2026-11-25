@@ -310,8 +310,8 @@ fn publish(telem: &crate::telemetry::Store, f: &Forecast) {
         .hours
         .iter()
         .zip(&f.power_w)
-        .filter(|(t, _)| **t + 3600 > now && **t <= now + 86400)
-        .take(24)
+        .filter(|(t, _)| **t + 3600 > now && **t <= now + 48 * 3600)
+        .take(48)
         .map(|(t, p)| crate::telemetry::SolarSlot {
             start: *t as u64,
             local_hhmm: timectl::local_hhmm(*t, 3600),

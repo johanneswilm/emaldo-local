@@ -363,8 +363,8 @@ fn publish(telem: &crate::telemetry::Store, p: &Prices, offset: i64) {
     let next: Vec<crate::telemetry::PriceSlot> = p
         .slots
         .iter()
-        .filter(|s| s.start + 900 > now && s.start <= now + 24 * 3600)
-        .take(96)
+        .filter(|s| s.start + 900 > now && s.start <= now + 48 * 3600)
+        .take(192)
         .map(|s| crate::telemetry::PriceSlot {
             start: s.start as u64,
             local_hhmm: timectl::local_hhmm(s.start, offset),
