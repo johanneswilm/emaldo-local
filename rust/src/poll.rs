@@ -420,7 +420,12 @@ impl Poller {
                 }
             }
             self.poll_mcu();
-            self.read_once()?;
+            // A transient read failure must NOT tear down the bus (that would
+            // drop the controller's access for 30 s and stall writes). Log it
+            // and keep the ports attached; retry next tick.
+            if let Err(e) = self.read_once() {
+                self.telem.add_event("warn", "hermes", format!("read cycle: {e}"));
+            }
             std::thread::sleep(interval);
         }
     }

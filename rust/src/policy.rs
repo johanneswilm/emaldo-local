@@ -74,6 +74,13 @@ impl Engine {
             let setpoint_w;
             let reason;
             if cfg.policy.mode == "optimize" {
+                // Don't act until we have a real SOC (CAN/battery present);
+                // otherwise the optimizer sees 0% and only wants to charge.
+                if st.battery.modules == 0 && st.battery.capacity_wh == 0.0 {
+                    self.update_policy_state("warming up: no battery data yet", 0);
+                    last_sent = None;
+                    continue;
+                }
                 let (w, r, plan) = compute_optimized(&cfg, &st);
                 setpoint_w = w;
                 reason = r;

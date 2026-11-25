@@ -333,6 +333,9 @@ impl Controller {
         if path.exists() {
             return Ok(());
         }
+        if !self.bus.is_connected() {
+            return Err("bus not connected yet".into());
+        }
         let cfg = self.cfg.get();
         let slave = cfg.hardware.inverter_slave_id;
         let timeout = Duration::from_millis(2000);
