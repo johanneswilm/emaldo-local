@@ -12,10 +12,34 @@ app retired). Each has the symptom, the evidence, and the current status.
   writes pixels but the panel is not being refreshed/kept awake, so it sleeps.
   (On the emulator `/dev/fb0` is a regular file, which is why this never shows
   up on the bench.)
-- **Status:** OPEN. Needs RE of the vendor display update path (flush/update
-  command, e-ink wake, or MCU/SPI trigger) and a matching refresh in
-  `display.rs`. Workaround until fixed: keep the vendor app running (no
-  takeover), or accept a blank panel during a soak.
+- **RE result (2026-11-25, app.bin):** there is **no custom e-ink ioctl and
+  no MCU/SPI poke**. The vendor update path is
+  `internal/display/abi`:
+  `renderer.flushFrame` → `writeScreenData` (memmove packed pixels into the
+  mmap) → `renderer.sync`; `renderer.sync` calls interface slot `+0x14`,
+  which is the framebuffer `Sync` method = `mappedFramebuffer.Sync` =
+  `os.(*File).Sync`. `openFramebuffer` is just `os.OpenFile("/dev/fb0")` +
+  `syscall.Mmap(MAP_SHARED)`; `Close` only munmaps/closes. `libc`/unix
+  ioctl appears in the binary only for generic `unix.ioctl*`; `app.bin` has
+  no `FBIO*` constant. So the refresh is the **fsync of the fb fd / msync of
+  the mapping**, which on the char device reaches the kernel fb driver's
+  `fb_ops` fsync hook (which schedules the deferred screen copy). Our old
+  `FBIOPUT_VSCREENINFO` "flush" was a no-op guess.
+- **Fix:** `rust/src/display.rs` now `msync(MS_SYNC)`s the dirty mapping
+  after each diff write when FBIOGET_* succeed (char device); on the
+  emulator regular file it is a no-op (mode logged as `refresh=file`).
+- **Status:** FIXED IN CODE, NEEDS LIVE CHECK. If the panel still stays
+  dark, the remaining unknown is the kernel fb driver (not in app.bin);
+  confirm with the read-only experiment below.
+- **Live experiment (if still dark):** with the vendor app running
+  (`app.backup &`), `strace -f -e trace=ioctl,sync,fsync,fdatasync,msync,openat -p $(pidof app)` and
+  let one screen update happen — expect only `openat(/dev/fb0)`, `mmap`,
+  `write`s and `fsync(fb0)`. If a custom ioctl does appear there, its number
+  is the missing refresh; a one-shot poke is
+  `python3 -c 'import fcntl,os; fd=os.open("/dev/fb0",os.O_RDWR); fcntl.ioctl(fd, 0x46XX)'`.
+  Also `cat /proc/$(pidof emaldo-driver)/maps | grep fb0` + `ls -l /dev/fb0`
+  confirms we hold it. Check the kernel module (`modinfo -F filename` of the
+  fb driver, or `/sys/class/graphics/fb0/name`) for an fb_ops fsync/deferred_io.
 - **Not a data problem:** telemetry/web/MQTT are unaffected; it is display-only.
 
 ## 2. Live inverter setpoint writes time out (control not executed)

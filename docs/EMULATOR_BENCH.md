@@ -158,7 +158,11 @@ text out in functab order.
 
 - **Display** = `/dev/fb0`. The app opens it, mmaps **15001 bytes** (400x300,
   1 bpp, row stride 50) and draws packed pixels; it uses **no ioctls**, so a
-  regular file is enough. `vmfb-file.service` creates `/sandbox/fb0.raw` and
+  regular file is enough. Its only panel trigger is `mappedFramebuffer.Sync`
+  = `os.File.Sync` (fsync of the fb fd) after each frame — on the live char
+  device that is what reaches the e-ink driver (see ISSUES #1); our renderer
+  matches it with `msync(MS_SYNC)`, which is a no-op on the file backend.
+  `vmfb-file.service` creates `/sandbox/fb0.raw` and
   symlinks `/dev/fb0` to it before the app starts. Capture with
   `base64 -w0 /sandbox/fb0.raw`, then render MSB-first, 1=black:
   the panel shows Solar/Grid/Battery on the left, Vehicle/KeepOn/Addition on

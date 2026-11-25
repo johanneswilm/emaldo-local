@@ -7,15 +7,24 @@
 // "eink"/"ePD"):
 //   - grayscale only; "colors" map to black/white, SOC is text + a battery
 //     outline glyph, not color.
-//   - pixel writes are durable but the controller needs a flush to update
-//     the panel; flush is FBIOPUT_VSCREENINFO (best-effort).
+//   - flush = msync(MS_SYNC) of the mapping. That is what the vendor app
+//     does (RE of internal/display/abi, see docs/ISSUES.md #1): it opens
+//     /dev/fb0 O_RDWR, mmaps it, memmoves packed pixels in, and its only
+//     "refresh" call is mappedFramebuffer.Sync -> os.File.Sync (fsync of
+//     the fb fd). On a char device that reaches the fb driver's fsync hook
+//     (if it has one) which schedules the deferred screen update; msync on
+//     the same mapping is the equivalent from our side.
+//   - the vendor app issues no fb ioctls at all (FBIOGET_* are only ever
+//     used by fbcon, not by app.bin); FBIOPUT_VSCREENINFO was a no-op
+//     guess. On a char device we msync; a regular file (emulator) has no
+//     fsync path that does anything, so we skip it there.
 //   - full refreshes flash: we draw into a shadow buffer, write only
 //     changed bytes, refresh at most every REFRESH_INTERVAL and only when
 //     the visible content changed.
 //
 // The emulator backs /dev/fb0 with a regular file (15001 bytes, 400x300,
-// 1 bpp, row stride 50) and the vendor app uses no ioctls there, so when
-// FBIOGET_* fail we fall back to exactly that geometry.
+// 1 bpp, row stride 50), so when FBIOGET_* fail we fall back to exactly
+// that geometry and to the file backend (no msync).
 
 use crate::config::Store as ConfigStore;
 use crate::font;
@@ -24,9 +33,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
-const FBIOPUT_VSCREENINFO: libc::c_ulong = 0x4601;
 const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How the e-ink panel is told to pick up new pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushMode {
+    /// Live /dev/fb0 char device: the kernel ends up with an fsync on the fb
+    /// file, so the vendor path (and ours) is msync(MS_SYNC).
+    Msync,
+    /// Regular-file backend (emulator): writing the mapping is the update.
+    File,
+}
 
 // ink polarity: true => 0x00 white, max black. Flip if the panel shows
 // inverted output after on-device testing.
@@ -121,13 +139,14 @@ impl Renderer {
             libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut vi) == 0
                 && libc::ioctl(fd, FBIOGET_FSCREENINFO, &mut fi) == 0
         };
-        let (xres, yres, bpp, line_len, size) = if have_ioctl && fi.smem_len > 0 && fi.smem_len < (64 << 20) {
+        let (xres, yres, bpp, line_len, size, mode) = if have_ioctl && fi.smem_len > 0 && fi.smem_len < (64 << 20) {
             (
                 vi.xres as usize,
                 vi.yres as usize,
                 vi.bits_per_pixel as usize,
                 fi.line_length as usize,
                 fi.smem_len as usize,
+                FlushMode::Msync,
             )
         } else {
             // Emulator fallback: regular file, 400x300 @ 1bpp, stride 50.
@@ -138,7 +157,7 @@ impl Renderer {
                 "display",
                 "fb ioctls unavailable; assuming 400x300 1bpp (emulator file backend)",
             );
-            (400, 300, 1, 50, size)
+            (400, 300, 1, 50, size, FlushMode::File)
         };
         if size == 0 || xres == 0 || yres == 0 {
             self.telem.add_event("warn", "display", "bad fb geometry");
@@ -175,7 +194,13 @@ impl Renderer {
         self.telem.add_event(
             "info",
             "display",
-            format!("e-ink fb {xres}x{yres} {bpp}bpp gray"),
+            format!(
+                "e-ink fb {xres}x{yres} {bpp}bpp, refresh={}",
+                match mode {
+                    FlushMode::Msync => "msync",
+                    FlushMode::File => "file (emulator)",
+                }
+            ),
         );
 
         let mut cv = Canvas {
@@ -190,7 +215,7 @@ impl Renderer {
 
         // One full clear at boot (the only full refresh).
         cv.shadow.fill(white);
-        flush_diff(fb0, cv.shadow, fd);
+        flush_diff(fb0, cv.shadow, Some(fd), mode);
 
         let mut last_fp = String::new();
         loop {
@@ -208,7 +233,7 @@ impl Renderer {
             if fp != last_fp {
                 last_fp = fp;
                 self.render(&mut cv, &st);
-                flush_diff(fb0, cv.shadow, fd);
+                flush_diff(fb0, cv.shadow, Some(fd), mode);
             }
             std::thread::sleep(REFRESH_INTERVAL);
         }
@@ -268,20 +293,53 @@ impl Renderer {
     }
 }
 
-/// Writes only changed shadow bytes to the panel and triggers a controller
-/// refresh (best-effort FBIOPUT_VSCREENINFO).
-fn flush_diff(fb0: &mut [u8], shadow: &[u8], fd: std::os::unix::io::RawFd) {
+/// Writes only changed shadow bytes to the panel and, on a live fb char
+/// device, asks the kernel to push them to the controller with
+/// msync(MS_SYNC) — the same thing the vendor app's framebuffer Sync does
+/// (see `refresh`). Returns whether anything changed.
+fn flush_diff(
+    fb0: &mut [u8],
+    shadow: &[u8],
+    fd: Option<std::os::unix::io::RawFd>,
+    mode: FlushMode,
+) -> bool {
     let mut dirty = false;
-    for i in 0..shadow.len() {
+    let n = shadow.len().min(fb0.len());
+    for i in 0..n {
         if shadow[i] != fb0[i] {
             fb0[i] = shadow[i];
             dirty = true;
         }
     }
     if dirty {
-        let mut vi = FbVarScreenInfo::default();
-        unsafe {
-            let _ = libc::ioctl(fd, FBIOPUT_VSCREENINFO, &mut vi);
+        refresh(fb0, fd, mode);
+    }
+    dirty
+}
+
+/// Trigger the panel update for an mmapped framebuffer.
+///
+/// RE evidence (app.bin internal/display/abi):
+///   renderer.flushFrame  = writeScreenData + sync
+///   renderer.sync        calls *(fwbuf+0x1c)+0x14 == mappedFramebuffer.Sync
+///   mappedFramebuffer.Sync = os.(*File).Sync   (i.e. fsync, no ioctl)
+/// On the live /dev/fb0 char device that fsync reaches the e-ink driver's
+/// fb_ops fsync hook (if present), which schedules the deferred screen
+/// update; msync on the shared mapping is the equivalent from our side. A
+/// regular-file backend (emulator) just keeps the written bytes.
+fn refresh(fb0: &[u8], fd: Option<std::os::unix::io::RawFd>, mode: FlushMode) {
+    match mode {
+        FlushMode::Msync => unsafe {
+            libc::msync(
+                fb0.as_ptr() as *mut libc::c_void,
+                fb0.len(),
+                libc::MS_SYNC,
+            );
+        },
+        FlushMode::File => {
+            // No controller behind a regular file; keep the fd argument for
+            // API symmetry with the char-device path.
+            let _ = fd;
         }
     }
 }
@@ -409,5 +467,25 @@ mod tests {
         // out of bounds: no panic
         cv.set_ink(-1, -1, true);
         cv.set_ink(400, 0, true);
+    }
+
+    #[test]
+    fn flush_diff_copies_only_changes() {
+        let mut fb = vec![0u8; 8];
+        let shadow = vec![1u8, 0, 2, 0, 0, 5, 0, 0];
+        // File backend: no controller, no fd.
+        let dirty = flush_diff(&mut fb, &shadow, None, FlushMode::File);
+        assert!(dirty);
+        assert_eq!(fb, shadow);
+        // Second flush with identical content is a no-op.
+        assert!(!flush_diff(&mut fb, &shadow, None, FlushMode::File));
+    }
+
+    #[test]
+    fn flush_diff_handles_short_shadow() {
+        let mut fb = vec![0u8; 4];
+        let shadow = vec![7u8, 7];
+        assert!(flush_diff(&mut fb, &shadow, None, FlushMode::File));
+        assert_eq!(fb, vec![7, 7, 0, 0]);
     }
 }
