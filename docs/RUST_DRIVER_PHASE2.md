@@ -380,6 +380,31 @@ Remaining before enabling writes in the **live service loop**:
   passive share is added.
 - `writes_enabled` stays false in `/root/emaldo-driver.toml`.
 
+## 8e. A/B/C fan-out + inverter switches (takeover readiness)
+
+To run the driver as the *only* master (so the vendor app can be retired
+for the no-balancing / no-EV window), two pieces landed:
+
+- **Inverter switches** (`mcu.rs`): re-assert `inverter_0..2 = 1` in the MCU
+  sysfs (`hardware.inverter_switches`), the same thing the vendor app holds.
+  `--switches-probe` one-shot; live-validated (3/3 already on, no-op).
+- **A/B/C fan-out** (`bus.rs`/`poll.rs`/`control.rs`): the bus holds the three
+  inverter ports (`hardware.inverter_ports = [USB3, USB0, USB2]`), the poller
+  reads the slow+fast blocks from each (per-inverter raw `0x0fa0:invN`), and
+  the controller fans the FC16 setpoint to all three with per-port read-back
+  verify. Bench with three fake inverters: identical block
+  `[3600,3600,0,0,0,300]` delivered to A, B and C; rollback restored 7 regs.
+
+**Cutover plan (supervised, reversible):**
+1. `systemctl stop monitor-dog.service monitor.service; mv /root/bin/app /root/bin/app.backup`.
+2. Run the driver with `bus_enabled=true`, `inverter_switches=true`,
+   `inverter_ports=[USB3,USB0,USB2]`, `mode=optimize`, `writes_enabled=true`.
+3. Soak ~10 min: watch CAN pack current, `0x0FDD` on all three, journal.
+4. Revert: stop the driver, `mv app.backup app`, `systemctl start monitor.service monitor-dog.service`.
+
+Not needed now (per owner): FCR/mFRR balancing and EV charging — both off
+for the next weeks; revisit before re-enabling.
+
 ## 9. Evidence index
 
 - Function addresses (VA) for all named functions: `/tmp/fwre/pclntab_map.json`
