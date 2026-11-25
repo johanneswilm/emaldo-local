@@ -59,7 +59,9 @@
   .planner-wrap { margin-top:14px; }
   .planner-head { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
   .planner-legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin:0 4px 0 10px; vertical-align:middle; }
-  #planner { width:100%; height:200px; display:block; background:#061018; border-radius:12px; border:1px solid #ffffff10; }
+  #planner { width:100%; height:200px; display:block; background:#061018; border-radius:12px; border:1px solid #ffffff10; cursor:zoom-in; }
+  #histchart { width:100%; height:200px; display:block; background:#061018; border-radius:12px; border:1px solid #ffffff10; cursor:zoom-in; }
+  svg.chart:fullscreen { width:100vw; height:100vh; border-radius:0; background:#061018; cursor:zoom-out; }
   .tree { font-size:14px; }
   .dt-grp { border:1px solid #ffffff10; border-radius:12px; margin:8px 0; overflow:hidden; }
   .dt-grp > summary { cursor:pointer; padding:9px 12px; background:#ffffff08; font-weight:600; color:var(--acc2); list-style:none; }
@@ -200,7 +202,7 @@
         <i style="background:var(--solar)"></i>PV
         <i style="background:var(--load)"></i>Load
       </div>
-      <svg id="histchart" viewBox="0 0 720 200" preserveAspectRatio="none" aria-label="48 hour history"></svg>
+      <svg id="histchart" viewBox="0 0 720 200" preserveAspectRatio="none" aria-label="48 hour history" class="chart" onclick="fsChart(this)"></svg>
       <div class="mut" id="hist_note" style="font-size:12px;margin-top:4px">Building history…</div>
     </section>
 
@@ -233,7 +235,7 @@
             <i style="background:var(--battery)"></i>Charge (up) <i style="background:var(--load)"></i>Discharge (down)
           </span>
         </div>
-        <svg id="planner" viewBox="0 0 720 220" preserveAspectRatio="none" aria-label="Planner chart"></svg>
+        <svg id="planner" viewBox="0 0 720 220" preserveAspectRatio="none" aria-label="Planner chart" class="chart" onclick="fsChart(this)"></svg>
         <div class="mut" id="planner_note" style="font-size:12px;margin-top:4px"></div>
       </div>
       <div class="row">
@@ -421,6 +423,30 @@ function setArc(id, active) {
   if (el) el.classList.toggle('active', !!active);
 }
 
+// 1:1 chart geometry so axis text is not stretched (base viewBox is 720xH).
+function chartWidth(svg, fb) { const w = svg && svg.clientWidth ? svg.clientWidth : fb; return Math.max(260, Math.round(w)); }
+function chartHeight(svg, fb) { const h = svg && svg.clientHeight ? svg.clientHeight : fb; return Math.max(160, Math.round(h)); }
+function setViewBox(svg, W, H) { if (svg) svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H); }
+
+// Click a chart to show it fullscreen; click again / Esc to close.
+function fsChart(svg) {
+  if (document.fullscreenElement) { document.exitFullscreen().catch(()=>{}); return; }
+  if (svg.requestFullscreen) {
+    svg.requestFullscreen().then(() => {
+      svg.classList.add('fs');
+      setTimeout(() => {
+        if (svg.id === 'histchart') renderHistory();
+        else if (svg.id === 'planner') renderPlanner(window.LASTSTATE || {});
+      }, 120);
+    }).catch(()=>{});
+  }
+}
+document.addEventListener('fullscreenchange', () => {
+  ['histchart','planner'].forEach(id => { const e=document.getElementById(id); if (e) e.classList.remove('fs'); });
+  if (!document.fullscreenElement) { renderHistory(); if (window.LASTSTATE) renderPlanner(window.LASTSTATE); }
+});
+window.addEventListener('resize', () => { renderHistory(); if (window.LASTSTATE) renderPlanner(window.LASTSTATE); });
+
 function toggleSettings() {
   const c = document.getElementById('settings_card');
   c.classList.toggle('hidden');
@@ -442,7 +468,9 @@ function renderHistory() {
   if (!svg) return;
   const d = HIST;
   if (!d.length) { svg.innerHTML=''; if (note) note.textContent='No history yet — samples are recorded every 5 minutes.'; return; }
-  const W=720,H=200,padL=8,padB=18,padT=10;
+  const H=chartHeight(svg,200),padL=8,padB=18,padT=10;
+  const W = chartWidth(svg, 720);
+  setViewBox(svg, W, H);
   const n=d.length, x=i=>padL+(i/Math.max(1,n-1))*(W-2*padL);
   // ranges
   let gmax=1,pmaxv=1,lmax=1; d.forEach(s=>{gmax=Math.max(gmax,Math.abs(s.grid));pmaxv=Math.max(pmaxv,s.pv);lmax=Math.max(lmax,s.load);});
@@ -458,7 +486,8 @@ function renderHistory() {
   // SOC line (green, bright)
   g+='<polyline points="'+d.map((s,i)=>x(i).toFixed(1)+','+ySoc(s.soc).toFixed(1)).join(' ')+'" fill="none" stroke="var(--battery)" stroke-width="2.4"/>';
   // hour ticks every 6h
-  d.forEach((s,i)=>{ const hh=new Date(s.t*1000).getHours(); if(hh%6===0){ g+='<line x1="'+x(i)+'" y1="'+padT+'" x2="'+x(i)+'" y2="'+zero+'" stroke="#ffffff12"/>'; g+='<text x="'+x(i)+'" y="'+(H-4)+'" fill="var(--mut)" font-size="10" text-anchor="middle">'+String(hh).padStart(2,'0')+':00</text>'; }});
+  let lastHour=-1;
+  d.forEach((s,i)=>{ const dt=new Date(s.t*1000); const hh=dt.getHours(); if(hh%6===0 && hh!==lastHour){ lastHour=hh; g+='<line x1="'+x(i)+'" y1="'+padT+'" x2="'+x(i)+'" y2="'+zero+'" stroke="#ffffff12"/>'; g+='<text x="'+x(i)+'" y="'+(H-4)+'" fill="var(--mut)" font-size="10" text-anchor="middle">'+String(hh).padStart(2,'0')+':00</text>'; } if(hh!==lastHour && hh%6!==0) {/*track*/} });
   svg.innerHTML=g;
   const last=d[d.length-1];
   if(note) note.textContent='SOC '+(last.soc||0).toFixed(0)+'% · '+(d.length*5/60).toFixed(1)+' h of data · grid now '+fmtkW(last.grid)+', PV '+fmtkW(last.pv)+', load '+fmtkW(last.load);
@@ -470,7 +499,9 @@ function renderPlanner(st) {
   const note = document.getElementById('planner_note');
   const plan = (st.policy && st.policy.plan && st.policy.plan.slots) || [];
   if (!plan.length) { svg.innerHTML = ''; if (note) note.textContent = 'No plan yet (Planner builds one when prices and PV are available).'; return; }
-  const W = 720, H = 220, padL = 8, padB = 22, padT = 10;
+  const H = chartHeight(svg, 220), padL = 8, padB = 22, padT = 10;
+  const W = chartWidth(svg, 720);
+  setViewBox(svg, W, H);
   const n = plan.length;
   const x = i => padL + (i / Math.max(1, n - 1)) * (W - 2 * padL);
   const bw = (W - 2 * padL) / n;
@@ -500,12 +531,15 @@ function renderPlanner(st) {
   });
   // day separators + labels (every 6h)
   const t0 = plan[0].start;
+  let lastH = -1;
   plan.forEach((s,i) => {
     const h = new Date((s.start)*1000).getHours();
-    if (h % 6 === 0) {
+    if (h % 6 === 0 && h !== lastH) {
+      lastH = h;
       g += '<line x1="'+x(i)+'" y1="'+padT+'" x2="'+x(i)+'" y2="'+(H-padB)+'" stroke="#ffffff18" stroke-width="1"/>';
       g += '<text x="'+x(i)+'" y="'+(H-6)+'" fill="var(--mut)" font-size="10" text-anchor="middle">'+String(h).padStart(2,'0')+':00</text>';
     }
+    if (h !== lastH) lastH = h;
   });
   // price min/max labels
   g += '<text x="'+(W-6)+'" y="'+(padT+10)+'" fill="var(--grid)" font-size="10" text-anchor="end">'+pmax.toFixed(2)+'</text>';
@@ -517,6 +551,7 @@ function renderPlanner(st) {
 
 function renderState(st) {
   if (!st || !st.battery) return;
+  window.LASTSTATE = st;
   const pv   = (st.pv && st.pv.power_w) || 0;       // W generated
   const grid = (st.grid && st.grid.net_w) || 0;      // + import, - export
   const bat  = st.battery.power_w || 0;              // + charge, - discharge
