@@ -105,11 +105,27 @@ and `docs/API.md` for the REST API.
 ## Attack surface for the remaining problem (roster/keys)
 
 1. Finish `e2e-bmt-login` response acceptance on `fake_api.py` (in progress).
-2. Decompile `msct/e2e.userClientConnFilter` / `userServerConnFilter` /
-   `CheckIsProxyMsg` from the downloaded firmware (Go pclntab + ARM disasm)
-   to know the exact accept rule + reply-key selection.
-3. `diagchan` = an SSH diagnostics channel in the binary — find its config
-   (`enable pprof`, `enable-pprof` flags seen) for a shell on the module.
+2. ~~Decompile `msct/e2e.userClientConnFilter` / `userServerConnFilter` /
+   `CheckIsProxyMsg` ...~~ **Done (2026-11-25).** The connfork selects the
+   logical conn **per message**, independent of the login/sender:
+   `CheckIsServerMsg` = `Headers.ShouldGet(0xA0) == "SERVER"` -> **CloudConn**
+   (`cloudConnFilter`); otherwise `CheckIsProxyMsg` (`F1` present) -> **UserConn**
+   (`userConnFilter`). Kinds: `codec.msctToTower` maps msct 0xD -> tower 0,
+   0xC -> 2, 0xE -> 1. `CloudRecvIntcp` JSON-decodes the body; `UserRecvIntcp`
+   leaves it raw for the users server's `bmtp` codec.
+3. ~~`diagchan` = an SSH diagnostics channel ... find its config ...~~
+   **Done (2026-11-25).** `dc_act` is a `cloudr` route -> 
+   `diagchan.Activate`; reached by marking the frame `A0="SERVER"` (append it
+   last; may duplicate the sender) and omitting `F1` so the usersr path does
+   not answer the `cmd not allowed` sentinel. `cloudr.DcActReq` fields
+   `h,p,u,rp,lp,lu,lk,t`; **`lp=0` makes `Activate` use its default local port
+   `0xE792 = 59282`**, the module's diag sshd. A fresh `lu` (uid>=1000,
+   diagchan-created) and a **full** `ssh-ed25519 ...` `lk` are required. The
+   reply `DcActRsp {"cmd","pk"}` gives the tunnel command and child key; after
+   authorizing `pk` on the jump host the reverse tunnel yields a shell
+   (`sudo` NOPASSWD is written for `lu`). Verified on emulator v2.35.3 and
+   live v2.35.5 **without firmware patch or OTA**. Full recipe:
+   `docs/EMULATOR_BENCH.md` ("Diagchan reachable ...").
 4. MQTT transport: `internal/mqtt` + `eventcloud` + `mqtt-enabled` config
    flags exist; if the cloud can push over MQTT (`broker_url` config key),
    a local MQTT broker might replace part of the relay entirely.

