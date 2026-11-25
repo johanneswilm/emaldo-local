@@ -219,7 +219,30 @@ impl Controller {
         let slave = cfg.hardware.inverter_slave_id;
         let timeout = Duration::from_millis(2000);
         let raw = (req.value as i64 & 0xFFFF) as u16;
-        match self.bus.write_single(slave, req.register, raw, timeout) {
+        // The HiSolar inverter rejects FC06 writes to the 0x0FD8..0x0FDD
+        // setpoint block (verified live); it accepts the vendor's FC16 block
+        // write. Use read-modify-write on that 6-register block for any
+        // register inside it, FC06 for everything else.
+        const BLK_START: u16 = 0x0FD8;
+        const BLK_LEN: u16 = 6; // 0x0FD8..0x0FDD
+        let in_block = req.register >= BLK_START && req.register < BLK_START + BLK_LEN;
+        let write_res: Result<(), String> = if in_block {
+            match self.bus.read_holding(slave, BLK_START, BLK_LEN, timeout) {
+                Ok(b) if b.len() as u16 >= BLK_LEN * 2 => {
+                    let mut vals: Vec<u16> = b
+                        .chunks_exact(2)
+                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                        .collect();
+                    vals[(req.register - BLK_START) as usize] = raw;
+                    self.bus.write_block(slave, BLK_START, &vals, timeout)
+                }
+                Ok(b) => Err(format!("short read of setpoint block: {}B", b.len())),
+                Err(e) => Err(format!("read setpoint block: {e}")),
+            }
+        } else {
+            self.bus.write_single(slave, req.register, raw, timeout)
+        };
+        match write_res {
             Ok(()) => match self.bus.read_holding(slave, req.register, 1, timeout) {
                 Ok(b) if b.len() >= 2 && u16::from_be_bytes([b[0], b[1]]) == raw => {
                     rec.result = "written+verified".into();

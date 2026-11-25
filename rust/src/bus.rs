@@ -74,4 +74,14 @@ impl Bus {
     ) -> Result<(), String> {
         self.with_port(|p| modbus::write_single_register(p, slave, addr, value, timeout))
     }
+
+    pub fn write_block(
+        &self,
+        slave: u8,
+        addr: u16,
+        values: &[u16],
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.with_port(|p| modbus::write_multiple_registers(p, slave, addr, values, timeout))
+    }
 }

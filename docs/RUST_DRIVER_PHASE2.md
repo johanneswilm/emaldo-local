@@ -354,6 +354,32 @@ stateful fake inverter (FC06) and live (FC16). **The gated controller must use
 FC16 block writes for `0x0FD8..0x0FDD`** — a follow-up before enabling
 `control.writes_enabled` in the service loop.
 
+## 8d. Optimizer-driven writes through the gated controller (2026-11-25)
+
+The gated controller now writes the HiSolar setpoint as an **FC16 block
+read-modify-write** over `0x0FD8..0x0FDD` (FC06 single writes time out on this
+hardware). `bus.rs` gained `write_block`; `control.rs` picks block-write for
+any register in that range and FC06 elsewhere. Bench (fake inverter, 90% SOC,
+injected SE4 prices, `mode=optimize`, `writes_enabled=true`):
+
+- fake received `WRITE multi 0x0fd8 x6 = [3600,3600,0,0,0,300]` — the
+  optimizer's non-zero setpoint on `0x0FDD`;
+- journal `source:"policy" ... "written+verified"`;
+- `--rollback` restored 7 registers, all `written+verified`.
+
+End-to-end chain proven: optimizer plan -> policy -> controller gates
+(writable table, range, rate, writes_enabled, snapshot) -> FC16 block write ->
+read-back verify -> journal -> rollback. Live verification of the FC16 write
+itself is in 8c (0x0FDD 300 -> read-back 300 -> restore 0).
+
+Remaining before enabling writes in the **live service loop**:
+- multi-inverter fan-out: the controller writes the one attached port; the
+  vendor app drives A/B/C (`USB3/USB0/USB2`). A/B/C fan-out is not wired yet.
+- onboard transport sharing: the vendor app holds the inverter ports; the
+  service can only write while it holds them (controlled window) unless a
+  passive share is added.
+- `writes_enabled` stays false in `/root/emaldo-driver.toml`.
+
 ## 9. Evidence index
 
 - Function addresses (VA) for all named functions: `/tmp/fwre/pclntab_map.json`

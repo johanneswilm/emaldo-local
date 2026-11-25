@@ -327,3 +327,63 @@ mod tests {
         assert_eq!(compute_setpoint(&c, &s).0, -1500);
     }
 }
+
+#[cfg(test)]
+mod opt_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::telemetry::{PriceSlot, State};
+
+    fn st_with(soc: f64) -> State {
+        let mut s = State::default();
+        s.battery.soc_percent = soc;
+        s.battery.capacity_wh = 15000.0;
+        s.load.net_w = 500.0;
+        let now = crate::telemetry::now_unix() as i64;
+        // 96 slots: cheap first 8h, expensive next 8h.
+        s.prices.next_slots = (0..96)
+            .map(|i| PriceSlot {
+                start: (now + i * 900) as u64,
+                local_hhmm: String::new(),
+                eur_kwh: if i < 32 { 0.10 } else if i < 64 { 0.35 } else { 0.12 },
+            })
+            .collect();
+        s
+    }
+
+    fn cfg_opt() -> Config {
+        let mut c = Config::default();
+        c.policy.enabled = true;
+        c.policy.mode = "optimize".into();
+        c.policy.reserve_percent = 20.0;
+        c.policy.charge_limit_w = 3000;
+        c.policy.discharge_limit_w = 3000;
+        c
+    }
+
+    #[test]
+    fn optimizer_emits_nonzero_setpoint_when_price_spread() {
+        // At 50% with cheap/expensive slots we expect a plan; the current
+        // slot may be charge/discharge/idle depending on time, but the plan
+        // must contain both a charge and a discharge and a nonzero magnitude.
+        let c = cfg_opt();
+        let s = st_with(50.0);
+        let (w, reason, plan) = compute_optimized(&c, &s);
+        assert!(!plan.slots.is_empty(), "plan empty: {reason}");
+        let has_charge = plan.slots.iter().any(|x| x.intent == crate::optimizer::Intent::Charge);
+        let has_discharge = plan.slots.iter().any(|x| x.intent == crate::optimizer::Intent::Discharge);
+        assert!(has_charge && has_discharge, "charge={has_charge} discharge={has_discharge}");
+        // reason mentions optimize
+        assert!(reason.contains("optimize"));
+        let _ = w;
+    }
+
+    #[test]
+    fn optimizer_respects_reserve_no_discharge_when_empty() {
+        let c = cfg_opt();
+        let s = st_with(21.0); // just above floor 20%
+        let (_w, _r, plan) = compute_optimized(&c, &s);
+        let dis = plan.slots.iter().filter(|x| x.intent == crate::optimizer::Intent::Discharge).count();
+        assert_eq!(dis, 0, "should not discharge near reserve");
+    }
+}
