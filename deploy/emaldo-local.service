@@ -1,0 +1,23 @@
+[Unit]
+Description=emaldo-local bridge (vendor front, e2e relay, operator UI)
+After=network-online.target
+Wants=network-online.target
+# The bridge must hold the vendor REST/e2e ports before the vendor app starts,
+# otherwise the app's first login leaves the box and goes to the vendor cloud.
+Before=monitor.service
+
+[Service]
+Type=simple
+ExecStart=/root/emaldo-local/emaldo-local run --config /root/emaldo-local/config.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+# 236 MiB total RAM on the Power Core; the bridge idles around 6 MB RSS.
+MemoryMax=64M
+TasksMax=64
+LimitNOFILE=512
+StandardOutput=append:/root/emaldo-local/stdout.log
+StandardError=append:/root/emaldo-local/stderr.log
+
+[Install]
+WantedBy=multi-user.target
