@@ -226,6 +226,41 @@ impl Controller {
         const BLK_START: u16 = 0x0FD8;
         const BLK_LEN: u16 = 6; // 0x0FD8..0x0FDD
         let in_block = req.register >= BLK_START && req.register < BLK_START + BLK_LEN;
+        if in_block && self.bus.len() > 1 {
+            // Fan out the setpoint to every inverter (vendor does the same).
+            let results = self.bus.write_setpoint_all(slave, BLK_START, BLK_LEN, req.register, raw, timeout);
+            let reads = self.bus.read_reg_all(slave, req.register, timeout);
+            let mut ok = 0;
+            let mut fails = Vec::new();
+            for (i, r) in &results {
+                match r {
+                    Ok(()) => {
+                        let rb = reads.iter().find(|(j, _)| j == i);
+                        match rb {
+                            Some((_, Ok(v))) if *v == raw => ok += 1,
+                            Some((_, Ok(v))) => fails.push(format!("inv{i}: read-back {v}")),
+                            Some((_, Err(e))) => fails.push(format!("inv{i}: read-back {e}")),
+                            None => fails.push(format!("inv{i}: no read-back")),
+                        }
+                    }
+                    Err(e) => fails.push(format!("inv{i}: write {e}")),
+                }
+            }
+            if fails.is_empty() {
+                rec.result = "written+verified".into();
+                self.telem.add_event("info", "control", format!(
+                    "write {}={} ({}, {}) verified on {ok} inverter(s)", spec.name, req.value, req.source, req.reason));
+            } else if ok > 0 {
+                rec.result = format!("partial: {ok} ok, {fails:?}");
+                self.telem.add_event("warn", "control", format!(
+                    "write {}={} partial: {ok} ok; {fails:?}", spec.name, req.value));
+            } else {
+                rec.result = format!("error: all inverters failed: {fails:?}");
+                self.telem.add_event("error", "control", format!(
+                    "write {}={} failed on all inverters: {fails:?}", spec.name, req.value));
+            }
+            return rec;
+        }
         let write_res: Result<(), String> = if in_block {
             match self.bus.read_holding(slave, BLK_START, BLK_LEN, timeout) {
                 Ok(b) if b.len() as u16 >= BLK_LEN * 2 => {

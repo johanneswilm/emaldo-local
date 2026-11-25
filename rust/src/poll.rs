@@ -90,32 +90,48 @@ impl Poller {
                 continue;
             }
 
-            match SerialPort::open(&cfg.hardware.serial_port, cfg.hardware.serial_baud) {
-                Ok(port) => {
-                    self.telem.add_event(
-                        "info",
-                        "hermes",
-                        format!("serial connected {}", cfg.hardware.serial_port),
-                    );
-                    self.bus.attach(port);
-                    if let Err(e) = self.poll_loop(&rx) {
-                        self.telem
-                            .add_event("warn", "hermes", format!("serial lost: {e} (reconnecting)"));
+            // Open all configured inverter ports (A/B/C) when set; else the
+            // single serial_port. Index 0 is the primary for telemetry.
+            let port_list: Vec<String> = if cfg.hardware.inverter_ports.is_empty() {
+                vec![cfg.hardware.serial_port.clone()]
+            } else {
+                cfg.hardware.inverter_ports.clone()
+            };
+            let mut opened: Vec<SerialPort> = Vec::new();
+            for (i, path) in port_list.iter().enumerate() {
+                match SerialPort::open(path, cfg.hardware.serial_baud) {
+                    Ok(p) => opened.push(p),
+                    Err(e) if i == 0 => {
+                        self.telem.add_event(
+                            "warn",
+                            "hermes",
+                            format!("serial open {path}: {e} (retrying in 30s)"),
+                        );
                     }
-                    self.bus.detach();
-                }
-                Err(e) => {
-                    self.telem.add_event(
-                        "warn",
-                        "hermes",
-                        format!(
-                            "serial open {}: {e} (retrying in 30s)",
-                            cfg.hardware.serial_port
-                        ),
-                    );
-                    std::thread::sleep(Duration::from_secs(30));
+                    Err(e) => {
+                        self.telem.add_event(
+                            "warn",
+                            "hermes",
+                            format!("inverter port {path}: {e} (skipped)"),
+                        );
+                    }
                 }
             }
+            if opened.is_empty() {
+                std::thread::sleep(Duration::from_secs(30));
+                continue;
+            }
+            self.telem.add_event(
+                "info",
+                "hermes",
+                format!("serial connected {} port(s)", opened.len()),
+            );
+            self.bus.attach_all(opened);
+            if let Err(e) = self.poll_loop(&rx) {
+                self.telem
+                    .add_event("warn", "hermes", format!("serial lost: {e} (reconnecting)"));
+            }
+            self.bus.detach();
         }
     }
 
@@ -418,24 +434,44 @@ impl Poller {
         let cfg = self.cfg.get();
         let slave = cfg.hardware.inverter_slave_id;
         let timeout = Duration::from_millis(2000);
-
-        let slow = self
-            .bus
-            .read_input(slave, regs::HS_BLOCK_ADDR, regs::HS_BLOCK_COUNT, timeout)
-            .map_err(|e| format!("hisolar slow block: {e}"))?;
-        let fast = self
-            .bus
-            .read_input(slave, regs::HS_FAST_ADDR, regs::HS_FAST_COUNT, timeout)
-            .map_err(|e| format!("hisolar fast block: {e}"))?;
-
+        let (reads, errs) = self.bus.read_all_inverters(
+            slave,
+            (regs::HS_BLOCK_ADDR, regs::HS_BLOCK_COUNT),
+            (regs::HS_FAST_ADDR, regs::HS_FAST_COUNT),
+            timeout,
+        );
+        if reads.is_empty() {
+            let e = errs
+                .first()
+                .map(|(i, e)| format!("inverter {i}: {e}"))
+                .unwrap_or_else(|| "no inverter ports".into());
+            return Err(format!("hisolar blocks: {e}"));
+        }
         let map = cfg.hardware.map_unvalidated;
         self.telem.update(|s| {
-            s.raw.insert(format!("{:#06x}", regs::HS_BLOCK_ADDR), hex(&slow));
-            s.raw.insert(format!("{:#06x}", regs::HS_FAST_ADDR), hex(&fast));
-            if map {
-                let parsed = parse_inverter_block(&slow);
-                apply_block(s, &parsed);
+            s.raw.retain(|k, _| !k.starts_with("0x0fa0") && !k.starts_with("0x0faf"));
+            for (i, (slow_hex, fast_hex)) in reads.iter().enumerate() {
+                let tag = if reads.len() > 1 { format!(":inv{i}") } else { String::new() };
+                s.raw.insert(format!("{:#06x}{tag}", regs::HS_BLOCK_ADDR), slow_hex.clone());
+                s.raw.insert(format!("{:#06x}{tag}", regs::HS_FAST_ADDR), fast_hex.clone());
+                if i == 0 {
+                    // Primary drives the named telemetry fields.
+                    if map {
+                        let bytes = hex_to_bytes(slow_hex);
+                        let parsed = parse_inverter_block(&bytes);
+                        apply_block(s, &parsed);
+                    }
+                }
             }
+            s.inverters = reads
+                .iter()
+                .enumerate()
+                .map(|(i, _)| crate::telemetry::InverterState {
+                    index: i as u32,
+                    running: true,
+                    ..Default::default()
+                })
+                .collect();
         });
         Ok(())
     }
@@ -465,6 +501,7 @@ impl Poller {
     }
 }
 
+#[allow(dead_code)]
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
 }
@@ -524,4 +561,15 @@ fn apply_block(s: &mut crate::telemetry::State, m: &ParsedBlock) {
     s.inverters[0].frequency_hz = m.grid_freq;
     s.inverters[0].dc_temp_c = m.dc_temp;
     s.inverters[0].running = m.pv_w > 1.0 || m.battery_w.abs() > 1.0;
+}
+
+fn hex_to_bytes(h: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut it = h.split_whitespace();
+    while let Some(tok) = it.next() {
+        if let Ok(b) = u8::from_str_radix(tok, 16) {
+            out.push(b);
+        }
+    }
+    out
 }

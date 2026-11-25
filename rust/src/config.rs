@@ -81,6 +81,10 @@ pub struct HardwareConfig {
     /// inverter outputs switched on). Off by default.
     #[serde(default)]
     pub inverter_switches: bool,
+    /// Inverter Modbus ports, one per inverter (A/B/C). Empty = use the
+    /// single `serial_port`. On HiSolar live: USB3, USB0, USB2.
+    #[serde(default)]
+    pub inverter_ports: Vec<String>,
     /// Read-only Bmtp polling over the housekeeping MCU
     /// (`/dev/mcu1` on live, `/dev/ttymxc2` on the emulator). Off by
     /// default: the MCU is single-master and the vendor app owns it while
@@ -508,6 +512,7 @@ impl Default for HardwareConfig {
             bus_enabled: true,
             mcu_sysfs: default_mcu_sysfs(),
             inverter_switches: false,
+            inverter_ports: Vec::new(),
             mcu_protocol: false,
             mcu_port: default_mcu_port(),
             mcu_baud: default_mcu_baud(),
