@@ -98,6 +98,7 @@ fn main() {
     let mut prices_probe = false;
     let mut solar_probe = false;
     let mut plan_probe_soc: Option<f64> = None;
+    let mut write_probe: Option<i32> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -158,6 +159,12 @@ fn main() {
             "--state-dump" => dump_state = true,
             "--prices-probe" => prices_probe = true,
             "--solar-probe" => solar_probe = true,
+            "--write-probe" => {
+                write_probe = Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(300));
+                if args.get(i + 1).and_then(|v| v.parse::<i32>().ok()).is_some() {
+                    i += 1;
+                }
+            }
             "--plan-probe" => {
                 plan_probe_soc = Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(50.0));
                 if args.get(i + 1).and_then(|v| v.parse::<f64>().ok()).is_some() {
@@ -182,7 +189,7 @@ fn main() {
             }
             other => {
                 eprintln!(
-                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
+                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
                 );
                 std::process::exit(2);
             }
@@ -226,6 +233,54 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+
+    if let Some(watts) = write_probe {
+        // CONTROLLED first-write test on one inverter port (free only when the
+        // vendor app is stopped). Writes SetBatteryMaximumPower (0x0FDD),
+        // reads back, holds a few seconds, then restores 0. Prints a JSON
+        // timeline so the effect can be cross-checked against CAN current.
+        let c = store.get();
+        let port = std::env::var("WRITE_PORT").unwrap_or_else(|_| "/dev/ttyCH9344USB3".into());
+        let slave: u8 = std::env::var("WRITE_SLAVE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let hold = std::env::var("WRITE_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(8u64);
+        let reg: u16 = std::env::var("WRITE_REG").ok().and_then(|v| v.parse().ok()).unwrap_or(0x0FDD);
+        let _ = &c;
+        let mut p = match serial::SerialPort::open(&port, 9600) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("write probe: open {port}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let to = std::time::Duration::from_millis(800);
+        let rb = |p: &mut serial::SerialPort| -> String {
+            match modbus::read_registers(p, modbus::FC_READ_HOLDING, slave, reg, 1, to) {
+                Ok(d) if d.len() >= 2 => format!("{}", u16::from_be_bytes([d[0], d[1]]) as i16),
+                Ok(d) => format!("short:{d:?}"),
+                Err(e) => format!("err:{e}"),
+            }
+        };
+        let before = rb(&mut p);
+        println!("{{\"step\":\"read_before\",\"reg\":{reg},\"value\":\"{before}\"}}");
+        let enc = watts as i16 as u16;
+        match modbus::write_single_register(&mut p, slave, reg, enc, to) {
+            Ok(()) => println!("{{\"step\":\"write\",\"value\":{watts}}}"),
+            Err(e) => {
+                eprintln!("write probe: write failed: {e}");
+                let _ = &port;
+                std::process::exit(1);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        println!("{{\"step\":\"read_after\",\"value\":\"{}\"}}", rb(&mut p));
+        std::thread::sleep(std::time::Duration::from_secs(hold));
+        println!("{{\"step\":\"read_held\",\"value\":\"{}\"}}", rb(&mut p));
+        // Restore 0 (first), then read.
+        let _ = modbus::write_single_register(&mut p, slave, reg, 0, to);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        println!("{{\"step\":\"restore_zero\",\"read\":\"{}\"}}", rb(&mut p));
+        return;
     }
 
     if let Some(soc) = plan_probe_soc {

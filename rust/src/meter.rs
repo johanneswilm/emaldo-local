@@ -26,7 +26,8 @@ use std::path::Path;
 use std::time::Duration;
 
 pub const REG_POWER_BLOCK: u16 = 0x0061;
-pub const REG_POWER_COUNT: u16 = 12;
+#[allow(dead_code)]
+pub const REG_POWER_COUNT: u16 = 12; // 0x61..0x6C (V/I/P block)
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MeterReading {
@@ -39,6 +40,10 @@ pub struct MeterReading {
     /// Positive = import from grid.
     pub import_w: i32,
     pub export_w: i32,
+    /// Grid frequency (from 0x0077, x0.01 Hz), 0 if not read.
+    pub freq_hz: f64,
+    /// Meter-reported total power (0x006A, signed), if read.
+    pub total_reg_w: i32,
 }
 
 fn s16(x: u16) -> i32 {
@@ -69,12 +74,13 @@ pub fn decode_block(at: u64, regs: &[u16]) -> Option<MeterReading> {
 /// app owns it) or the device does not answer.
 pub fn read_once(port: &str, baud: u32, slave: u8, timeout_ms: u64) -> Option<MeterReading> {
     let mut p = open_raw(port, baud).ok()?;
+    // Read 0x0061..0x0077 (23 regs): V/I/P, total power (0x6A), freq (0x77).
     let regs = modbus::read_registers(
         &mut p,
         modbus::FC_READ_HOLDING,
         slave,
         REG_POWER_BLOCK,
-        REG_POWER_COUNT,
+        23,
         Duration::from_millis(timeout_ms),
     )
     .ok()?;
@@ -82,7 +88,15 @@ pub fn read_once(port: &str, baud: u32, slave: u8, timeout_ms: u64) -> Option<Me
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    decode_block(crate::telemetry::now_unix(), &words)
+    let mut r = decode_block(crate::telemetry::now_unix(), &words)?;
+    // TotalPower at 0x6A -> index 9; GridFrequency at 0x77 -> index 22.
+    if words.len() >= 10 {
+        r.total_reg_w = s16(words[9]);
+    }
+    if words.len() >= 23 {
+        r.freq_hz = words[22] as f64 / 100.0;
+    }
+    Some(r)
 }
 
 /// Persistent daily energy counters (Wh). Rolled at local midnight.
@@ -195,7 +209,8 @@ fn publish(telem: &crate::telemetry::Store, c: &Counters, r: &MeterReading) {
             current_a: r.current_a,
             import_w: r.import_w as f64,
             export_w: r.export_w as f64,
-            net_w: r.total_w as f64,
+            net_w: if r.total_reg_w != 0 { r.total_reg_w as f64 } else { r.total_w as f64 },
+            freq_hz: r.freq_hz,
             day: c.day.clone(),
             import_kwh: c.import_wh / 1000.0,
             export_kwh: c.export_wh / 1000.0,

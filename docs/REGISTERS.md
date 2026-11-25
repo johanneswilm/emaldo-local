@@ -310,9 +310,12 @@ layout/pclntab).
       provisional mapping on the bench).
 - [x] MCU protocol: Bmtp framing, command set and response structs
       recovered; register bridge 0x1012 documented above; bench-validated
-      with `emulator/fake_mcu.py`. Live MCU path blocked: no responses
-      from `/dev/mcu1` in the controlled window (vendor app has no
-      inverter telemetry either).
+      with `emulator/fake_mcu.py`. NOTE: `/dev/mcu1` is housekeeping only
+      (version/status/IO), so Bmtp-over-mcu1 was never the inverter path.
+      The inverter is Modbus RTU slave 1 on `/dev/ttyCH9344USB0/2/3`
+      (per PR #2, live-confirmed: the vendor app holds those ports). The
+      app's ttymxc2 Bmtp client was silent because the app is not using
+      it for inverter data on this unit.
 - [~] SOC register: candidate byte 0x36 in the 0x0FA0 block, scale /10 —
       still unconfirmed (live 0x1012 read unavailable). BMS SOC is now
       available from CAN type 3; see below.

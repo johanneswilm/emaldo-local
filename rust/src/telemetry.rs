@@ -167,6 +167,7 @@ pub struct MeterState {
     pub export_w: f64,
     /// Signed net (+ = import).
     pub net_w: f64,
+    pub freq_hz: f64,
     /// Local day the counters cover.
     pub day: String,
     pub import_kwh: f64,
