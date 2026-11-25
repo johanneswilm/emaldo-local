@@ -263,8 +263,28 @@ fn main() {
         };
         let before = rb(&mut p);
         println!("{{\"step\":\"read_before\",\"reg\":{reg},\"value\":\"{before}\"}}");
+        let use_fc16 = std::env::var("WRITE_FC").map(|v| v == "16").unwrap_or(false);
         let enc = watts as i16 as u16;
-        match modbus::write_single_register(&mut p, slave, reg, enc, to) {
+        let wres = if use_fc16 {
+            // Vendor BatchSetPowers block 0x0FD8..0x0FDD. Read current block
+            // first, change 0x0FDD (element 5) to `watts`, write back.
+            let base = 0x0FD8u16;
+            let mut blk: Vec<u16> = match modbus::read_registers(&mut p, modbus::FC_READ_HOLDING, slave, base, 6, to) {
+                Ok(d) if d.len() >= 12 => d.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect(),
+                _ => vec![0, 3600, 560, 3600, 0, 0],
+            };
+            blk[5] = enc;
+            match modbus::write_multiple_registers(&mut p, slave, base, &blk, to) {
+                Ok(()) => {
+                    println!("{{\"step\":\"write16\",\"block\":{:?},\"set_0FDD\":{watts}}}", blk);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            modbus::write_single_register(&mut p, slave, reg, enc, to)
+        };
+        match wres {
             Ok(()) => println!("{{\"step\":\"write\",\"value\":{watts}}}"),
             Err(e) => {
                 eprintln!("write probe: write failed: {e}");

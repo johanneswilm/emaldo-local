@@ -128,6 +128,57 @@ pub fn read_input_registers(
 
 /// Write a single holding register (fc 0x06). The response is the request
 /// echo; it is verified byte-for-byte.
+/// FC16 write multiple holding registers (big-endian values). The inverter's
+/// `BatchSetPowers` uses this for 0x0FD8..0x0FDD.
+pub fn write_multiple_registers(
+    port: &mut SerialPort,
+    slave: u8,
+    addr: u16,
+    values: &[u16],
+    timeout: Duration,
+) -> Result<(), ModbusError> {
+    let count = values.len() as u16;
+    let mut req = vec![
+        slave,
+        FC_WRITE_MULTIPLE,
+        (addr >> 8) as u8,
+        addr as u8,
+        (count >> 8) as u8,
+        count as u8,
+        (values.len() * 2) as u8,
+    ];
+    for v in values {
+        req.push((v >> 8) as u8);
+        req.push(*v as u8);
+    }
+    req.extend_from_slice(&crc16(&req));
+    port.flush_rx();
+    port.write_all(&req).map_err(ModbusError::Io)?;
+    // Response: slave, fc, addr hi/lo, count hi/lo, crc (8 bytes).
+    let mut resp = [0u8; 8];
+    let deadline = std::time::Instant::now() + timeout;
+    let mut got = 0usize;
+    while got < 8 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(ModbusError::Timeout);
+        }
+        match port.read_timeout(&mut resp[got..], left) {
+            Ok(0) => return Err(ModbusError::Timeout),
+            Ok(n) => got += n,
+            Err(e) if e == "timeout" => return Err(ModbusError::Timeout),
+            Err(e) => return Err(ModbusError::Io(e)),
+        }
+    }
+    if resp[0] != slave {
+        return Err(ModbusError::WrongSlave);
+    }
+    if resp[1] & 0x80 != 0 {
+        return Err(ModbusError::Exception(resp[2]));
+    }
+    Ok(())
+}
+
 pub fn write_single_register(
     port: &mut SerialPort,
     slave: u8,

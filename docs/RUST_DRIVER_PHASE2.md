@@ -322,6 +322,38 @@ solar incl. per-string rows, battery/CAN, display) via GET/PUT
   power reading exists (blocked until inverter/b-sensor PV is live).
 - All config-driven, no account; outbound HTTPS only.
 
+## 8c. First live write (2026-11-25, controlled window)
+
+The inverter write path is **Modbus RTU, slave 1, on `/dev/ttyCH9344USB0/2/3`**
+(inverters B/C/A; PR #2), confirmed live: with the vendor app stopped, all
+three answer reads of `0x0FDD` (signed battery power limit; read −311/−364 W
+while the packs discharged).
+
+Key finding: **FC06 single-register writes time out; FC16 block writes work.**
+The driver mirrors the vendor `BatchSetPowers` and writes the 6-register block
+`0x0FD8..0x0FDD` with FC16. Result on USB3 and USB0:
+
+```
+read_before 0x0FDD=-311
+write16 [0,3600,560,3600,0,300]
+read_after  0x0FDD=300   (verified)
+held        0x0FDD=300
+restore     0x0FDD=0     (block [0,3600,560,3600,0,0], verified)
+```
+
+(An early bug: the restore step used FC06 and did not take, leaving 0x0FDD=300;
+it was corrected to an FC16 block write and all three inverters verified back
+at 0. The vendor app was then restarted and is in control. CAN pack current was
+~−7.3 A throughout, so a ±300 W delta was inside the existing discharge and no
+current swing was expected — register read-back is the acceptance criterion.)
+
+Tooling: `emaldo-driver --write-probe WATTS` (env `WRITE_FC=16`,
+`WRITE_PORT`, `WRITE_SLAVE`, `WRITE_REG`, `WRITE_HOLD`) does snapshot/read,
+write, read-back, hold and restore in one shot; bench-validated against the
+stateful fake inverter (FC06) and live (FC16). **The gated controller must use
+FC16 block writes for `0x0FD8..0x0FDD`** — a follow-up before enabling
+`control.writes_enabled` in the service loop.
+
 ## 9. Evidence index
 
 - Function addresses (VA) for all named functions: `/tmp/fwre/pclntab_map.json`
