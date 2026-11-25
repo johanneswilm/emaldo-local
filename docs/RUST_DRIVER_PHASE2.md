@@ -405,6 +405,29 @@ for the no-balancing / no-EV window), two pieces landed:
 Not needed now (per owner): FCR/mFRR balancing and EV charging — both off
 for the next weeks; revisit before re-enabling.
 
+## 8f. Active CAN BMS polling — app-free SOC (2026-11-25)
+
+The packs are **responders** behind the cabinet MCU: with the vendor app (and
+its `cabinet` child) stopped the passive CAN listener sees 0 frames (verified
+live). `can_poll.rs` reproduces what canapp does so the driver can read SOC
+with the app retired:
+
+- type-5 discovery broadcast (`dst 0xFF`, `[04]`) -> cabinet replies
+  `[05, mask, uuid]`; **seat mask bit 7 = seat 1** on real hardware
+  (`0xE0` = seats 1..3). The decoder is adaptive (nibble set decides
+  MSB/LSB) so emulators using `0x07` also work.
+- type-7 tunnel to each pack (`cab<<4 | seat`) carrying the BAK `7C 01`
+  basic-data request (`7C 00 01 00 <chk> 0D`); reply is the BAK block list,
+  decoded by the existing parser.
+- `hardware.can_poll = true` runs this continuously (service mode for the
+  takeover); `--can-poll` is the one-shot probe.
+- **Live-validated** (app stopped, controlled window): packs 1/2/3 answered
+  SOC 26/42/33 %, currents −7.15/−6.76/−5.54 A, 51.82–51.84 V. Emulator
+  (fake_bms + fake_bak): SOC 60 %, 52.64 V on all three.
+
+This removes the last blocker to running without the vendor app: SOC/
+battery telemetry no longer depend on `app` or `cabinet`.
+
 ## 9. Evidence index
 
 - Function addresses (VA) for all named functions: `/tmp/fwre/pclntab_map.json`

@@ -231,7 +231,6 @@ pub fn probe(iface: &str, seconds: u64) -> Result<Vec<CanBattery>, String> {
 }
 
 /// Continuous active poller for the service (when the vendor app is retired).
-#[allow(dead_code)]
 pub fn start(iface: String, telem: Arc<TelemStore>) {
     std::thread::Builder::new()
         .name("can-poll".into())
@@ -247,7 +246,6 @@ pub fn start(iface: String, telem: Arc<TelemStore>) {
         .expect("spawn can poller");
 }
 
-#[allow(dead_code)]
 fn run_loop(iface: &str, telem: &TelemStore) -> Result<(), String> {
     let sock = CanSocket::open(iface)?;
     telem.update(|s| {

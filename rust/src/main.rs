@@ -515,7 +515,9 @@ fn main() {
         // Read-only snapshot: run the configured telemetry sources (passive
         // CAN) for a few seconds and print the same JSON as /api/v1/state.
         let c = store.get();
-        if c.hardware.can_listen {
+        if c.hardware.can_poll {
+            can_poll::start(c.hardware.can_iface.clone(), telem.clone());
+        } else if c.hardware.can_listen {
             can::start(c.hardware.can_iface.clone(), telem.clone());
         }
         let dump_dir = cfg_path
@@ -715,7 +717,13 @@ fn main() {
     // ---- Hardware ----
     let cfg0 = store.get();
     let poller = poll::Poller::new(store.clone(), telem.clone(), bus.clone());
-    if cfg0.hardware.can_listen {
+    if cfg0.hardware.can_poll {
+        eprintln!(
+            "can poll: {} (active BMS polling; discovery + BAK tunnel)",
+            cfg0.hardware.can_iface
+        );
+        can_poll::start(cfg0.hardware.can_iface.clone(), telem.clone());
+    } else if cfg0.hardware.can_listen {
         eprintln!(
             "can listener: {} (read-only DIN/BMS; no transmit)",
             cfg0.hardware.can_iface

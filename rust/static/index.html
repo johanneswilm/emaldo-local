@@ -159,6 +159,7 @@
         <div><label>Opt: round-trip eff</label><input id="cfg_opt_eta" type="number" step="0.01" value="0.9"></div>
         <div><label>Opt: max SOC (%)</label><input id="cfg_opt_max" type="number" value="100"></div>
         <div><label>CAN listen (BMS)</label><select id="cfg_can"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>CAN active poll (takeover)</label><select id="cfg_can_poll"><option value="false">off</option><option value="true">on</option></select></div>
         <div><label>Grid meter</label><select id="cfg_meter"><option value="true">on</option><option value="false">off</option></select></div>
         <div><label>Poll interval (s)</label><input id="cfg_poll" type="number" value="5"></div>
       </div>
@@ -335,6 +336,7 @@ async function loadConfig() {
   $('cfg_opt_max').value = op.max_soc_percent ?? 100;
   $('cfg_profile').value = hw.profile || 'powercore2';
   $('cfg_can').value = String(!!hw.can_listen);
+  $('cfg_can_poll').value = String(!!hw.can_poll);
   $('cfg_meter').value = String(!!hw.meter_enabled);
   $('cfg_poll').value = hw.poll_interval_secs ?? 5;
   $('cfg_device_name').value = dv.name || 'Power Core';
@@ -411,7 +413,7 @@ async function saveSettings() {
   c.policy = pol;
   c.hardware = Object.assign(c.hardware || {}, {
     profile: $('cfg_profile').value,
-    can_listen: b('cfg_can'), meter_enabled: b('cfg_meter'),
+    can_listen: b('cfg_can'), can_poll: b('cfg_can_poll'), meter_enabled: b('cfg_meter'),
     poll_interval_secs: n('cfg_poll', 5), display_enabled: b('cfg_display'),
   });
   c.device = Object.assign(c.device || {}, { name: $('cfg_device_name').value });

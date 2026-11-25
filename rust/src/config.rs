@@ -109,6 +109,11 @@ pub struct HardwareConfig {
     /// Read-only SocketCAN listener for the DIN cabinet/BMS bus.
     #[serde(default)]
     pub can_listen: bool,
+    /// Active CAN_BMS polling (discovery + BAK tunnel) instead of the passive
+    /// listener. Needed when the vendor app is retired (packs only answer
+    /// polls). Requires exclusive CAN; use for the takeover mode.
+    #[serde(default)]
+    pub can_poll: bool,
     #[serde(default = "default_can_iface")]
     pub can_iface: String,
     /// b-sensor (grid/load energy meter) sampling.
@@ -599,6 +604,7 @@ impl Default for HardwareConfig {
             mcu_baud: default_mcu_baud(),
             mcu_timeout_ms: default_mcu_timeout_ms(),
             can_listen: false,
+            can_poll: false,
             can_iface: default_can_iface(),
             meter_enabled: false,
             meter_port: default_meter_port(),
