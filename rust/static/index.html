@@ -56,7 +56,18 @@
   th { color:var(--mut); font-weight:600; }
   code, pre { font:12px/1.45 ui-monospace,monospace; }
   pre { white-space:pre-wrap; word-break:break-all; background:#061018; padding:12px; border-radius:10px; max-height:320px; overflow:auto; }
-  .tree { font:12.5px/1.6 ui-monospace,monospace; }
+  .tree { font-size:14px; }
+  .dt-grp { border:1px solid #ffffff10; border-radius:12px; margin:8px 0; overflow:hidden; }
+  .dt-grp > summary { cursor:pointer; padding:9px 12px; background:#ffffff08; font-weight:600; color:var(--acc2); list-style:none; }
+  .dt-grp > summary::-webkit-details-marker { display:none; }
+  .dt-grp > summary:before { content:'▸ '; color:var(--mut); }
+  .dt-grp[open] > summary:before { content:'▾ '; }
+  .dt-row { display:flex; justify-content:space-between; gap:14px; padding:7px 12px; border-top:1px solid #ffffff08; }
+  .dt-k { color:var(--mut); white-space:nowrap; }
+  .dt-v { text-align:right; word-break:break-word; }
+  .chip { display:inline-block; padding:1px 9px; border-radius:999px; font-size:12px; font-weight:600; }
+  .chip.ok { background:#28c7a633; color:var(--acc2); }
+  .chip.off { background:#ff6b6b22; color:#ff9d9d; }
 
   /* ---- energy flow hero ---- */
   .hero { position:relative; overflow:hidden; padding: 8px 4px 2px; }
@@ -179,7 +190,7 @@
       <div class="tree" id="s_tree">–</div>
     </section>
 
-    <section class="card">
+    <section class="card hidden" id="raw_card">
       <h2>Raw registers</h2>
       <p class="mut">Latest raw bus reads (hex). Offsets are placeholders until validated — see docs/REGISTERS.md.</p>
       <table id="s_raw"><tr><th>block</th><th>value</th></tr></table>
@@ -412,41 +423,68 @@ function renderState(st) {
     + ' · MCU ' + (_mcu.present ? 'present' : 'absent') + ' · ' + _grid
     + (st.faults && st.faults.length ? ' · FAULTS: ' + st.faults.join(', ') : '');
 
-  let tree = 'module SoC (this driver)\n';
-  tree += '├─ MCU ' + (st.mcu && st.mcu.present ? '[present]' : '[absent]');
-  if (st.mcu && st.mcu.present) {
-    tree += '\n│   ├─ status: ' + (st.mcu.mcu_status || '?');
-    tree += '\n│   ├─ con_power: ' + (st.mcu.con_power || '?');
-    (st.mcu.inverter||[]).forEach((v,i) => tree += '\n│   ├─ inverter_' + i + ': ' + v);
-    Object.entries(st.mcu.extra||{}).forEach(([k,v]) => tree += '\n│   ├─ ' + k + ': ' + v);
-  }
-  tree += '\n├─ inverters: ' + (st.inverters||[]).map(i =>
-    '#' + i.index + ' ' + (i.running?'ON':'off') + ' ' + (i.frequency_hz||0).toFixed(1) + 'Hz').join(', ');
-  tree += '\n├─ battery: ' + (st.battery.soc_percent||0).toFixed(0) + '% '
-    + (st.battery.remaining_wh||0).toFixed(0) + '/' + (st.battery.capacity_wh||0).toFixed(0) + ' Wh';
+  // Device tree rendered as structured rows (not a raw ASCII blob).
   const can = st.can || {};
-  tree += '\n├─ battery source: ' + (st.battery && st.battery.modules ? 'CAN BMS (' + st.battery.modules + ' packs)' : (can.enabled ? 'CAN (no packs yet)' : 'none'));
-  if (st.battery && st.battery.modules) {
-    tree += '  ' + (st.battery.soc_percent||0).toFixed(1) + '%, '
-      + (st.battery.voltage_v||0).toFixed(1) + ' V, '
-      + (st.battery.current_a||0).toFixed(1) + ' A, '
-      + (st.battery.temp_c||0).toFixed(1) + ' °C, SOH ' + (st.battery.soh_percent||0).toFixed(0) + '%, '
-      + (st.battery.cycle_count||0) + ' cycles';
+  const mcu = st.mcu || {};
+  const esc = (v) => String(v == null ? '' : v).replace(/</g,'&lt;');
+  const chip = (on, txt) => '<span class="chip ' + (on ? 'ok' : 'off') + '">' + esc(txt) + '</span>';
+  const kv = (k, v) => '<div class="dt-row"><span class="dt-k">' + esc(k) + '</span><span class="dt-v">' + v + '</span></div>';
+  const group = (title, inner, open = true) =>
+    '<details class="dt-grp"' + (open ? ' open' : '') + '><summary>' + esc(title) + '</summary>' + inner + '</details>';
+
+  let treeHtml = '';
+
+  // Battery
+  const batt = st.battery || {};
+  let b = '';
+  b += kv('State of charge', '<b>' + (batt.soc_percent||0).toFixed(1) + ' %</b>');
+  b += kv('Power', fmtkW(batt.power_w) + (batt.power_w > 50 ? ' (charging)' : batt.power_w < -50 ? ' (discharging)' : ''));
+  b += kv('Voltage / current', (batt.voltage_v||0).toFixed(2) + ' V · ' + (batt.current_a||0).toFixed(1) + ' A');
+  b += kv('Temperature', (batt.temp_c||0).toFixed(1) + ' °C');
+  b += kv('Remaining', (batt.remaining_wh||0).toFixed(0) + ' / ' + (batt.capacity_wh||0).toFixed(0) + ' Wh');
+  b += kv('Health / cycles', (batt.soh_percent||0).toFixed(0) + ' % · ' + (batt.cycle_count||0));
+  b += kv('Source', (batt.modules ? 'CAN BMS · ' + batt.modules + ' packs' : (can.enabled ? 'CAN (waiting)' : 'none')));
+  treeHtml += group('Battery', b);
+
+  // Packs
+  if (can.batteries && can.batteries.length) {
+    let pk = '';
+    can.batteries.forEach(x => {
+      pk += kv('Pack ' + x.cabinet + '·' + x.position,
+        (x.soc_percent||0) + '% · ' + ((x.voltage_mv||0)/1000).toFixed(2) + ' V · ' +
+        ((x.current_ma||0)/1000).toFixed(2) + ' A · ' + (x.temp_min_c||0).toFixed(0) + '–' + (x.temp_max_c||0).toFixed(0) + ' °C');
+    });
+    treeHtml += group('Packs (' + can.batteries.length + ')', pk, false);
   }
-  tree += '\n├─ CAN ' + (can.enabled ? '[' + (can.iface||'') + '] ' + (can.frames||0) + ' frames / ' + (can.messages||0) + ' msgs' : '[off]');
-  (can.batteries || []).forEach(b => {
-    tree += '\n│   ├─ cabinet ' + b.cabinet + ' pack ' + b.position + ': '
-      + (b.soc_percent||0) + '% ' + ((b.voltage_mv||0)/1000).toFixed(2) + ' V '
-      + ((b.current_ma||0)/1000).toFixed(2) + ' A, '
-      + b.cell_count + ' cells ' + b.cell_min_mv + '..' + b.cell_max_mv + ' mV, '
-      + (b.temp_min_c||0).toFixed(1) + '..' + (b.temp_max_c||0).toFixed(1) + ' °C';
+
+  // Inverters + MCU
+  let inv = '';
+  const list = st.inverters || [];
+  if (list.length) list.forEach(i => {
+    inv += kv('Inverter ' + i.index, chip(i.running, i.running ? 'running' : 'off') + ' ' + (i.frequency_hz ? i.frequency_hz.toFixed(1) + ' Hz' : ''));
   });
-  tree += '\n└─ display, b-sensor, EV gun: via bus (see raw registers)';
-  $('s_tree').textContent = tree;
+  else inv += kv('Inverters', '—');
+  inv += kv('MCU', chip(!!mcu.present, mcu.present ? 'present' : 'absent') + (mcu.con_power != null ? ' · grid ' + (mcu.con_power === '1' ? 'connected' : 'state ' + mcu.con_power) : ''));
+  if (mcu.inverter) inv += kv('MCU inverter switches', mcu.inverter.map(x => chip(x == 1 || x === '1', x)).join(' '));
+  treeHtml += group('Inverters &amp; MCU', inv);
+
+  // Sources (grid meter, CAN, prices, solar) — compact status
+  let src = '';
+  if (st.meter && st.meter.available) {
+    src += kv('Grid meter', (st.meter.import_kwh||0).toFixed(2) + ' kWh in · ' + (st.meter.export_kwh||0).toFixed(2) + ' kWh out today');
+  }
+  src += kv('CAN', chip(!!can.enabled, can.enabled ? (can.iface||'can0') + ' · ' + (can.frames||0) + ' frames' : 'off'));
+  if (st.prices && st.prices.area) src += kv('Prices', (st.prices.area||'') + ' · now ' + (st.prices.next_slots && st.prices.next_slots[0] ? st.prices.next_slots[0].eur_kwh.toFixed(3) + ' ' + (st.prices.currency||'') + '/kWh' : '—'));
+  if (st.solar && st.solar.kwp) src += kv('PV forecast', (st.solar.kwp).toFixed(2) + ' kWp · ' + (st.solar.today_kwh||0).toFixed(1) + ' kWh today');
+  treeHtml += group('Sources', src);
+
+  $('s_tree').innerHTML = treeHtml;
 
   const raw = st.raw || {};
+  const rawKeys = Object.keys(raw).sort();
+  $('raw_card').classList.toggle('hidden', rawKeys.length === 0);
   let html = '<tr><th>block</th><th>value</th></tr>';
-  for (const k of Object.keys(raw).sort()) {
+  for (const k of rawKeys) {
     html += '<tr><td><code>' + k + '</code></td><td><code>' +
       String(raw[k]).replace(/</g,'&lt;') + '</code></td></tr>';
   }
