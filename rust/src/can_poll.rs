@@ -173,11 +173,22 @@ pub fn discover(sock: &CanSocket, timeout: Duration) -> Vec<(u8, u8)> {
                         if m.data.len() >= 2 && m.data[0] == 0x05 {
                             let cabinet = m.src >> 4;
                             let mask = m.data[1];
-                            // LSB-first: bit 0 = seat 1 (mask 0x07 = seats 1..3).
-                            for bit in 0..8 {
-                                if mask & (1 << bit) != 0 {
-                                    let seat = (bit + 1) as u8;
-                                    packs.push((cabinet, seat));
+                            // Seat mask: real cabinets put seat 1 in bit 7
+                            // (PR #2: "mask bit 7 = seat 1"), so 0xE0 =
+                            // seats 1..3. Some emulators use LSB-first
+                            // (0x07 = seats 1..3). Detect by which half is
+                            // set so both layouts map to seats 1..N.
+                            let msb_first = mask >= 0x10 || mask & 0xF0 != 0;
+                            for bit in 0..8u8 {
+                                let set = if msb_first {
+                                    mask & (0x80 >> bit) != 0
+                                } else {
+                                    mask & (1 << bit) != 0
+                                };
+                                if set {
+                                    // 0x80>>bit for MSB-first and 1<<bit for
+                                    // LSB-first both enumerate seat 1 first.
+                                    packs.push((cabinet, bit + 1));
                                 }
                             }
                         }
@@ -318,14 +329,19 @@ mod tests {
     #[test]
     fn discovery_mask_maps_seats_msb_first() {
         // mask 0xE0 = seats 1,2,3
-        // LSB-first: 0x07 = seats 1,2,3 (matches fake_bms reply [05,07,...])
-        let mask = 0x07u8;
-        let mut seats = Vec::new();
-        for bit in 0..8 {
-            if mask & (1 << bit) != 0 {
-                seats.push(bit + 1);
+        // real hardware: 0xE0 (bit7=seat1) -> seats 1,2,3
+        let decode = |mask: u8| {
+            let msb_first = mask & 0xF0 != 0;
+            let mut seats = Vec::new();
+            for bit in 0..8u8 {
+                let set = if msb_first { mask & (0x80 >> bit) != 0 } else { mask & (1 << bit) != 0 };
+                if set {
+                    seats.push(bit + 1);
+                }
             }
-        }
-        assert_eq!(seats, vec![1, 2, 3]);
+            seats
+        };
+        assert_eq!(decode(0xE0), vec![1, 2, 3]); // live cabinet
+        assert_eq!(decode(0x07), vec![1, 2, 3]); // emulator fake_bms
     }
 }
