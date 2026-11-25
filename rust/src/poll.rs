@@ -121,7 +121,24 @@ impl Poller {
 
     fn poll_mcu(&self) {
         let cfg = self.cfg.get();
-        let m = mcu::read_mcu(&cfg.hardware.mcu_sysfs);
+        let mut m = mcu::read_mcu(&cfg.hardware.mcu_sysfs);
+        if cfg.hardware.inverter_switches && m.present {
+            // Keep the three inverter outputs switched on (vendor app does
+            // the same). Re-asserted every poll; only writes when a node is
+            // not already "1".
+            match mcu::assert_inverters_on(&cfg.hardware.mcu_sysfs) {
+                Ok(n) => {
+                    m.extra.insert("inverter_switches_on".into(), n.to_string());
+                    if n < 3 {
+                        self.telem.add_event("warn", "mcu", format!(
+                            "inverter switches: only {n}/3 on"));
+                    }
+                }
+                Err(e) => {
+                    self.telem.add_event("warn", "mcu", format!("inverter switches: {e}"));
+                }
+            }
+        }
         self.telem.update(|s| s.mcu = m);
     }
 

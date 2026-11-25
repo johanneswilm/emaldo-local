@@ -86,3 +86,48 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// Re-assert that all three inverter outputs are switched on, by writing
+/// `1` to `/sys/class/mcu/mcu1/inverter_0..2` (plain sysfs files per PR #2;
+/// the vendor app does the same ~6 s after start and holds them). This is
+/// the only sysfs write the driver performs; it does NOT touch mcu_rst,
+/// con_power, ev_*, network_4g_power or updata_mode.
+///
+/// Gated by `hardware.inverter_switches` in config. Returns the number of
+/// switches confirmed on.
+pub fn assert_inverters_on(sysfs: &str) -> Result<usize, String> {
+    use std::io::Write;
+    let base = Path::new(sysfs);
+    if !base.is_dir() {
+        return Err(format!("{} missing", base.display()));
+    }
+    let mut on = 0usize;
+    for i in 0..3 {
+        let p = base.join(format!("inverter_{i}"));
+        let cur = fs::read_to_string(&p).unwrap_or_default();
+        if cur.trim() == "1" {
+            on += 1;
+            continue;
+        }
+        match fs::OpenOptions::new().write(true).open(&p) {
+            Ok(mut f) => {
+                if f.write_all(b"1").is_ok() {
+                    let after = fs::read_to_string(&p).unwrap_or_default();
+                    if after.trim() == "1" {
+                        on += 1;
+                    }
+                }
+            }
+            Err(e) => return Err(format!("open {}: {e}", p.display())),
+        }
+    }
+    Ok(on)
+}
+
+#[cfg(test)]
+mod switch_tests {
+    #[test]
+    fn assert_inverters_on_missing_dir_errors() {
+        assert!(super::assert_inverters_on("/nonexistent/mcu").is_err());
+    }
+}

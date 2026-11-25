@@ -99,6 +99,7 @@ fn main() {
     let mut solar_probe = false;
     let mut plan_probe_soc: Option<f64> = None;
     let mut write_probe: Option<i32> = None;
+    let mut switches_probe = false;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -159,6 +160,7 @@ fn main() {
             "--state-dump" => dump_state = true,
             "--prices-probe" => prices_probe = true,
             "--solar-probe" => solar_probe = true,
+            "--switches-probe" => switches_probe = true,
             "--write-probe" => {
                 write_probe = Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(300));
                 if args.get(i + 1).and_then(|v| v.parse::<i32>().ok()).is_some() {
@@ -189,7 +191,7 @@ fn main() {
             }
             other => {
                 eprintln!(
-                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
+                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver [--config PATH] --switches-probe\n       emaldo-driver --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
                 );
                 std::process::exit(2);
             }
@@ -230,6 +232,20 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("mcu raw dump: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if switches_probe {
+        let c = store.get();
+        match mcu::assert_inverters_on(&c.hardware.mcu_sysfs) {
+            Ok(n) => {
+                println!("inverter switches on: {n}/3 ({})", c.hardware.mcu_sysfs);
+                return;
+            }
+            Err(e) => {
+                eprintln!("switches probe: {e}");
                 std::process::exit(1);
             }
         }

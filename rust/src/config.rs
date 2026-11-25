@@ -77,6 +77,10 @@ pub struct HardwareConfig {
     pub bus_enabled: bool,
     #[serde(default = "default_mcu_sysfs")]
     pub mcu_sysfs: String,
+    /// Re-assert inverter_0..2 = 1 in the MCU sysfs (keeps the three
+    /// inverter outputs switched on). Off by default.
+    #[serde(default)]
+    pub inverter_switches: bool,
     /// Read-only Bmtp polling over the housekeeping MCU
     /// (`/dev/mcu1` on live, `/dev/ttymxc2` on the emulator). Off by
     /// default: the MCU is single-master and the vendor app owns it while
@@ -503,6 +507,7 @@ impl Default for HardwareConfig {
             map_unvalidated: false,
             bus_enabled: true,
             mcu_sysfs: default_mcu_sysfs(),
+            inverter_switches: false,
             mcu_protocol: false,
             mcu_port: default_mcu_port(),
             mcu_baud: default_mcu_baud(),
