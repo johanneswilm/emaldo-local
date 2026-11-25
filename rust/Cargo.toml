@@ -1,0 +1,27 @@
+# Own workspace root: the repository root has a separate Cargo workspace
+# (the bridge workstream); this driver is deliberately not a member.
+[workspace]
+
+[package]
+name = "emaldo-driver"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Lean Rust driver for the Emaldo Power Core 2.0 module. Phase 1: read-only telemetry, display, web UI, MQTT/HA."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+webpki-roots = "0.26"
+ring = "0.17"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

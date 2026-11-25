@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emaldo driver</title>
+<style>
+  :root { --bg:#101418; --card:#1a2027; --fg:#e6edf3; --mut:#8b949e; --acc:#2f81f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; color: var(--mut); text-transform: uppercase; letter-spacing: .08em; }
+  .card { background: var(--card); border-radius: 10px; padding: 16px; margin: 12px 0; }
+  label { display:block; margin: 10px 0 4px; color: var(--mut); font-size: 13px; }
+  input { width:100%; padding:8px 10px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:var(--fg); }
+  button { margin-top:14px; padding:9px 16px; border:0; border-radius:6px; background:var(--acc); color:#fff; font-weight:600; cursor:pointer; }
+  button.ghost { background:#30363d; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:140px; }
+  .big { font-size:26px; font-weight:700; }
+  .mut { color: var(--mut); }
+  #msg { min-height: 20px; color:#3fb950; }
+  #msg.err { color:#f85149; }
+  .hidden { display:none; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; background:#30363d; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { padding:4px 6px; text-align:left; border-bottom:1px solid #30363d; }
+  th { color:var(--mut); }
+  code, pre { font:12px/1.4 ui-monospace,monospace; }
+  pre { white-space:pre-wrap; word-break:break-all; background:#0d1117; padding:10px; border-radius:6px; max-height:320px; overflow:auto; }
+  .tree { font:13px/1.6 ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Emaldo driver <span class="pill">Phase 1 · read-only</span></h1>
+
+  <section id="setup" class="card hidden">
+    <h2>First-run setup</h2>
+    <p class="mut">Set an admin password and your MQTT broker. You can change everything later under Settings.</p>
+    <label>Admin password (min 8 chars)</label><input id="su_pw" type="password">
+    <label>Device name</label><input id="su_name" value="Power Core">
+    <label>MQTT broker URL</label><input id="su_url" placeholder="mqtt://192.168.1.10:1883">
+    <label>MQTT username</label><input id="su_user">
+    <label>MQTT password</label><input id="su_mpw" type="password">
+    <button onclick="doSetup()">Finish setup</button>
+    <p id="su_msg" class="mut"></p>
+  </section>
+
+  <section id="login" class="card hidden">
+    <h2>Log in</h2>
+    <label>Password</label><input id="li_pw" type="password">
+    <button onclick="doLogin()">Log in</button>
+    <p id="li_msg" class="mut"></p>
+  </section>
+
+  <div id="app" class="hidden">
+    <section class="card">
+      <h2>Status</h2>
+      <div class="row">
+        <div><div class="mut">Battery</div><div class="big" id="s_soc">–</div></div>
+        <div><div class="mut">Battery power</div><div class="big" id="s_bat">–</div></div>
+        <div><div class="mut">Grid</div><div class="big" id="s_grid">–</div></div>
+        <div><div class="mut">PV</div><div class="big" id="s_pv">–</div></div>
+        <div><div class="mut">Load</div><div class="big" id="s_load">–</div></div>
+      </div>
+      <p class="mut" id="s_meta"></p>
+    </section>
+
+    <section class="card">
+      <h2>Device tree</h2>
+      <div class="tree" id="s_tree">–</div>
+    </section>
+
+    <section class="card">
+      <h2>Raw registers</h2>
+      <p class="mut">Latest raw bus reads (hex). Offsets are placeholders until validated — see docs/REGISTERS.md.</p>
+      <table id="s_raw"><tr><th>block</th><th>value</th></tr></table>
+    </section>
+
+    <section class="card">
+      <h2>Policy &amp; control <span class="pill" id="c_writes">…</span></h2>
+      <div class="row">
+        <div><div class="mut">Mode</div><div class="big" id="c_mode">–</div></div>
+        <div><div class="mut">Setpoint</div><div class="big" id="c_setpoint">–</div></div>
+        <div><div class="mut">Writes</div><div class="big" id="c_wcount">–</div></div>
+      </div>
+      <p class="mut" id="c_reason"></p>
+      <p class="mut" id="c_last"></p>
+      <div class="row">
+        <div>
+          <label>Mode</label>
+          <select id="p_mode" style="width:100%;padding:8px;border-radius:6px;background:#0d1117;color:var(--fg);border:1px solid #30363d">
+            <option>auto</option><option>idle</option><option>charge</option><option>discharge</option>
+          </select>
+        </div>
+        <div><label>Charge limit (W)</label><input id="p_charge" type="number" value="0"></div>
+        <div><label>Discharge limit (W)</label><input id="p_discharge" type="number" value="0"></div>
+        <div><label>Reserve (%)</label><input id="p_reserve" type="number" value="20"></div>
+      </div>
+      <button class="ghost" onclick="applyPolicy()">Apply policy</button>
+      <button class="ghost" onclick="doRollback()">Rollback registers</button>
+      <p class="mut">Commands are gated by the controller (writable table, range, rate limits).
+      With writes disabled (default) they are journaled as dry-run only. Rollback restores the
+      pre-write register snapshot.</p>
+    </section>
+
+    <section class="card">
+      <h2>Diagnostics</h2>
+      <p class="mut">Read-only bus scan: walks slave ids 1–10 and 240–250 with a 1-register read.</p>
+      <button class="ghost" onclick="doWalk()">Run slave walk</button>
+      <span class="mut" id="walk_msg"></span>
+    </section>
+
+    <section class="card">
+      <h2>Events</h2>
+      <pre id="s_events">–</pre>
+    </section>
+
+    <section class="card">
+      <h2>Settings (read-only view)</h2>
+      <p class="mut">Phase 1 exposes the configuration read-only here; edit <code>/root/emaldo-driver.toml</code> on the device. Secrets are masked.</p>
+      <pre id="s_cfg">–</pre>
+    </section>
+  </div>
+
+  <p id="msg"></p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let es = null;
+
+function show(which) {
+  $('setup').classList.toggle('hidden', which !== 'setup');
+  $('login').classList.toggle('hidden', which !== 'login');
+  $('app').classList.toggle('hidden', which !== 'app');
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return r;
+}
+
+async function boot() {
+  const r = await api('/api/v1/state');
+  const j = await r.json().catch(() => ({}));
+  if (j.setup_required) { show('setup'); return; }
+  if (r.status === 401) { show('login'); return; }
+  show('app');
+  renderState(j);
+  startStream();
+  loadEvents(); loadConfig();
+}
+
+async function doSetup() {
+  const r = await api('/api/v1/setup', {method:'POST', body: JSON.stringify({
+    password: $('su_pw').value, device_name: $('su_name').value,
+    broker_url: $('su_url').value, username: $('su_user').value, mqtt_password: $('su_mpw').value,
+  })});
+  if (r.ok) { $('su_msg').textContent = 'Setup done — log in.'; show('login'); }
+  else $('su_msg').textContent = 'Setup failed: ' + r.status;
+}
+
+async function doLogin() {
+  const r = await api('/api/v1/login', {method:'POST', body: JSON.stringify({password: $('li_pw').value})});
+  if (r.ok) { boot(); } else $('li_msg').textContent = 'Invalid password';
+}
+
+function fmtW(w) { return (w === undefined || w === null) ? '–' : Math.round(w) + ' W'; }
+
+function renderState(st) {
+  if (!st || !st.battery) return;
+  $('s_soc').textContent = (st.battery.soc_percent ?? 0).toFixed(0) + ' %';
+  $('s_bat').textContent = fmtW(st.battery.power_w);
+  $('s_grid').textContent = fmtW(st.grid && st.grid.net_w);
+  $('s_pv').textContent = fmtW(st.pv && st.pv.power_w);
+  $('s_load').textContent = fmtW(st.load && st.load.net_w);
+  $('s_meta').textContent = 'updated ' + new Date((st.updated_at||0)*1000).toLocaleTimeString()
+    + (st.faults && st.faults.length ? ' · FAULTS: ' + st.faults.join(', ') : '');
+
+  let tree = 'module SoC (this driver)\n';
+  tree += '├─ MCU ' + (st.mcu && st.mcu.present ? '[present]' : '[absent]');
+  if (st.mcu && st.mcu.present) {
+    tree += '\n│   ├─ status: ' + (st.mcu.mcu_status || '?');
+    tree += '\n│   ├─ con_power: ' + (st.mcu.con_power || '?');
+    (st.mcu.inverter||[]).forEach((v,i) => tree += '\n│   ├─ inverter_' + i + ': ' + v);
+    Object.entries(st.mcu.extra||{}).forEach(([k,v]) => tree += '\n│   ├─ ' + k + ': ' + v);
+  }
+  tree += '\n├─ inverters: ' + (st.inverters||[]).map(i =>
+    '#' + i.index + ' ' + (i.running?'ON':'off') + ' ' + (i.frequency_hz||0).toFixed(1) + 'Hz').join(', ');
+  tree += '\n├─ battery: ' + (st.battery.soc_percent||0).toFixed(0) + '% '
+    + (st.battery.remaining_wh||0).toFixed(0) + '/' + (st.battery.capacity_wh||0).toFixed(0) + ' Wh';
+  tree += '\n└─ display, b-sensor, EV gun: via bus (see raw registers)';
+  $('s_tree').textContent = tree;
+
+  const raw = st.raw || {};
+  let html = '<tr><th>block</th><th>value</th></tr>';
+  for (const k of Object.keys(raw).sort()) {
+    html += '<tr><td><code>' + k + '</code></td><td><code>' +
+      String(raw[k]).replace(/</g,'&lt;') + '</code></td></tr>';
+  }
+  $('s_raw').innerHTML = html;
+
+  // policy & control
+  const pol = st.policy || {}, ctl = st.control || {};
+  $('c_mode').textContent = pol.mode || 'auto';
+  $('c_setpoint').textContent = fmtW(pol.setpoint_w);
+  $('c_reason').textContent = pol.reason || '';
+  $('c_writes').textContent = ctl.writes_enabled ? 'WRITES ENABLED' : 'dry-run';
+  $('c_writes').style.background = ctl.writes_enabled ? '#7a2e2e' : '#30363d';
+  $('c_wcount').textContent = ctl.write_count ?? 0;
+  $('c_last').textContent = ctl.last_result ? ('last: ' + ctl.last_result) : '';
+  if (document.activeElement !== $('p_mode')) $('p_mode').value = pol.mode || 'auto';
+}
+
+function startStream() {
+  if (es) es.close();
+  es = new EventSource('/api/v1/stream');
+  es.onmessage = ev => { try { renderState(JSON.parse(ev.data)); } catch(e) {} };
+}
+
+async function loadEvents() {
+  const r = await api('/api/v1/events');
+  if (!r.ok) return;
+  const evs = await r.json();
+  $('s_events').textContent = evs.map(e =>
+    new Date(e.time*1000).toLocaleString() + ' [' + e.level + '] ' + e.source + ': ' + e.message
+  ).join('\n') || '(no events yet)';
+  setTimeout(loadEvents, 10000);
+}
+
+async function loadConfig() {
+  const r = await api('/api/v1/config');
+  if (r.ok) $('s_cfg').textContent = JSON.stringify(await r.json(), null, 2);
+}
+
+async function doWalk() {
+  $('walk_msg').textContent = ' running…';
+  const r = await api('/api/v1/walk', {method:'POST'});
+  const j = await r.json().catch(() => ({}));
+  $('walk_msg').textContent = r.ok ? ' started — result in Raw registers (slave_walk) and Events.' : (' ' + (j.error || r.status));
+}
+
+async function cmd(c, args) {
+  const r = await api('/api/v1/cmd', {method:'POST', body: JSON.stringify({cmd: c, args: args || {}})});
+  const j = await r.json().catch(() => ({}));
+  const msg = $('msg');
+  msg.className = r.ok ? '' : 'err';
+  msg.textContent = r.ok ? (j.result || 'ok') : (j.error || ('HTTP ' + r.status));
+  setTimeout(() => { msg.textContent = ''; }, 6000);
+}
+
+function applyPolicy() {
+  cmd('set_mode', {mode: $('p_mode').value});
+  cmd('set_charge_limit', {watts: parseInt($('p_charge').value || '0')});
+  cmd('set_discharge_limit', {watts: parseInt($('p_discharge').value || '0')});
+  cmd('set_reserve', {percent: parseFloat($('p_reserve').value || '20')});
+}
+
+function doRollback() {
+  if (confirm('Restore the pre-write register snapshot?')) cmd('rollback');
+}
+
+boot();
+</script>
+</body>
+</html>

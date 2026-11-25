@@ -1,0 +1,9 @@
+# Cross-build for the Power Core 2.0 (i.MX6 ULL, ARMv7) as a fully static
+# binary. Requires: rustup target add armv7-unknown-linux-gnueabihf
+# and apt install gcc-arm-linux-gnueabihf.
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+CC_armv7_unknown_linux_gnueabihf = "arm-linux-gnueabihf-gcc"
