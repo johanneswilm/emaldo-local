@@ -151,17 +151,19 @@
       <table id="cfg_solar_strings"><tr><th>name</th><th>panels</th><th>Wp</th><th>tilt°</th><th>az°</th><th>bifacial</th><th></th></tr></table>
       <button class="ghost" onclick="addSolarString()">+ add string</button>
 
-      <h3>Battery / CAN</h3>
+      <h3>Battery / hardware</h3>
       <div class="row">
+        <div><label>Hardware profile</label><select id="cfg_profile"><option value="powercore2">Power Core 2.0</option></select></div>
         <div><label>Reserve (%)</label><input id="cfg_reserve" type="number" value="20"></div>
-        <div><label>Opt: capacity (Wh)</label><input id="cfg_opt_cap" type="number" value="0"></div>
         <div><label>Opt: min spread (EUR/kWh)</label><input id="cfg_opt_spread" type="number" step="0.005" value="0.03"></div>
         <div><label>Opt: round-trip eff</label><input id="cfg_opt_eta" type="number" step="0.01" value="0.9"></div>
         <div><label>Opt: max SOC (%)</label><input id="cfg_opt_max" type="number" value="100"></div>
-        <div><label>CAN listen</label><select id="cfg_can"><option value="true">on</option><option value="false">off</option></select></div>
-        <div><label>CAN iface</label><input id="cfg_can_iface" placeholder="can0"></div>
+        <div><label>CAN listen (BMS)</label><select id="cfg_can"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>Grid meter</label><select id="cfg_meter"><option value="true">on</option><option value="false">off</option></select></div>
         <div><label>Poll interval (s)</label><input id="cfg_poll" type="number" value="5"></div>
       </div>
+      <p class="mut">Ports, baud, slave ids and sysfs paths are fixed by the profile;
+      only change the profile for a different model.</p>
 
       <h3>Display</h3>
       <div class="row">
@@ -328,12 +330,12 @@ async function loadConfig() {
   renderSolarStrings(so.strings || []);
   $('cfg_reserve').value = po.reserve_percent ?? 20;
   const op = po.optimizer || {};
-  $('cfg_opt_cap').value = op.capacity_wh ?? 0;
   $('cfg_opt_spread').value = op.min_spread_eur_kwh ?? 0.03;
   $('cfg_opt_eta').value = op.round_trip_eff ?? 0.9;
   $('cfg_opt_max').value = op.max_soc_percent ?? 100;
+  $('cfg_profile').value = hw.profile || 'powercore2';
   $('cfg_can').value = String(!!hw.can_listen);
-  $('cfg_can_iface').value = hw.can_iface || 'can0';
+  $('cfg_meter').value = String(!!hw.meter_enabled);
   $('cfg_poll').value = hw.poll_interval_secs ?? 5;
   $('cfg_device_name').value = dv.name || 'Power Core';
   $('cfg_display').value = String(hw.display_enabled !== false);
@@ -402,12 +404,14 @@ async function saveSettings() {
   const pol = c.policy || {};
   pol.reserve_percent = n('cfg_reserve', 20);
   pol.optimizer = Object.assign(pol.optimizer || {}, {
-    capacity_wh: n('cfg_opt_cap', 0), min_spread_eur_kwh: n('cfg_opt_spread', 0.03),
+    capacity_wh: (c.policy && c.policy.optimizer && c.policy.optimizer.capacity_wh) || 0,
+    min_spread_eur_kwh: n('cfg_opt_spread', 0.03),
     round_trip_eff: n('cfg_opt_eta', 0.9), max_soc_percent: n('cfg_opt_max', 100),
   });
   c.policy = pol;
   c.hardware = Object.assign(c.hardware || {}, {
-    can_listen: b('cfg_can'), can_iface: $('cfg_can_iface').value,
+    profile: $('cfg_profile').value,
+    can_listen: b('cfg_can'), meter_enabled: b('cfg_meter'),
     poll_interval_secs: n('cfg_poll', 5), display_enabled: b('cfg_display'),
   });
   c.device = Object.assign(c.device || {}, { name: $('cfg_device_name').value });

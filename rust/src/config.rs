@@ -52,6 +52,13 @@ pub struct WebConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HardwareConfig {
+    /// Hardware profile supplying the fixed ports/baud/slaves/sysfs for a
+    /// known model. "powercore2" (default) = the live HiSolar unit:
+    /// inverters USB3/USB0/USB2 @9600 slave 1, b-sensor USB1 @9600 slave 1,
+    /// MCU sysfs /sys/class/mcu/mcu1, CAN can0. Explicit fields below still
+    /// override the profile.
+    #[serde(default = "default_profile")]
+    pub profile: String,
     #[serde(default = "default_serial_port")]
     pub serial_port: String,
     #[serde(default = "default_baud")]
@@ -499,9 +506,83 @@ impl Default for WebConfig {
     }
 }
 
+/// Fixed values for a known model. Returns None for unknown profiles.
+fn profile_fixed(profile: &str) -> Option<ProfileFixed> {
+    match profile {
+        "powercore2" | "" => Some(ProfileFixed {
+            inverter_ports: vec![
+                "/dev/ttyCH9344USB3".into(), // A
+                "/dev/ttyCH9344USB0".into(), // B
+                "/dev/ttyCH9344USB2".into(), // C
+            ],
+            baud: 9600,
+            inv_slave: 1,
+            mcu_sysfs: "/sys/class/mcu/mcu1".into(),
+            meter_port: "/dev/ttyCH9344USB1".into(),
+            meter_baud: 9600,
+            meter_slave: 1,
+            can_iface: "can0".into(),
+        }),
+        _ => None,
+    }
+}
+
+pub struct ProfileFixed {
+    pub inverter_ports: Vec<String>,
+    pub baud: u32,
+    pub inv_slave: u8,
+    pub mcu_sysfs: String,
+    pub meter_port: String,
+    pub meter_baud: u32,
+    pub meter_slave: u8,
+    pub can_iface: String,
+}
+
+impl HardwareConfig {
+    /// Apply the profile's fixed values where the user left the defaults.
+    /// Explicit non-default values always win. Idempotent.
+    pub fn resolve(&mut self) {
+        let Some(fx) = profile_fixed(&self.profile) else {
+            return;
+        };
+        if self.inverter_ports.is_empty() {
+            self.inverter_ports = fx.inverter_ports.clone();
+            if self.serial_port == default_serial_port() {
+                self.serial_port = fx.inverter_ports[0].clone();
+            }
+        }
+        if self.serial_baud == default_baud() {
+            self.serial_baud = fx.baud;
+        }
+        if self.inverter_slave_id == default_inv_slave() {
+            self.inverter_slave_id = fx.inv_slave;
+        }
+        if self.mcu_sysfs == default_mcu_sysfs() {
+            self.mcu_sysfs = fx.mcu_sysfs;
+        }
+        if self.meter_port == default_meter_port() {
+            self.meter_port = fx.meter_port;
+        }
+        if self.meter_baud == default_meter_baud() {
+            self.meter_baud = fx.meter_baud;
+        }
+        if self.meter_slave == default_meter_slave() {
+            self.meter_slave = fx.meter_slave;
+        }
+        if self.can_iface == default_can_iface() {
+            self.can_iface = fx.can_iface;
+        }
+    }
+}
+
+fn default_profile() -> String {
+    "powercore2".into()
+}
+
 impl Default for HardwareConfig {
     fn default() -> Self {
-        HardwareConfig {
+        let mut hw = HardwareConfig {
+            profile: default_profile(),
             serial_port: default_serial_port(),
             serial_baud: default_baud(),
             inverter_slave_id: default_inv_slave(),
@@ -526,7 +607,9 @@ impl Default for HardwareConfig {
             meter_interval_secs: default_meter_interval(),
             framebuffer: default_fb(),
             display_enabled: true,
-        }
+        };
+        hw.resolve();
+        hw
     }
 }
 
@@ -551,13 +634,50 @@ pub struct Store {
     path: PathBuf,
 }
 
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn powercore2_fills_fixed_values() {
+        let hw = HardwareConfig::default();
+        assert_eq!(hw.profile, "powercore2");
+        assert_eq!(
+            hw.inverter_ports,
+            vec!["/dev/ttyCH9344USB3", "/dev/ttyCH9344USB0", "/dev/ttyCH9344USB2"]
+        );
+        assert_eq!(hw.serial_baud, 9600);
+        assert_eq!(hw.inverter_slave_id, 1);
+        assert_eq!(hw.meter_port, "/dev/ttyCH9344USB1");
+        assert_eq!(hw.can_iface, "can0");
+    }
+
+    #[test]
+    fn explicit_override_wins() {
+        let mut hw = HardwareConfig::default();
+        hw.inverter_ports = vec!["/tmp/ttyW".into()];
+        hw.resolve(); // must not clobber the explicit single-port bench setup
+        assert_eq!(hw.inverter_ports, vec!["/tmp/ttyW"]);
+    }
+
+    #[test]
+    fn unknown_profile_ignored() {
+        let mut hw = HardwareConfig::default();
+        hw.profile = "mystery".into();
+        hw.inverter_ports.clear();
+        hw.resolve();
+        assert!(hw.inverter_ports.is_empty());
+    }
+}
+
 impl Store {
     pub fn load(path: &Path) -> Result<Arc<Store>, String> {
-        let cfg = match fs::read_to_string(path) {
+        let mut cfg: Config = match fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
+        cfg.hardware.resolve();
         Ok(Arc::new(Store {
             inner: RwLock::new(cfg),
             path: path.to_path_buf(),
