@@ -48,6 +48,18 @@ pub fn ymd_to_unix_days(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// `YYYY-MM-DD` for the UTC instant `ts` shifted by `local_offset_secs`.
+/// Parse "YYYY-MM-DD" to days-since-epoch (UTC). None if malformed.
+pub fn ymd_to_unix_days_from_str(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let m: i64 = s.get(5..7)?.parse().ok()?;
+    let d: i64 = s.get(8..10)?.parse().ok()?;
+    Some(ymd_to_unix_days(y, m, d))
+}
+
 pub fn date_string(ts: i64, local_offset_secs: i64) -> String {
     let (y, m, d) = unix_to_ymd(ts + local_offset_secs);
     format!("{y:04}-{m:02}-{d:02}")
@@ -85,6 +97,14 @@ mod tests {
         // round-trip a leap day
         let d = ymd_to_unix_days(2024, 2, 29);
         assert_eq!(unix_to_ymd(d * 86400), (2024, 2, 29));
+    }
+
+    #[test]
+    fn ymd_str_parse() {
+        assert_eq!(ymd_to_unix_days_from_str("1970-01-01"), Some(0));
+        assert_eq!(ymd_to_unix_days_from_str("2026-11-25"), Some(1795564800 / 86400));
+        assert_eq!(ymd_to_unix_days_from_str("2026-11-25x"), None);
+        assert_eq!(ymd_to_unix_days_from_str("bogus"), None);
     }
 
     #[test]
