@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const CAN_EFF_FLAG: u32 = 0x8000_0000;
+pub(crate) const CAN_EFF_FLAG: u32 = 0x8000_0000;
 const AF_CAN: libc::c_int = 29;
 const CAN_RAW: libc::c_int = 1;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
@@ -41,12 +41,12 @@ struct IfReq {
     data: [u8; 24],
 }
 
-struct CanSocket {
+pub(crate) struct CanSocket {
     fd: libc::c_int,
 }
 
 impl CanSocket {
-    fn open(iface: &str) -> Result<CanSocket, String> {
+    pub(crate) fn open(iface: &str) -> Result<CanSocket, String> {
         let fd = unsafe { libc::socket(AF_CAN, libc::SOCK_RAW, CAN_RAW) };
         if fd < 0 {
             return Err(format!("socket(AF_CAN): {}", std::io::Error::last_os_error()));
@@ -72,7 +72,7 @@ impl CanSocket {
         Ok(sock)
     }
 
-    fn recv(&self, timeout: Duration) -> Result<Option<(u32, Vec<u8>)>, String> {
+    pub(crate) fn recv(&self, timeout: Duration) -> Result<Option<(u32, Vec<u8>)>, String> {
         let mut pfd = libc::pollfd {
             fd: self.fd,
             events: libc::POLLIN,
@@ -103,6 +103,24 @@ impl CanSocket {
         let id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         let dlc = (buf[4] as usize).min(8);
         Ok(Some((id, buf[8..8 + dlc].to_vec())))
+    }
+}
+
+impl CanSocket {
+    /// Send one extended CAN frame (DIN packing). `data` <= 8 bytes (one page).
+    pub(crate) fn send(&self, can_id: u32, data: &[u8]) -> Result<(), String> {
+        let mut buf = [0u8; 16];
+        buf[..4].copy_from_slice(&can_id.to_le_bytes());
+        let dlc = data.len().min(8);
+        buf[4] = dlc as u8;
+        buf[8..8 + dlc].copy_from_slice(&data[..dlc]);
+        let n = unsafe {
+            libc::send(self.fd, buf.as_ptr() as *const libc::c_void, 16, 0)
+        };
+        if n < 0 {
+            return Err(format!("send: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
 }
 

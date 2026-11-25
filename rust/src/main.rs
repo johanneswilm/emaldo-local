@@ -15,6 +15,7 @@
 mod bms;
 mod bus;
 mod can;
+mod can_poll;
 mod commands;
 mod config;
 mod control;
@@ -89,6 +90,7 @@ fn main() {
     let mut mcu_raw_dump: Option<u64> = None;
     let mut can_iface: Option<String> = None;
     let mut can_seconds = 5u64;
+    let mut can_poll = false;
     let mut rs485_probe = false;
     let mut rs485_ports: Option<String> = None;
     let mut rs485_bauds: Option<String> = None;
@@ -132,6 +134,7 @@ fn main() {
             }
             "--no-mcu-registers" => no_mcu_registers = true,
             "--can-probe" => can_probe = true,
+            "--can-poll" => can_poll = true,
             "--rs485-probe" => rs485_probe = true,
             "--rs485-ports" => {
                 if let Some(v) = args.get(i + 1) {
@@ -191,7 +194,7 @@ fn main() {
             }
             other => {
                 eprintln!(
-                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver [--config PATH] --switches-probe\n       emaldo-driver --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
+                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --can-poll [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver [--config PATH] --switches-probe\n       emaldo-driver --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
                 );
                 std::process::exit(2);
             }
@@ -466,6 +469,24 @@ fn main() {
             }
         }
     }
+    if can_poll {
+        let c = store.get();
+        match can_poll::probe(&c.hardware.can_iface, can_seconds.max(2)) {
+            Ok(bats) => {
+                let out = serde_json::json!({
+                    "iface": c.hardware.can_iface,
+                    "batteries": bats,
+                });
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+                return;
+            }
+            Err(e) => {
+                eprintln!("can poll: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if can_probe {
         let cfg = store.get();
         match can::probe(
