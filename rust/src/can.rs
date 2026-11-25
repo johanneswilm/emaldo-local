@@ -538,6 +538,7 @@ fn listen_loop(iface: &str, telem: &TelemStore) -> Result<(), String> {
                 s.can.messages = messages;
                 s.can.batteries = list.clone();
                 apply_bank(&mut s.battery, &list);
+                crate::telemetry::derive_load(s);
             });
             last_pub = Instant::now();
         }

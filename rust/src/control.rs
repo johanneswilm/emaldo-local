@@ -338,18 +338,40 @@ impl Controller {
         }
         let cfg = self.cfg.get();
         let slave = cfg.hardware.inverter_slave_id;
-        let timeout = Duration::from_millis(2000);
+        // The inverter answers a block read far more reliably than a burst of
+        // single reads (single reads of 0x0FD8 timed out live). Snapshot the
+        // contiguous 0x0FD3..0x0FE0 span in one FC03, then 0x0FF6 separately.
+        let timeout = Duration::from_millis(3000);
         let mut snap = serde_json::Map::new();
+        let blk_start: u16 = 0x0FD3;
+        let blk_len: u16 = 0x0FE0 - 0x0FD3 + 1; // 14 registers
+        let blk = self
+            .bus
+            .read_holding(slave, blk_start, blk_len, timeout)
+            .map_err(|e| format!("read block {blk_start:#06x}..: {e}"))?;
+        if (blk.len() as u16) < blk_len * 2 {
+            return Err(format!("short block read: {}B", blk.len()));
+        }
+        let words: Vec<u16> = blk.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
         for spec in HS_WRITABLE {
-            let b = self
-                .bus
-                .read_holding(slave, spec.addr, 1, timeout)
-                .map_err(|e| format!("read {:#06x}: {e}", spec.addr))?;
-            if b.len() < 2 {
-                return Err(format!("short read on {:#06x}", spec.addr));
+            if spec.addr >= blk_start && spec.addr < blk_start + blk_len {
+                let v = words[(spec.addr - blk_start) as usize];
+                snap.insert(format!("{:#06x}", spec.addr), serde_json::Value::from(v));
+            } else {
+                // Outside the block (e.g. 0x0FF6, boost — HS_1_5 only, absent
+                // on plain HS). A timeout/short read here is not fatal: record
+                // 0 and continue so a missing optional register never blocks
+                // the snapshot (and therefore all writes).
+                match self.bus.read_holding(slave, spec.addr, 1, timeout) {
+                    Ok(b) if b.len() >= 2 => {
+                        let v = u16::from_be_bytes([b[0], b[1]]);
+                        snap.insert(format!("{:#06x}", spec.addr), serde_json::Value::from(v));
+                    }
+                    _ => {
+                        snap.insert(format!("{:#06x}", spec.addr), serde_json::Value::from(0u16));
+                    }
+                }
             }
-            let v = u16::from_be_bytes([b[0], b[1]]);
-            snap.insert(format!("{:#06x}", spec.addr), serde_json::Value::from(v));
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(snap))
             .map_err(|e| e.to_string())?;

@@ -209,6 +209,20 @@ pub struct Event {
     pub message: String,
 }
 
+/// Fill `state.load` from the energy balance when there is no direct inverter
+/// load reading (0): household consumption = PV + grid(net,+import) − battery
+/// (+charge ⇒ subtract, discharging ⇒ add). Call after battery or grid
+/// updates so both are current.
+pub fn derive_load(st: &mut State) {
+    if st.load.net_w != 0.0 {
+        return; // direct reading wins
+    }
+    let inv = st.pv.power_w + st.grid.net_w - st.battery.power_w;
+    if inv.abs() > 1.0 {
+        st.load.net_w = inv;
+    }
+}
+
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

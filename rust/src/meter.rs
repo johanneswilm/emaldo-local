@@ -220,8 +220,9 @@ fn publish(telem: &crate::telemetry::Store, c: &Counters, r: &MeterReading) {
         if st.grid.import_w == 0.0 && st.grid.export_w == 0.0 {
             st.grid.import_w = r.import_w as f64;
             st.grid.export_w = r.export_w as f64;
-            st.grid.net_w = r.total_w as f64;
+            st.grid.net_w = if r.total_reg_w != 0 { r.total_reg_w as f64 } else { r.total_w as f64 };
         }
+        crate::telemetry::derive_load(st);
     });
 }
 
