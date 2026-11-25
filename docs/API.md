@@ -578,7 +578,7 @@ Known Actions:
 
 ### E2E / MSCT Protocol (BMT devices)
 
-BMT devices use a custom **E2E (end-to-end) protocol** with **MSCT binary framing over raw UDP** for real-time command/control. **Corrected from earlier analysis:** the protocol does NOT use KCP — it's plain MSCT messages sent as UDP datagrams directly. This was confirmed via packet capture from the real Android app.
+BMT devices use a custom **E2E (end-to-end) protocol** with **MSCT binary framing over raw UDP** for real-time command/control. The protocol does not use KCP: it is plain MSCT messages sent as UDP datagrams directly (confirmed via packet capture from the real Android app).
 
 #### Step 1: E2E Login (two endpoints)
 
@@ -640,9 +640,9 @@ Host: api.emaldo.com
 
 The BMT endpoint returns per-device credentials. Each session generates fresh `end_id`, `end_secret`, and `chat_secret` values.
 
-#### Step 2: KCP Connection
+#### Step 2: UDP Transport
 
-The app connects via UDP to `e2e2.emaldo.com:1050` (35.187.68.18) using the KCP protocol.
+The app connects via UDP to `e2e2.emaldo.com:1050` (35.187.68.18).
 
 **Protocol stack (confirmed via packet capture):**
 ```
@@ -655,11 +655,11 @@ Transport: Raw UDP datagrams (NO KCP framing)
 Network: UDP to e2e2.emaldo.com:1050 (35.187.68.18)
 ```
 
-**Key correction:** Despite the APK containing KCP code, the actual BMT proxy communication uses **raw MSCT over UDP** — each MSCT message is a single UDP datagram. KCP is only used for P2P/LAN direct connections, not the proxy relay.
+Despite the APK containing KCP code, the actual BMT proxy communication uses **raw MSCT over UDP** — each MSCT message is a single UDP datagram. KCP is only used for P2P/LAN direct connections, not the proxy relay.
 
 #### Step 3: MSCT Message Layer
 
-On top of KCP, the app uses a custom binary protocol called MSCT (Message Secure Communication Transport).
+On top of raw UDP, the app uses a custom binary protocol called MSCT (Message Secure Communication Transport).
 
 **MSCT message format:**
 
@@ -916,8 +916,8 @@ The Paho MQTT library (`org.eclipse.paho.client.mqttv3`) is bundled in the APK b
 |---------|-----|----------|
 | API server | `api.emaldo.com` | HTTPS (REST) |
 | Stats server | `dp.emaldo.com` | HTTPS (REST) |
-| E2E relay | `e2e2.emaldo.com:1050` | KCP (UDP) |
-| E2E util | `e2e2.emaldo.com:1051` | KCP (UDP) |
+| E2E relay | `e2e2.emaldo.com:1050` | MSCT over raw UDP |
+| E2E util | `e2e2.emaldo.com:1051` | MSCT over raw UDP |
 | DNS-over-HTTPS | `doh.emaldo.com` | HTTPS |
 | Static content | `s.emaldo.com` | HTTPS |
 | Language files | `local.dinsafer.com` | HTTP |

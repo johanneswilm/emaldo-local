@@ -101,6 +101,12 @@ Consequences for `internal/bled`:
 
 ## Reproducing
 
+The firmware image itself lives outside this repo (see
+`~/src/homeassistant/emaldo-capture/firmware`). Equivalent RE helpers that
+ship here are `scripts/pclntab_dump.py`, `scripts/strrefs.py` and
+`scripts/callgraph.py`; the lab's `gopcln.py`/`godis.py` snippets below are
+kept for reference (not in this tree):
+
 ```sh
 python3 tools/firmware/gopcln.py 6102ea751f963eea.bin list bluetooth
 python3 tools/firmware/godis.py  6102ea751f963eea.bin func 'ble.newService' --limit 1

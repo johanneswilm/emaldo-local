@@ -1,12 +1,20 @@
+# Changelog
+
+Dated entries, newest first. This is a chronological log of changes; for the
+current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
+`PROTOCOL.md`, …) and `driver/README.md`.
+
+---
+
 # Display refresh: vendor uses fb fsync/msync, not an ioctl
 
-Fix for ISSUES #1 (panel blank after takeover). RE of `app.bin`
-`internal/display/abi` shows the vendor never issues an fb ioctl: it maps
-`/dev/fb0` and its only update call is `mappedFramebuffer.Sync` =
+Fix for ISSUES #1 (panel blank when only our renderer drives `/dev/fb0`). RE of
+`app.bin` `internal/display/abi` shows the vendor never issues an fb ioctl: it
+maps `/dev/fb0` and its only update call is `mappedFramebuffer.Sync` =
 `os.(*File).Sync` after each frame. `driver/src/display.rs` now `msync(MS_SYNC)`s
 the written mapping on the live char device and skips it on the emulator's
 regular-file backend; the old no-op `FBIOPUT_VSCREENINFO` guess is gone. Two
-new unit tests (71 total). Still needs a live check, with the strace/modinfo
+new unit tests (71 total). Needs a live check, with the strace/modinfo
 experiment recorded in `docs/ISSUES.md` #1 if the panel stays dark.
 
 ---
@@ -33,7 +41,7 @@ code touched, nothing validated on hardware.**
   (`CanSetBaudRateSocket`, `can_restart_ms`, `can_check_interval`). Modbus RTU
   covers the polled registers; CAN is the plausible fast-control path for FCR
   and power setpoints. Frame format still unknown.
-- `docs/IMPLEMENTATION_MAP.md` — BLE section now records the recovered profile
+- (takeover-repo `IMPLEMENTATION_MAP.md`) — BLE section now records the recovered profile
   shape and the two config keys (`ble_service_uuid`, `no_ble_crypto`) that
   make "fixed key/IV" a default rather than a constant; FCR section notes the
   CAN transport; OTA section records the vendor force semantics.
@@ -105,7 +113,7 @@ three reads:
 ### Docs
 - `docs/REGISTERS.md` is replaced with the full register map recovered from
   the firmware.
-- The hardware section of `docs/IMPLEMENTATION_MAP.md` is corrected.
+- The hardware section of the takeover-repo `IMPLEMENTATION_MAP.md` is corrected.
 
 ### `internal/hermes/reader_test.go` (new)
 Checks the decoding of both blocks, short or truncated replies, error replies,
