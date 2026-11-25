@@ -30,6 +30,13 @@ what they give up, and in how ready they are.
 > ~31 MB, *not* in this repo) is your rollback image — back it up offline.
 > License: GPL-3.0-only (see `LICENSE`).
 
+## Credits
+
+This project builds on the community's Home Assistant work — notably
+[pylenius/ha-emaldo](https://github.com/pylenius/ha-emaldo) and
+[wertigpar/ha-battery-optimizer](https://github.com/wertigpar/ha-battery-optimizer).
+See [CREDITS.md](CREDITS.md).
+
 ## Access & isolation
 
 How to get **SSH access** to a Power Core module, **persist** it, and **shut
