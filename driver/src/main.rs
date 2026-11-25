@@ -532,6 +532,7 @@ fn main() {
                 c.prices.currency.clone(),
                 c.prices.tz_offset_secs,
                 c.prices.refresh_secs,
+                c.paths.price_cache_days,
                 telem.clone(),
             );
         }
@@ -578,10 +579,20 @@ fn main() {
         );
         return;
     }
-    let state_dir = cfg_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    // State dir: config's own `[paths] state_dir` if set, else next to the
+    // config file. Keeps logs/journal/caches/certs/id out of /root.
+    let state_dir = {
+        let sd = store.get().paths.state_dir;
+        if sd.is_empty() {
+            cfg_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            PathBuf::from(sd)
+        }
+    };
+    let _ = std::fs::create_dir_all(&state_dir);
     let dev_id = device_id(&state_dir);
     let bus = bus::Bus::new();
     // Single write controller for the whole process (its worker thread
@@ -743,6 +754,7 @@ fn main() {
             cfg0.prices.currency.clone(),
             cfg0.prices.tz_offset_secs,
             cfg0.prices.refresh_secs,
+            cfg0.paths.price_cache_days,
             telem.clone(),
         );
     }

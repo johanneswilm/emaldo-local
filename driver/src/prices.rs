@@ -188,11 +188,48 @@ pub fn day(
 
 /// Refresh today (+ tomorrow when published) into one `Prices` object.
 /// `offset_secs` is the local UTC offset used to key delivery days.
+/// Delete per-day price cache files (`prices-<area>-YYYY-MM-DD.json`) whose
+/// date is older than `keep_days` relative to `today`. The `-latest.json`
+/// combined view is never touched. Best-effort.
+pub fn prune_cache(dir: &Path, area: &str, today: &str, keep_days: u64) {
+    let prefix = format!("prices-{area}-");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let today_days = crate::timectl::ymd_to_unix_days_from_str(today);
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(&prefix) || !name.ends_with(".json") || name.contains("latest") {
+            continue;
+        }
+        // extract the date part between prefix and ".json"
+        let date = &name[prefix.len()..name.len() - 5];
+        if let Some(file_days) = crate::timectl::ymd_to_unix_days_from_str(date) {
+            if let Some(td) = today_days {
+                if td - file_days > keep_days as i64 {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+}
+
 pub fn refresh(
     dir: &Path,
     area: &str,
     currency: &str,
     offset_secs: i64,
+    mut fetcher: impl FnMut(&str) -> Result<String, String>,
+) -> Result<Prices, String> {
+    refresh_keep(dir, area, currency, offset_secs, 3, &mut fetcher)
+}
+
+/// Like `refresh` but with an explicit price-cache retention in days.
+pub fn refresh_keep(
+    dir: &Path,
+    area: &str,
+    currency: &str,
+    offset_secs: i64,
+    keep_days: u64,
     mut fetcher: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<Prices, String> {
     let now = timectl::now_unix();
@@ -223,6 +260,8 @@ pub fn refresh(
     out.slots = slots;
     // Persist the combined view for fast reload.
     store_cached(&dir.join(format!("prices-{area}-latest.json")), &out);
+    // Housekeeping: drop per-day cache files older than a few days.
+    prune_cache(dir, area, &today, keep_days);
     Ok(out)
 }
 
@@ -304,7 +343,17 @@ pub fn refresh_live(
     currency: &str,
     offset_secs: i64,
 ) -> Result<Prices, String> {
-    refresh(dir, area, currency, offset_secs, |url| {
+    refresh_live_keep(dir, area, currency, offset_secs, 3)
+}
+
+pub fn refresh_live_keep(
+    dir: &Path,
+    area: &str,
+    currency: &str,
+    offset_secs: i64,
+    keep_days: u64,
+) -> Result<Prices, String> {
+    refresh_keep(dir, area, currency, offset_secs, keep_days, |url| {
         let rest = url
             .split_once("://")
             .map(|(_, r)| r)
@@ -324,6 +373,7 @@ pub fn start(
     currency: String,
     offset: i64,
     refresh_secs: u64,
+    keep_days: u64,
     telem: std::sync::Arc<crate::telemetry::Store>,
 ) {
     std::thread::Builder::new()
@@ -335,7 +385,7 @@ pub fn start(
                 if delay > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(delay.min(300)));
                 }
-                match refresh_live(&dir, &area, &currency, offset) {
+                match refresh_live_keep(&dir, &area, &currency, offset, keep_days) {
                     Ok(p) => {
                         publish(&telem, &p, offset);
                         telem.add_event("info", "prices", format!(
@@ -402,6 +452,22 @@ mod tests {
       ]}"#;
 
     #[test]
+    fn prune_cache_removes_old_day_files() {
+        let dir = std::env::temp_dir().join(format!("np-prune-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for d in ["2026-11-20", "2026-11-24", "2026-11-25"] {
+            std::fs::write(dir.join(format!("prices-SE4-{d}.json")), "{}").unwrap();
+        }
+        std::fs::write(dir.join("prices-SE4-latest.json"), "{}").unwrap();
+        prune_cache(&dir, "SE4", "2026-11-25", 3);
+        assert!(!dir.join("prices-SE4-2026-11-20.json").exists()); // 5 days old → gone
+        assert!(dir.join("prices-SE4-2026-11-24.json").exists());   // 1 day old → kept
+        assert!(dir.join("prices-SE4-2026-11-25.json").exists());   // today → kept
+        assert!(dir.join("prices-SE4-latest.json").exists());       // never pruned
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn parse_and_filter_area() {
         let (v, slots) = parse_day(SAMPLE, "SE4").unwrap();
         assert_eq!(v, Some(3));
@@ -438,8 +504,10 @@ mod tests {
     fn refresh_uses_fetcher_and_handles_missing_tomorrow() {
         let dir = std::env::temp_dir().join(format!("np-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+        // Make "tomorrow" relative to the clock so the test is date-stable.
+        let tomorrow = crate::timectl::date_string(crate::timectl::now_unix() + 86400, 3600);
         let p = refresh(&dir, "SE4", "EUR", 3600, |url| {
-            if url.contains("date=2026-11-26") {
+            if url.contains(&format!("date={tomorrow}")) {
                 Err("http: 400".into())
             } else {
                 Ok(SAMPLE.to_string())

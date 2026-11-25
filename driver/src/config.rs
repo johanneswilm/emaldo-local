@@ -406,6 +406,24 @@ impl Default for SolarConfig {
     }
 }
 
+/// Where the driver keeps its mutable state (logs, journal, caches, TLS, id).
+/// Default: next to the config file. Set this to a dedicated folder to keep
+/// the config directory tidy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PathsConfig {
+    /// Override for all state files. Empty = config file's directory.
+    pub state_dir: String,
+    /// Delete per-day price cache files older than this many days.
+    pub price_cache_days: u64,
+}
+
+impl Default for PathsConfig {
+    fn default() -> Self {
+        Self { state_dir: String::new(), price_cache_days: 3 }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -427,6 +445,8 @@ pub struct Config {
     pub prices: PricesConfig,
     #[serde(default)]
     pub solar: SolarConfig,
+    #[serde(default)]
+    pub paths: PathsConfig,
 }
 
 fn default_true() -> bool {
@@ -631,6 +651,7 @@ impl Default for Config {
             control: ControlConfig::default(),
             prices: PricesConfig::default(),
             solar: SolarConfig::default(),
+            paths: PathsConfig::default(),
         }
     }
 }
