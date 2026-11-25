@@ -1,0 +1,11 @@
+[Unit]
+Description=Emaldo emulator: logging MQTT broker for the sandbox (TLS :8883)
+Before=emaldo.service
+
+[Service]
+ExecStart=/usr/bin/python3 /sandbox/mqtt_broker.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

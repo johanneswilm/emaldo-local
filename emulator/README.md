@@ -84,13 +84,17 @@ and protocol experiments.
   │   ├─ emaldo.service        -> /app/emaldo_iot_fw   (the OFFICIAL app, native ARM)
   │   ├─ sandbox-api.service   -> sandbox_api.py        (fake Emaldo cloud API, TLS :443)
   │   ├─ vcan.service          -> modprobe vcan; can0 up (kernel virtual CAN)
-  │   ├─ fake-bms.service      -> fake_bms.py           (DIN cabinet/BMS on can0)
+  │   ├─ fake-bms.service      -> fake_bms.py + fake_bak.py (cabinets and their BAK batteries on can0)
+  │   ├─ serial-tap.service    -> serial_tap.py         (stand-in /dev/ttymxc2 + /dev/ttyCH9344USB0-7, logged)
+  │   ├─ mcu-sysfs-stub.service -> mcu-sysfs-stub.sh    (/sys/class/mcu/mcu1: inverter switches)
+  │   ├─ spy-sink.service      -> ws_sink.py            (receives the app's decoded readings, /sandbox/spy.out)
   │   ├─ hps-net-state.service -> writes netctl eth0.env state (boot gate #2)
   │   ├─ screen-mcu-stub.service -> screen_state, /dev/mcu1*, backlight overlay (#3)
   │   └─ sshd + serial console on ttyAMA0
   ├─ /root/bin/cabinet         -> REAL canapp binary    (immutable; bridges can0 <-> app)
   ├─ /usr/sbin/{reboot,systemctl,...} -> ONE multi-call stub (tool-stub.sh; #1)
   ├─ /usr/sbin/modprobe        -> modprobe-stub.sh      (#4: fake btusb reload)
+  ├─ /usr/local/sbin/ip        -> ip-vcan.sh            (keeps can0 up: drops "type can ..." on vcan)
   ├─ /opt/vmfb/vmfb.ko         -> fake /dev/fb0 (e-ink capture, see vmfb/)
   ├─ dns-sink.service          -> dnssink.py            sinkhole DNS :53 + DoH front :443 (containment)
   ├─ dnshijack.service         -> dnhijack.py           NAT 1.1.1.1/8.8.8.8:443 -> DoH front
@@ -302,30 +306,686 @@ pokes and the OTA round-trip.
   whole-disk ext4. Guest writes go straight to the image - editing files
   inside the running VM IS persistent.
 
-## DIN CAN wire format (fake_bms.py <-> real canapp)
+## Cabinets and batteries (verified against the running app, v2.35.3)
 
-Reverse-engineered from `dinCanFrameReceiveProc` in the canapp binary. All
-frames are extended ID; **bit 24 (flag) must be 1** on complete frames or the
-receiver buffers them as never-completed fragments:
+Status 2026-11-23: with the pieces below the app discovers the cabinets, takes
+every battery in them as a BAK pack and reads it about twice a second. Checked
+with one internal cabinet of 3 packs plus one external cabinet of 5: the app's
+own debug feed reports `battery/0` ... `battery/7` with the values the fake
+sends (52.64 V, 60 % SoC, 16 cell voltages, six temperatures, cycles, health).
+
+### What the app needs before it talks to anything
+
+- **It must be "configured".** A fresh device sits in the wizard state
+  `Unconfigured` (goroutine `appwizard/staterunners.(*Unconfigured).Run`): it
+  attaches to the cabinet FIFOs but never sends a byte, and the whole
+  peripheral side (`hermes`) is not started. `appdata.IsConfigured` is true
+  when app id, app secret, base URL, cloud token and home id are all
+  non-empty, and all five can be given in `/root/config.toml`
+  (`config.toml.example`).
+- **`/dev/ttymxc2` must exist** (the MCU serial port). Without it the
+  configured app dies in a loop: `failed to create mcu sock: no such file or
+  directory`. `serial_tap.py` puts a pty there.
+- **`/dev/ttyCH9344USB0-3` are not batteries.** The app sends Modbus RTU there
+  (slave 1): ports 0, 2 and 3 get `01 03 0F A4 00 01`, later `0F A0`
+  (1 and 15 words) - three identical devices, i.e. the inverters; port 1 gets
+  registers `0x008D` and `0x0061` (the b-sensor). `serial_tap.py` logs them to
+  `/sandbox/tap.out` and stays silent; the app carries on without replies.
+- **can0 must stay up.** canapp and the app's CAN monitor run
+  `ip link set can0 down` / `ip link set can0 up type can restart-ms 1000` (or
+  `bitrate 500000`). vcan rejects `type can`, the link stays DOWN and the
+  cabinets vanish. `ip-vcan.sh` installed as `/usr/local/sbin/ip` drops those
+  arguments.
+
+### The bus (from canapp's code, confirmed on the wire)
+
+The app never touches CAN. `canapp` (`/root/bin/cabinet -t 2`) bridges can0 to
+FIFOs: `/run/cabinet/<cab>/{in,out}` for a cabinet and
+`/run/cabinet/<cab>/<seat>/{in,out}` for each battery, listed in
+`/run/cabinet/tree`.
 
 ```
-  bits 25-28: type        bit 24: flag (1 = complete, 0 = fragment page)
-  bits 16-23: page (0x01 = single/complete frame)
-  bits  8-15: SOURCE address (cabinet = cab_index << 4)
-  bits  0- 7: destination (only 0x00 and 0xFF are accepted)
+  CAN id:  bits 25-28 type | bit 24 flag | bits 16-23 page | 8-15 source | 0-7 dest
+  address = cabinet << 4 | battery seat (seat 0 = the cabinet); canapp = 0x00
+  canapp only accepts dest 0x00 or 0xFF
+  longer than 8 bytes:  first frame flag 1, page = N (page count)
+                        frames 2..N  flag 0, page = k;  length = (N-1)*8 + last dlc
+  single frame:         flag 1, page 1
 ```
 
-canapp's own poll on the wire: `0x8B0100FF` = type 5, flag 1, page 1, src 0x00,
-dst 0xFF, payload `[0x04]`, every ~2 s. Reply with src = `cab<<4`, dst 0x00:
+| type | direction | meaning |
+|---|---|---|
+| 5 | canapp -> all (`0x8B0100FF`, payload `04`, every 2 s until answered) | discovery |
+| 5 | cabinet -> canapp | `05 mask uuid(8)`; mask **bit 7 = seat 1**, bit 6 = seat 2 ...; cabinet 1 takes seats 1-3, others 1-5 |
+| 7 | both | battery tunnel: raw bytes of `<cab>/<seat>/out` to dest `cab<<4|seat`, replies from that source into `.../in` |
+| 9 | app -> cabinet (Din TLV 2), about 2 per s | status; reply >= 7 bytes `state b1 mask w_hi w_lo t_hi t_lo` |
+| 10 | app -> cabinet (Din TLV 4) | version; reply 24 bytes, three 8-byte strings |
+| 2 | app -> cabinet (Din TLV 3) | set battery status, 2 bytes |
 
-- type 5 (battery-online): payload `[5, batt_mask, uuid...]` - each set bit in
-  `batt_mask` registers battery `cab_bit`. The uuid copy wants len >= 10
-  (impossible on classic CAN); it logs an error but registration still happens.
-- type 9 (status): reply `[1, 0, ...]` = online.
-- type 10 (version): reply 8 version bytes.
+- The old fake used mask `0x07`, which canapp reads as seats 6-8 and rejects -
+  that is why the tree never showed a battery.
+- canapp polls only until the first cabinet answers and then writes the tree
+  **once**; all cabinets have to answer that same poll.
+- **A status reply shorter than 7 bytes panics the app** (`index out of range
+  [5] with length 5` in `peripherals/cabinet.(*Cabinet).ReadData`). State byte:
+  bit 3 = bootloader, else bits 0-1.
+- Toward the app, canapp wraps cabinet replies as `"Din" len(2, BE) T L data
+  xor8`; the app reads at most 48 bytes and wants TLV type = the one it asked.
 
-With that, the real canapp creates `/run/cabinet/{tree,1/in,1/out}` and the app
-attaches within one boot.
+### The battery protocol inside the tunnel (BAK)
+
+`START 00 GROUP LEN payload CHECK 0D`, `CHECK = xor ^ sum8` of everything
+before it. The address byte is always `00`; the CAN address picks the pack.
+The app reads exactly `LEN + 6` bytes per reply (length-prefixed, binary
+safe) - a trailing LF breaks the next reply.
+
+1. `7E 00 33 00 FC 0D`, up to 5 times at 2 s: the type probe
+   (`resolver.ParseBatteryType`). A valid reply **longer than 8 bytes** means
+   BAK; a 2-byte payload is looked up in a table for the other makes.
+2. `7E 00 DC 03 06 00 00 C4 0D`: version string (two frames on CAN).
+3. `7C 00 01 00 00 0D`, about twice a second: basic data, blocks
+   `id n n*u16`: 1 cell mV, 2 current `30000 - mA/10`, 3 SoC x100,
+   4 capacity x100, 5 six temperatures (`degC + 50`), 6 state, 7 cycles,
+   8 pack voltage in 10 mV, 9 health x100, 10 protection.
+4. `7E 00 25 00 F8 0D`, every ~11 s: current-limiting mode (an empty payload
+   is accepted).
+
+State block 6 (10 bytes), mapped by flipping single bits and reading the
+app's decode: all zero = not charging, discharge MOS on;
+`byte[2]` `0x40` charging, `0x80` charging through the limiter, `0x20`
+discharge MOS off, `0x10` ChargeMOS -1, `0x08` LimitingMOS 1;
+`byte[5] 0x10` heat film status 2; `byte[7] 0x20` heat film status 0.
+No single bit of block 10 changes the decoded fields.
+
+### Seeing what the app decoded: the spy feed
+
+`hermes_spy = "ws://127.0.0.1:18765/spy"` in `/root/config.toml` makes the app
+open a websocket and post every peripheral reading as JSON
+(`{"channel":"spy","payload":{"name":"battery/0","cmd":"readdata","data":{...}}}`,
+also `bsensor`). `ws_sink.py` (spy-sink.service) accepts it and appends to
+`/sandbox/spy.out`. This is the only practical window into the app's state:
+module debug logging needs `/etc/hps/logging.toml` whose `modules` field must
+be stored encrypted.
+
+### Knobs
+
+```
+fake-bms.service.d/*.conf:  Environment=BMS_CABINETS=1:3,2:5   # cab:batteries
+                            Environment=BAK_SOC=60 BAK_CURRENT_A=10 ...
+/sandbox/bak_off     pack ids (cab<<4|seat) that stop answering, live
+/sandbox/bak_flags   raw hex for blocks 6 / 10, live
+```
+
+Not emulated: battery history, LIn-mode policy, battery and cabinet firmware
+update, inverters, b-sensor, the MCU.
+
+## Inverters, cloud stage and commands (v2.35.3)
+
+The app drives three inverters over Modbus RTU, slave 1, one per port
+(`/dev/ttyCH9344USB0`, `2`, `3`), with the `hisolar` driver. Two things have to
+exist before it does more than probe them.
+
+**1. A Modbus slave that remembers writes.** `serial_tap.py` answers reads
+itself; choose how with `TAP_MODBUS`:
+
+| Value | Answer |
+|---|---|
+| `zero` (default) | every register reads 0 |
+| `store` | 0 until the app writes a register, then the written value |
+| `addr` | each register reads its own address (for mapping fields) |
+| `file` | values from `/sandbox/tap_regs`, lines `port-substring 0xADDR value`; a value may be an expression, see `tap_regs.example` |
+
+The tap logs a repeated frame only the 1st, 2nd, 100th, 200th ... time, so a
+steady poll shows as `(100x, ...)`, not as many lines.
+
+**2. The MCU's sysfs directory.** The inverter on/off switches are not on
+Modbus. They are files of the vendor mcu driver, `/sys/class/mcu/mcu1/
+inverter_0..2`: the app writes `1` or `0` and reads the first byte back (`1` =
+on). `mcu-sysfs-stub.sh` (unit `mcu-sysfs-stub.service`) creates the directory
+by putting a tmpfs over `/sys/class` and binding the real class directories
+back in. Other attributes it creates because the app names them:
+`mcu_status`, `mcu_version`, `hardware_version`, `inverter_factory`,
+`temperature`, `con_power`, `updata_mode`, `mcu_rst`, `ev_green`, `ev_red`.
+
+What the app does with both in place (per inverter, in order):
+
+| Step | Modbus |
+|---|---|
+| hardware version | read `0x0FA4` x1 |
+| identity / state | read `0x0FA0` x1, `0x0FA0` x15, `0x0FDA` x1 |
+| battery charging voltage | write `0x0FE0`=0, `0x0FDA`=560 (56.0 V), `0x0FE0`=1 |
+| initial data | read `0x0FA0` x43, `0x0FCB` x57, `0x0FD3` x11, `0x0FAF` x18 |
+| control | write `0x0FD3`=1 |
+| powers (`BatchSetPowers`) | write `0x0FD8`..`0x0FDD` = `[0, 3600, 560, 3600, 0, 0]` |
+| second pass, only with the MCU directory | re-read, then write `0x0FD8`=333 and `0x0FDD`=333 |
+
+`0x0FD9` and `0x0FDB` are the maximum powers (the driver rejects values outside
++-3600). With the switches reported on at start, the app writes `0` to all
+three files about 6 s after start and leaves them off.
+
+**Why the inverters were held off: water alarm.** `fake_bms.py` sent 0 in
+the cabinet status reply's water sensor word. Below 620 the app raises error
+`0400` (`Cabinet.ProcessWaterSensorStatus`), switches the inverters off about
+40 s later, stops polling them and remembers that in `/root/db`
+(`invs_ctrl_status`, `global_errors`), so later boots start switched off.
+`0401` is `CabinetHealthCheckFailed`. With a dry sensor (default now) and a
+reset database (`systemctl stop emaldo; rm -rf /root/db/*`) the app writes `1`
+to `inverter_0..2`, polls each inverter about every 0.7 s without stopping, and
+writes power setpoints: `0x0FD8`=`0x0FDD`=533 about 16 s after start, back to 0
+about 40 s later. Error `8003` stays set; it does not stop this.
+
+Inverter registers, from a run with `TAP_MODBUS=addr` (decimal addresses):
+
+| Register | Field in the spy feed |
+|---|---|
+| 4015 | not stored; non-zero sets `AccessToGridEnabled` (probably grid voltage) |
+| 4017 | `PowerOnGrid`, + = from the grid |
+| 4018 | `GridFrequency`, x0.001 Hz |
+| 4020 | `VoltageOnBattery`; non-zero sets `AccessToBatteryEnabled` |
+| 4021 | `CurrentOnBattery` (x100 in the feed) |
+| 4022 | `PowerOnBattery`, stored with the sign inverted (register + = charging) |
+| 4027 | `PowerOnLine` |
+| 4030 | `VoltageOnPV`; non-zero sets `AccessToMPPTEnabled` |
+| 4032 | `PowerOnMPPT` |
+| 4035-4040 | cooler, PV heatsink, boost 1-3, transformer temperatures |
+| 4042 | `VoltageOnBus` |
+
+The 4015 / 4020 / 4030 rows and the signs are read from the driver
+(`hisolar.(*Inverter).parsePowerFromCache`, register = 4000 + byte offset / 2).
+While an "access" flag is off, the app takes that power as 0.
+
+Registers the app writes, by the driver function that writes them:
+
+| Register | Function |
+|---|---|
+| `0x0FD8` | `SetMaximumPower` - the signed setpoint, + = take from the grid |
+| `0x0FD9` | `SetMPPTMaximumPower` |
+| `0x0FDD` | `SetBatteryMaximumPower`, signed |
+| `0x0FD3` | `ToggleAlternatingCurrent` |
+| `0x0FF6` | `ToggleBoost`, only for model `HS_1_5` |
+
+Not mapped: `State`, `FanStatus` (201 in that run), `RealPowerOnMPPT`,
+`IsPVSurplus`. The plant model that makes these registers consistent is in
+"A house around the inverters" below.
+
+### Grid meter (b-sensor), port `/dev/ttyCH9344USB1`
+
+Measured by setting one register at a time and reading the `bsensor` spy
+message:
+
+| Register | Field |
+|---|---|
+| `0x0061`-`0x0063` | `Voltage1..3` |
+| `0x0064`-`0x0066` | `Current1..3` |
+| `0x0067`-`0x0069` | `Power1..3` |
+| `0x006A` | `TotalPower` |
+| `0x0077` | `GridFrequency`, x0.01 Hz |
+| `0x008D`, `0x008E` | voltage and current ratio, read once at start; voltage = reg x `0x008D`, current = reg x `0x008E`, power = reg x both (16-bit wrap) |
+
+A healthy grid for the app: in `/sandbox/tap_regs`,
+`USB1 0x0061 2300` (also `0x0062`, `0x0063`), `USB1 0x0077 5000`,
+`USB1 0x008d 1`, `USB1 0x008e 1`. It decodes as 2300 / 50.01 Hz. This alone
+did not bring the inverters back.
+
+### Other leads
+
+- `/var/log/inverterN_error_<time>.csv`: the app writes one when the fault
+  words in registers 4000-4099 (`0x0FA0`-`0x1003`) are non-zero. Its columns
+  are the raw block and seven decoded fault groups, so it maps fault bits
+  to registers. `TAP_MODBUS=addr` produces one.
+- `inverter_factory` is read by `sidecar.ReadInverterType` and parsed as JSON.
+  It probably selects the inverter make (hisolar / INVT / BST); the stub
+  writes `0`.
+### Cloud stage and the e2e relay
+
+What it took before the app called the sandbox API and kept a relay session:
+
+- **`app_secret` must be 32 bytes** and equal to `APP_SECRET` in
+  `sandbox_api.py`. It is the AES key of every cloud request. With a 33-byte
+  value the app ran, but each cloud call failed before opening a connection.
+  This was the real blocker; the items below were found first.
+- **DNS-over-HTTPS.** The app resolves its link-check name by `POST
+  /dns-query` to `1.1.1.1:443` / `8.8.8.8:443` (local aliases in the jail).
+  `sandbox_api.py` answers with the DNS sink's rules (`doh ...` lines in
+  `/var/log/dns_queries.log`). The sandbox certificate needs `IP:1.1.1.1,
+  IP:8.8.8.8,IP:1.0.0.1,IP:8.8.4.4` and `www.gstatic.com` in its
+  subjectAltName, and the sandbox listens on `0.0.0.0`.
+- **eth0-bound sockets.** Names that resolve to `127.0.0.1` are not reached;
+  the guest's own `10.0.2.15` is. In the guest the probe names, the vendor
+  zone and `/etc/hosts` point at `10.0.2.15` (the repo files still say
+  `127.0.0.1`).
+- **NTP to fixed addresses** (`216.239.35.0/4`, `162.159.200.123`):
+  `ntp_stub.py` / `ntp-stub.service` claims them on eth0 and answers.
+- **Relay keep-alive.** The alive reply carries an AES-CBC body (key =
+  the end's `end_secret`, IV = the request nonce). `e2e_relay.py` used a
+  captured body, which the app cannot decrypt, so it logged in again every
+  10 s. The relay now seals `{"__time":...}` with the device's secret from
+  `sandbox_e2e.json`; the session is stable (alive every 10 s, no re-login).
+  `e2e_relay.py` here is `scripts/e2e_relay.py` with paths from `E2E_BASE`.
+
+Calls seen once it works: `e2e-bmt-login`, `iot-online`, `get-global-config`,
+`get_master_switch`, `get-sync-24h`, `submit-sync-24h`,
+`submit-bmt-low-freq-data`, `insert-bmt-reboot-log-many`,
+`get-latest-ver-url`, `get-default-price-percent`,
+`get-balance-contract-status`, `metrics/auth/*`, `update-region-v2`.
+
+- **Group id length.** The sandbox issued a 34-character `group_id` (32
+  random characters plus `@0`). Real ones are 32 including the `@0`, and e2e
+  clients write them into a fixed 32-byte option, so every command frame was
+  malformed and the app dropped it without a reply. `sandbox_api.py` now issues
+  30 + `@0`; fix an existing `/sandbox/sandbox_e2e.json` by hand.
+- **wake / heartbeat** from the client are forwarded to the device as well as
+  acknowledged by the relay.
+
+### Commanding a charge (works)
+
+`e2e_try.py`, run inside the guest, uses the repo's `emaldo_re.e2e` client
+against the relay on `127.0.0.1:1050`:
+
+```
+python3 /sandbox/e2e_try.py status       # power flow, override slots, battery info
+python3 /sandbox/e2e_try.py charge on    # emergency charge
+python3 /sandbox/e2e_try.py charge off
+python3 /sandbox/e2e_try.py slots 236    # override: discharge while above 20 %
+python3 /sandbox/e2e_try.py slots clear
+python3 /sandbox/e2e_try.py sellback on  # the "sell back to grid" setting
+python3 /sandbox/e2e_try.py sell on 5    # manual selling, 5 kWh (needs sellback on)
+python3 /sandbox/e2e_try.py fuse 25      # main fuse 3x25A (no argument: read it)
+python3 /sandbox/e2e_try.py peak limit 8000   # peak shaving: on|off, limit W, reserve % %
+python3 /sandbox/e2e_try.py raw 0x81     # any command, replies decrypted
+```
+
+Measured: `charge on` is acknowledged, and within 2 s the app writes
+`0x0FD8`=3600 and `0x0FDD`=3600 to each of the three inverters (3.6 kW each).
+`charge off` brings both back to 0 within 1 s. Repeated four times with the
+same result. `status` returns the fake packs' data through the app
+(voltage, current, SOC, temperatures).
+
+### A house around the inverters: load, solar, discharge
+
+Single register values are not enough for the app's control loop: it regulates
+the grid meter to zero, so the meter has to react to the setpoints. In
+`tap_regs` a value may be an expression over registers of any port and
+variables (see the header of `serial_tap.py`), and an `out` line writes a sum
+to a file. `tap_regs.example` uses that to model three inverters, the grid
+meter, a house load and PV; `fake_bak.py` reads the resulting battery power
+from `/sandbox/bak_power` and turns it into pack current.
+
+```
+python3 /sandbox/plant.py PV=1500 LOAD=500     # W per inverter / per phase (PV2=..., LOAD3=... for one)
+WAIT=60 python3 /sandbox/plant_run.py "PV=0 LOAD=500" "PV=1500 LOAD=500"
+```
+
+The model, with S = the setpoint the app writes to `0x0FD8` (signed, W, + =
+take from the grid) and `LINE` = 1 when the load hangs on the inverter's line
+output, 0 when only the grid meter sees it (the app's "additional load"):
+
+| Register | Model |
+|---|---|
+| 4015, 4020 | constants, so the app uses the grid and battery power |
+| 4017 `PowerOnGrid` | `S + LINE x LOAD` (+ = from the grid) |
+| 4022 `PowerOnBattery` | `S + PV` (+ = charging) |
+| 4027 `PowerOnLine` | `LINE x LOAD` |
+| 4032 `PowerOnMPPT` | `PV`; 4030 `VoltageOnPV` is a constant |
+| meter `0x0067`-`0x0069` | reg 4017 + `(1 - LINE) x LOAD`, + = import |
+| battery (`bak_power`) | sum of `S + PV`, W into the packs |
+
+So the line output is treated as passed through from the grid side, and S as
+the power the inverter converts between AC and its battery/PV side. That is
+what the app's reactions fit: with the load on the line output it writes S =
+-load, not 0. It is a model, not a capture from real hardware. S is held
+within the battery limit in `0x0FDD` when both have the same sign (see "Peak
+shaving" below); the measurements in the next table were made before that.
+
+An earlier version had 4017 with the opposite sign and left 4015 and 4020 at
+0. The app then ignored the inverters' grid and battery power, which gave
+wrong figures whenever the load was only on the meter (a load of 200 W
+whatever the real one, solar = battery + 200 W) and a setpoint that hunted
+between two values under a large load.
+
+Measured with it (fake packs at about 70 % SOC, PV and load per inverter /
+phase, power flow as the app reports it over e2e, three phases summed):
+
+| Load on | PV | Load | App writes `0x0FD8` | App's power flow |
+|---|---|---|---|---|
+| - | 0 | 0 | 0 | all 0 |
+| line output | 0 | 500 | -500 | battery 1500 discharging, other load 1500, grid 0 |
+| line output | 1500 | 500 | -500 | solar 4500, battery 3000 charging, other load 1500, grid 0 |
+| meter only | 0 | 500 | -500 | battery 1500 discharging, additional load 1500, grid 0 |
+| meter only | 1500 | 500 | -500 | solar 4500, battery 3000 charging, additional load 1500, grid 0 |
+| meter only | 1500 | 2500 | -2500 | solar 4500, battery 3000 discharging, additional load 7500, grid 0 |
+| meter only | 1500 | 500, `charge on` | 3600 | solar 4500, battery 15300 charging, grid 12300 import |
+
+So solar input works in both layouts: the app sees the PV power, covers the
+load from it and charges the battery with the rest. The last row shows the
+missing battery limit: a real inverter would not put 5.1 kW into the battery.
+
+Discharge on command, measured earlier on a simpler model (packs at 100 %,
+load visible only on the grid meter as 1 kW import per phase):
+
+- no override: the setpoints stay 0;
+- `e2e_try.py slots 236` (all of today's override slots = "discharge while
+  above 20 %"): the app steps `0x0FD8` and `0x0FDD` by about -980 W every 10 s
+  down to -3600 W per inverter, and back up when the meter shows export;
+- `e2e_try.py slots clear`: setpoints return to 0 and stay there.
+
+Notes:
+
+- `0x0FDD` is the battery power limit (`SetBatteryMaximumPower`), not a copy
+  of `0x0FD8`: 3600 when idle, 200 while discharging into a load, 1071-1700
+  with PV and load, 533 at start, -3600 when selling or in an mFRR-up task.
+- The battery figure in the power flow comes from the packs' current, not from
+  the inverter: the sign of register 4022 made no difference to it.
+- With full packs (100 % SOC) and PV, the app reported 200 W solar and wrote
+  nothing - seen with the earlier model, not repeated with this one.
+- **Manual selling works once "sell back to grid" is on.** The reply to the
+  selling command (`0x80`) is `[ok, error bits u16 LE]`, which the client
+  ignores. Bits, from `manualSelling.validatePreconditions`: `0x0800` sell back
+  to grid is disabled, `0x0008` bsensor is missing, `0x0040` selling protection
+  limit reached, `0x0080` battery SOC too low. A fresh device answers
+  `01 00 08`. After `e2e_try.py sellback on` (command `0x05`), `sell on 5` is
+  answered `01 00 00`, the app writes `0x0FD8` = -3600 and 8 s later `0x0FDD`
+  = -3600 to each inverter, its power flow shows 10.8 kW from the battery to
+  the grid, and the state (`0x81`) counts up: target 5.0 kWh, sold 0.1, 0.3 ...
+  `sell off` puts `0x0FDD` back to 3600 at once and `0x0FD8` to 0 about 80 s
+  later; the model keeps exporting during that gap because it follows `0x0FD8`.
+- **Main fuse.** The app's "fuse" setting is command `0x38` (set: `[length,
+  spec text, capacity]`, capacity in 0.1 kW, the phone app sends it as u32 LE
+  and the firmware reads u16) and `0x39` (read: `[length, spec, u16 LE]`);
+  codes and layout from the phone app (`set_fuse_specs` / `get_fuse_specs`),
+  which shows it as "spec - capacity kW" and gets the list to choose from at
+  `/bmt/get-fuse-power-caps-v2/`. `e2e_try.py fuse 25` sets `3x25A`, 17.2 kW
+  (3 x 25 A x 230 V - my convention; the real list was not seen). A fresh
+  device answers an empty spec and capacity 0, which means no limit. After a
+  set the app posts it to `/bmt/submit-bmt-fuse/`. The usable power is 80 % of
+  the capacity (`settings.(*FuseData).GetFuseMaxPower`: capacity x 0.8 x 100
+  W), shared equally over the phases. Measured with the load only behind the
+  meter, 3000 W per phase:
+
+  | Fuse | Mode | App writes `0x0FD8` | Grid meter, 3 phases |
+  |---|---|---|---|
+  | 17.2 kW | `charge on` | 1586 (not 3600) | 13.8 kW = 80 % of the fuse |
+  | 10 kW, 6 kW | `charge on` | 0 | 9.0 kW: charging stops, the load is not covered from the battery |
+  | 10 kW | normal | -2666 (not -3000) | 1.0 kW |
+  | 10 kW | normal, load 4000 | -2666 | 4.0 kW |
+
+  So the limit also caps what an inverter may deliver: 8 kW / 3 per phase in
+  the last two rows. It cannot be cleared by command: an empty spec is
+  refused, and capacity 0 changes the text but keeps the old capacity. The
+  emulator is left at `3x63A`, 43.4 kW, which is above anything the three
+  inverters can do. Commands `0x6A` / `0x6B` (`WriteFuseSpecs` /
+  `ReadFuseSpecs` in the "cluster" router) and `0x49` got no answer here.
+- **Peak shaving.** `e2e_try.py peak on`, `peak limit 8000` (one schedule,
+  all day, every day), `peak reserve 90 5` (peak reserve %, UPS reserve %),
+  `peak` to read. Commands `0x57` toggle, `0x58` reserves, `0x5A` add
+  schedule, `0x5B` / `0x5C` read. The schedule command is `[length, record]`
+  and the record is 26 bytes (`settings.(*PeakShavingSchedule).ParseBmtpData`):
+  all day u8, start s u32, end s u32, weekday bits u8, power W u32, created
+  i64, id i32, little-endian; the read reply is `[length u16, records]`. So
+  what `emaldo_re/e2e.py` calls the schedule id is the length: its
+  `set_peak_shaving_schedule` was acknowledged but stored nothing here.
+  Measured with a limit of 8000 W, load only behind the meter, packs at 70 %:
+
+  | Reserve | Load, 3 phases | App writes per inverter | Grid meter | Battery |
+  |---|---|---|---|---|
+  | 0 % (as found) | 6 kW | `0x0FD8` -2000 | 0 | 6.0 kW out |
+  | 90 % (above SOC) | 6 kW | `0x0FD8` +533 | 7.6 kW | 1.6 kW in |
+  | 90 % | 9 kW | `0x0FD8` -3000, `0x0FDD` -467 | 7.6 kW | 1.4 kW out |
+  | 90 % | 12 kW | `0x0FD8` -3600, `0x0FDD` -1467 | 7.6 kW | 4.4 kW out |
+  | 90 % | 15 kW | `0x0FD8` -3600, `0x0FDD` -2467 | 7.6 kW | 7.5 kW out |
+
+  With no reserve it changes nothing: the app covers the whole load from the
+  battery as it always does. With a reserve above the present charge it keeps
+  the battery for the peaks: under the limit it does not discharge and refills
+  the reserve from the grid, over the limit it releases just the excess. Both
+  ways the meter stays at 7.6 kW, 400 W under the limit; where that margin
+  comes from was not determined. The release is what the app writes to
+  `0x0FDD`, with `0x0FD8` at its maximum, so the house model now holds the
+  setpoint within `0x0FDD` when both have the same sign - an assumption about
+  the inverter; without it the model released 3.6 kW per inverter and the
+  meter fell to 1.2 kW. The schedule stays stored (no delete command here);
+  the emulator is left with peak shaving off and reserves 0.
+- `e2e_try.py raw <type> [hex]` sends any command and prints every reply
+  decrypted - how the error bits above were found.
+- `plant_run.py` reads the flow about a minute after a change; right after a
+  command the figures are still moving (the `charge on` row's battery and load
+  figures were not settled).
+
+### Test panel (house, commands, cloud messages)
+
+![The test panel: house inputs, commands, the app's power flow, batteries, inverters and cloud messages](panel.png)
+
+`panel.py` is one page and a small JSON API on port 8088 of the guest
+(`panel.service`; `start-vm.sh` forwards the port to the host). It adds no
+mechanism of its own: it edits the `var` lines of `tap_regs`, calls
+`e2e_try.py`, and reads the logs the fakes already write.
+
+- **House:** load and solar per phase, whether the load is on the inverters'
+  line output or only on the grid meter side (`var LINE`), battery SOC.
+- **Commands:** emergency charge, discharge override, sell back to grid,
+  manual selling, raw command.
+- **Readings:** the app's own power flow (over e2e), its decoded inverter,
+  meter and battery readings (spy feed), the setpoints it writes.
+- **Messages:** what the app sends "to the cloud" - sandbox API calls with the
+  decrypted request body (and, optionally, the sandbox's reply), e2e relay
+  frames, DNS lookups, time sync. Repeats are folded into one line with a
+  count. The panel's own power-flow polling shows up in the e2e list as
+  `app ...` lines.
+
+```
+GET  /api/state      house variables, setpoints, readings, power flow
+POST /api/plant      {"LOAD1": 500, "PV": 1500, "LINE": 0, "FREQ": 49900, "SOC": 60}
+POST /api/cmd        {"cmd": "charge on"}
+GET  /api/messages   ?n=300
+```
+
+#### Installing it (and everything it relies on)
+
+`install-extras.sh` puts the inverter, cloud-stage and panel pieces of this
+section into a guest that already boots the app with the egress jail (the
+"Build from scratch" steps below). It runs inside the guest:
+
+```sh
+# on the host, in the repo checkout, with the VM running
+G="ssh -p 10022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1"
+tar -cf - emulator emaldo_re | $G "rm -rf /tmp/emu; mkdir /tmp/emu; tar -C /tmp/emu -xf -"
+$G "sh /tmp/emu/emulator/install-extras.sh"
+```
+
+What it does, in order:
+
+1. Copies the fakes and tools to `/sandbox` (`serial_tap.py`, `fake_bms.py`,
+   `fake_bak.py`, `ws_sink.py`, `sandbox_api.py`, `e2e_relay.py`,
+   `e2e_try.py`, `plant.py`, `plant_run.py`, `panel.py`), `dnssink.py`,
+   `ntp_stub.py` and `portal204.py` to `/usr/local/bin`, and the MCU stub to
+   `/usr/local/sbin/mcu-sysfs-stub`.
+2. Copies the three client files `e2e_try.py` needs (`emaldo_re/e2e.py`,
+   `const.py`, `exceptions.py`) to `/sandbox/emaldo_re` with an empty
+   `__init__.py`, and switches the import to `Cryptodome` where Debian's
+   package is the one installed.
+3. Installs `tap_regs.example` as `/sandbox/tap_regs` unless a per-phase model
+   is already there, and a first SOC of 60 %.
+4. Installs the units that are missing (`serial-tap`, `fake-bms`, `spy-sink`,
+   `sandbox-api`, `e2e-relay`, `ntp-stub`, `mcu-sysfs-stub`, `panel`,
+   `portal204`, `mqtt-broker`) and three drop-ins: `TAP_MODBUS=store`, `BMS_CABINETS=1:3`,
+   `SB_LOG=/sandbox/api.log`. Existing units and drop-ins are kept.
+5. Points the vendor names and the probe names at the guest's eth0 address
+   (10.0.2.15) in `/etc/hosts` and `/etc/dnssink.conf`.
+6. Reissues `/sandbox/sandbox.crt` with the DoH and probe names and the
+   resolver IPs as SANs, if it does not have them (needs `/sandbox/ca.key`).
+7. Enables the units, restarts the fakes and then the app.
+8. Prints a `CHECK` line for what it leaves to you: `app_secret`, `app_id` and
+   `hermes_spy` in `/root/config.toml` (see `config.toml.example`), and the
+   length of the relay group id.
+
+Changed files are saved once as `<name>.bak-extras`. Tested by running it on
+an already configured guest (services came back, the panel and commands
+worked); steps 5 and 6 were tested on scratch copies only, because that guest
+already had the names and the certificate. It has not been run on a freshly
+built guest.
+
+Reaching the panel from the host: `start-vm.sh` forwards host port 8088 to the
+guest. On a VM that was started before that line was added, open a tunnel
+instead: `ssh -p 10022 -N -L 0.0.0.0:8088:127.0.0.1:8088 root@127.0.0.1`.
+
+If the inverters stay off afterwards (the app remembers an earlier alarm):
+`systemctl stop emaldo; rm -rf /root/db/*; systemctl start emaldo` in the
+guest, with `/bin/systemctl`.
+
+`PV` / `LOAD` set all three phases. The fake packs keep their SOC in
+`/sandbox/bak_soc` across restarts; a number written to `/sandbox/bak_soc.set`
+(what the panel does) sets it while running. There is no login on the panel;
+it is meant for the host only.
+
+### MQTT: the app's cloud command channel
+
+The app has a second cloud channel besides the API and the e2e relay: an MQTT 5
+client (`hps-mqtt`). With the three pieces below it connects to a broker in the
+sandbox and answers commands.
+
+How it finds its broker (all measured on v2.35.3):
+
+1. `get-global-config` returns a JSON **list** of items
+   `{config_id, config_item, bmt_value, default_value}` (all strings). The app
+   picks items by `config_item`; `mqtt_broker_router_url` is the one that
+   matters here. With a `{"config": {}}` object, as the sandbox answered
+   before, the app waits forever in `BrokerURLSource.Fetch`. The
+   `mqtt_broker_url` key that exists for `config.toml` did not change this.
+2. It POSTs `<mqtt_broker_router_url>/auth/broker_url/` in the usual gm2
+   envelope, body `{"id": "<device id>"}`, and reads `broker_url` from the
+   reply.
+3. It POSTs `/bmt/access/auth/<app id>` (same body) for a token. The reply
+   structure is `{token, expired_at, broker_url}`; the token becomes the MQTT
+   password.
+4. It connects: MQTT 5 over TLS, client id = user name = device id, password =
+   that token, keep-alive 60 s, session expiry 600 s, and subscribes to
+   `iot/<device id>/down/cmd`.
+
+`mqtt_broker.py` (`mqtt-broker.service`, TLS on 8883 with the sandbox
+certificate) accepts any client, logs every CONNECT, SUBSCRIBE and PUBLISH to
+`/sandbox/mqtt.log` and routes publishes between its clients. `mqtt_pub.py`
+sends one message and prints what comes back:
+
+```
+$ python3 /sandbox/mqtt_pub.py '{"cmd":"hello_sandbox"}'
+got iot/<id>/up/resp -> {"cmd":"hello_sandbox","code":-1}
+$ python3 /sandbox/mqtt_pub.py '{"cmd":"set_fcr_schedule"}'
+got iot/<id>/up/resp -> {"cmd":"set_fcr_schedule","code":0,"result":{"bmt_id":"<id>","task_ids":[""]}}
+```
+
+Commands are JSON with a `cmd` field; the handlers registered in the binary
+are `set_fcr_schedule`, `set_complex_fcr_schedule` and `set_mfrr_schedule`
+(grid-service schedules). Replies go to `iot/<device id>/up/resp` at QoS 1:
+`{cmd, code, result}`. In several minutes connected the app published nothing
+on its own.
+
+The command layouts, read from the binary's Go type information with
+`scripts/gotypes.py` (JSON names):
+
+```
+set_fcr_schedule          {cmd, trace_id, ver, bmt_id, payload: FcrTaskParams}
+  FcrTaskParams           id, kind, maxPower, start, minutes, force, testCase,
+                          testSineCycleTime, testSineTotalCycles, caption, exampleFile,
+                          remoteLogDir, dryRun, pqFrequency, logFormat,
+                          postHighFreqDataCounter, soc_preparation, preparation_data_type,
+                          preparation_upper_limit, preparation_lower_limit
+set_complex_fcr_schedule  payload: id, start, minutes, dryRun, force, logFormat,
+                          tasks: [FcrTaskParams], postHighFreqDataCounter
+set_mfrr_schedule         payload: kind, activation_type, start_time, end_time,
+                          activation_time, minutes, max_power, force, test_case,
+                          remote_log_dir, id, log_format, postHighFreqDataCounter,
+                          soc_preparation, preparation_*, ramp_up_duration_sec,
+                          ramp_down_duration_sec, log_extend_duration_sec
+reply result              {bmt_id, task_ids}
+```
+
+Measured with `mqtt_pub.py fcr <kind> <minutes> <W>` (payload `id`, `kind`,
+`maxPower` 3000, `start` = now + 5 s, `minutes`, `force` true) and the grid
+frequency of the house model (`plant.py FREQ=49900`, mHz), packs at about 75 %:
+
+| kind | Task | Frequency | App writes `0x0FD8` per inverter | State (`0x45`) |
+|---|---|---|---|---|
+| 1 | FCR-N | 50.00 Hz | 0 | 0 |
+| 1 | FCR-N | 49.90 Hz | -999 W (3 kW to the grid in total) | 2 |
+| 1 | FCR-N | 50.10 Hz | charging 3 kW (from its own log) | - |
+| 2 | FCR-D down | 50.30 Hz | +499 W (1.5 kW from the grid) | 3 |
+| 2 | FCR-D down | 49.70 Hz | 0 | 0 |
+| 3 | FCR-D up | 49.70 Hz | -499 W (1.5 kW to the grid) | 4 |
+| 3 | FCR-D up | 50.30 Hz | 0 | 0 |
+| 4 | - | - | rejected, reply code 4 (kind unknown) | - |
+
+So `maxPower` is the capacity in W: FCR-N delivers all of it at +-0.1 Hz, and
+the FCR-D tasks delivered half of it 0.2 Hz past their 0.1 Hz threshold. For
+every task the app writes `/var/log/thorfcr_<id>.csv` (about two rows a second:
+`InsAcPow`, `GridFreq`, capacity, activated power, SOC ...), and its
+`submit-high-freq-data` uploads carry the frequency and an `fcr_task_id`. The
+app takes the frequency from its inverters and meter, which is why it is a
+variable of the house model.
+
+`set_mfrr_schedule`, sent with `mqtt_pub.py mfrr <kind> <minutes> <W>`:
+
+| kind | Task | App writes `0x0FD8` per inverter | State (`0x45`) |
+|---|---|---|---|
+| 11 | mFRR up | -1000 W (3 kW to the grid in total), `0x0FDD` = -3600 | 7 |
+| 12 | mFRR down | +1000 W (3 kW from the grid in total) | 6 |
+| 0 | - | stops the task with that `id` (`mqtt_pub.py mfrr 0`; the tool always uses the id `sandbox-mfrr`); setpoint back to 0 within a second | 0 |
+
+- `test_case` must not be 0, or the reply is code 6 "not supported"
+  (`fcrctrl.(*ctrl).SetMfrrSchedule`); `mqtt_pub.py mfrr` sends 1, also for
+  the stop.
+- The task starts at `activation_time`: the app wrote the setpoint in that
+  very second (12:30:00, 12:45:00). `mqtt_pub.py mfrr` picks the next quarter
+  hour that is at least 6 minutes away and sends `start_time` =
+  `activation_time`, `end_time` = that + `minutes`, `activation_type` 1,
+  `max_power`, `force` true. An activation time two minutes past a quarter was
+  accepted too (code 0) but stopped before it ran, so whether error 7 below is
+  ever enforced is not known.
+- Unlike FCR it does not follow the frequency: the full `max_power` is
+  delivered for the whole task. The log is again `/var/log/thorfcr_<id>.csv`.
+- Three tasks for the same quarter were all accepted; the last one ran.
+
+Reply codes (`code` in `{cmd, code, result}`) are the values of a map in the
+handlers, keyed by the error the controller returned:
+
+| code | Error text in the binary |
+|---|---|
+| 0 | accepted |
+| -1 | JSON not understood, unknown `cmd`, or an error not in this list |
+| 1 | task is busy |
+| 2 | task is overlaping |
+| 3 | task id exists |
+| 4 | fcr kind is unknown |
+| 5 | unknown complex task |
+| 6 | not supported |
+| 7 | activation time must be at quarter hour (0, 15, 30, 45 minutes) |
+| 8 | task conflict |
+| 9 | the start time is not 5 minutes earlier |
+| 10 | task save failed |
+| 11 | not signed |
+| 12 | task is activated |
+| 13 | forced setting error |
+| 14 | invalid delete fcr task param |
+| 15 | invalid mfrr time config |
+
+A task answered with code 2 is not stored: the one FCR-N task that got it was
+sent while the previous one still ran, and it has no log file - what kept
+running, and ended on time, was the earlier task.
+
+Task kinds and the state they give (`frr/const.FcrKind.String` and
+`.ToFcrState`): 0 off, 1 `fcr-n` -> 2, 2 `fcr-d down` -> 3, 3 `fcr-d up` -> 4,
+100 `fcr-d complex` -> 5, 11 `mfrr-up` -> 7, 12 `mfrr-down` -> 6. The app's
+state enum, which `emaldo_re/e2e.py` follows, names 3 "FcrDUp", 4 "FcrDDown",
+6 "MFRRUp" and 7 "MFRRDown" - the other way round. Measured behaviour agrees
+with the firmware's names: state 3 took power from the grid at 50.30 Hz, state
+7 delivered power to the grid. The earlier empty `set_fcr_schedule` test left
+the state at 0 (idle, no error).
+
+Not tried: `set_complex_fcr_schedule`, the test cases other than 1, and the
+`soc_preparation` fields.
+
+The panel lists the MQTT traffic with the other cloud messages, has a field to
+publish a command, rows to start an FCR task and to start or stop an mFRR
+task, and a grid-frequency input.
 
 ## MCU responder and CAN replay (2026-11-25)
 
@@ -435,6 +1095,61 @@ qemu-system-arm -M virt -m 1024 \
   -netdev user,id=n0,hostfwd=tcp::10022-:22 -device virtio-net-device,netdev=n0 \
   -display none -serial unix:$PWD/serial.sock,server=on,wait=off -monitor none
 ```
+
+### What it took to get and keep it running (rebuild on Ubuntu 24.04 arm64, 2026-11-23)
+
+Host and image:
+
+- **QEMU >= 9 is required.** `-M virt` in QEMU 8.2 (Ubuntu 24.04) creates only
+  one PL011, so `/dev/ttyAMA1` never appears and `bt-stub` retries for minutes
+  while `emaldo.service` waits behind it. QEMU 10.1.2 built from source with
+  `--target-list=arm-softmmu --enable-slirp` works.
+- **aarch64 hosts have no `qemu-arm` binfmt entry** after installing
+  `qemu-user-static`; debootstrap's second stage fails at `chroot /bin/true`.
+  Register `/usr/bin/qemu-arm-static` by hand (flag `F`) first.
+- **Do not autoload `vmfb.ko` at boot.** Listed in `/etc/modules-load.d` it
+  froze the guest ~30 s into boot (QEMU idle, console silent).
+- `h4_shim.py`, `vmrun.py` and `vmwait.py` now look for their sockets next to
+  `start-vm.sh` instead of a fixed home directory.
+- Add `bluez` (btattach, hciconfig), `udev`, `dbus` and `e2fsprogs` to the
+  debootstrap package list; the README list above lacks them.
+
+Unconfigured app (the state the status block at the top describes):
+
+- **`/root/bin/cabinet` must already exist.** With an empty `/root/bin` the app
+  logs `failed to init cabinet communication, error: /root/bin/cabinet does not
+  exist` and carries on without a cabinet. Seed it with the canapp ELF embedded
+  in the firmware (the dynamically linked armhf executable containing
+  `dinCanFrameAnalysisProc`); the app then replaces it itself on each start.
+- **can0 goes DOWN whenever the app stops or re-initialises CAN.** Install
+  `ip-vcan.sh` as `/usr/local/sbin/ip` (and `emaldo-can0-up.conf` as a drop-in
+  for the first start).
+
+Configured app (needed for cabinets, batteries, inverters - see "Cabinets and
+batteries"):
+
+- the five identity keys in `/root/config.toml`; a wrong value type anywhere
+  in that file (`log_level = "debug"` - it wants an integer) is logged as
+  `config file err` and worth checking for after every edit;
+- `serial-tap.service` for `/dev/ttymxc2`, or the app exits at once, forever;
+- cabinet status replies of at least 7 bytes, or the app panics every ~80 s;
+- battery replies with nothing after the closing `0D`;
+- `spy-sink.service` + `hermes_spy` if you want to see anything.
+
+Operating traps:
+
+- The tool stub shadows `systemctl` on PATH; use `/bin/systemctl` for real work
+  inside the guest.
+- Restart units from ssh detached (`setsid ... </dev/null >/dev/null 2>&1 &`):
+  restarting `emaldo` inline tends to drop the session.
+- `pkill -f PATTERN` over ssh kills the ssh command itself when the pattern
+  also matches the rest of the command line, bracket trick or not. One kill
+  per ssh call.
+- Never `rm` a log a running helper has open (`spy.out`, `bms.out`): it keeps
+  writing to the deleted file. Restart the helper too.
+- After a restart the app takes ~75 s before the first battery frame.
+- Set `SB_LOG=/sandbox/api.log` for the sandbox (drop-in); the default path is
+  in `/var/log`, which the app cleans.
 
 ## Operating it
 

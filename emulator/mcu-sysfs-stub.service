@@ -1,0 +1,12 @@
+[Unit]
+Description=Emaldo emulator: fake /sys/class/mcu/mcu1 (inverter switches, MCU attributes)
+After=screen-mcu-stub.service
+Before=emaldo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mcu-sysfs-stub
+
+[Install]
+WantedBy=multi-user.target

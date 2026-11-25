@@ -6,7 +6,7 @@ import json, os, socket, struct, time
 def log(msg):
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
-SOCK = "/home/johannes/src/emaldo-emu/run/serial2.sock"
+SOCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serial2.sock")  # next to start-vm.sh
 TABLE = {}          # opcode -> params, from h4_cmds.json (hot-reloaded)
 TABLE_MTIME = 0.0
 CMDS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "h4_cmds.json")
