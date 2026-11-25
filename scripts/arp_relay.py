@@ -10,17 +10,20 @@ Only ever use on networks you own. Stop with Ctrl-C: it sends corrective ARPs
 so both hosts relearn the truth immediately.
 """
 import argparse
+import os
 import signal
 import sys
 import time
 
 from scapy.all import ARP, Ether, sendp
 
-BATTERY = "192.168.50.185"
-BATTERY_MAC = "d8:74:ef:02:c4:c3"
-GATEWAY = "192.168.50.1"
-GATEWAY_MAC = "58:11:22:7c:f5:40"
-IFACE = "wlp192s0"
+# Installation-specific addresses are not in the repository; pass them in the
+# environment when running this capture helper.
+BATTERY = os.environ.get("BATTERY_IP", "")
+BATTERY_MAC = os.environ.get("BATTERY_MAC", "")
+GATEWAY = os.environ.get("GATEWAY_IP", "")
+GATEWAY_MAC = os.environ.get("GATEWAY_MAC", "")
+IFACE = os.environ.get("ARP_RELAY_IFACE", "")
 
 
 def arp_reply(dst_mac: str, src_ip: str, src_mac: str, dst_ip: str) -> Ether:
@@ -33,6 +36,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=0.8)
     args = ap.parse_args()
+
+    missing = [n for n, v in (
+        ("BATTERY_IP", BATTERY), ("BATTERY_MAC", BATTERY_MAC),
+        ("GATEWAY_IP", GATEWAY), ("GATEWAY_MAC", GATEWAY_MAC),
+        ("ARP_RELAY_IFACE", IFACE),
+    ) if not v]
+    if missing:
+        print(f"set {', '.join(missing)} in the environment first", file=sys.stderr)
+        return 2
 
     import subprocess
 

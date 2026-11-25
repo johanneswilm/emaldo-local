@@ -57,7 +57,7 @@ fn fixture(tag: &str) -> (PathBuf, Arc<Bridge>) {
     cfg.ui_bind = "127.0.0.1".into();
     cfg.ui_port = 0;
     cfg.control_port = 0;
-    cfg.relay_advertise_host = Some("192.168.50.185".into());
+    cfg.relay_advertise_host = Some("203.0.113.10".into());
     cfg.hosts_file = dir.join("hosts").to_string_lossy().into_owned();
     cfg.backup_dir = dir.join("backups").to_string_lossy().into_owned();
     cfg.vendor_db_dir = dir.join("fakedb").to_string_lossy().into_owned();
@@ -372,7 +372,7 @@ fn login_answer_points_at_the_bridge_and_carries_the_provisioned_identity() {
         "POST",
         &format!("/bmt/e2e-bmt-login/{}", "t".repeat(20)),
         body.as_bytes(),
-        "192.168.50.185:51000".parse().unwrap(),
+        "203.0.113.10:51000".parse().unwrap(),
         &[],
     );
     let resp = api.handle(&r);
@@ -382,8 +382,8 @@ fn login_answer_points_at_the_bridge_and_carries_the_provisioned_identity() {
     assert_eq!(res["end_id"], json!(id.end_id));
     assert_eq!(res["group_id"], json!(id.group_id));
     assert_eq!(res["end_secret"], json!(id.end_secret));
-    assert_eq!(res["host"], json!("192.168.50.185:1050"));
-    assert_eq!(res["util_host"], json!("192.168.50.185:1051"));
+    assert_eq!(res["host"], json!("203.0.113.10:1050"));
+    assert_eq!(res["util_host"], json!("203.0.113.10:1051"));
     let chat = res["chat_secret"].as_str().unwrap().to_string();
     assert_eq!(chat.len(), 32, "issued chat must be a full-size secret");
     assert_ne!(chat, id.chat_secret, "login must rotate the chat");
@@ -393,7 +393,7 @@ fn login_answer_points_at_the_bridge_and_carries_the_provisioned_identity() {
         "POST",
         "/bmt/get-version-list/x",
         format!("gm=2&iv={iv}&json={}", envelope::encode_field(2, Some(&iv), "{}")).as_bytes(),
-        "192.168.50.185:51001".parse().unwrap(),
+        "203.0.113.10:51001".parse().unwrap(),
         &[],
     );
     let env: Value = serde_json::from_slice(&api.handle(&r).body).unwrap();
@@ -427,15 +427,15 @@ fn login_answer_points_at_the_bridge_and_carries_the_provisioned_identity() {
     assert_eq!(e2e["group_id"], json!(id.group_id));
     assert_eq!(e2e["end_secret"], json!(id.app_end_secret));
     assert_eq!(e2e["chat_secret"], json!(bridge.ident.get().chat_secret));
-    assert_eq!(e2e["host"], json!("192.168.50.185:1050"));
+    assert_eq!(e2e["host"], json!("203.0.113.10:1050"));
 
     // The home-hub end lives in its own group.
     let res = gm1_call("/home/e2e-login/APPID", json!({}));
     assert_eq!(res["end_id"], json!(id.home_end));
     assert_eq!(res["group_id"], json!(id.home_group_id));
     assert_eq!(res["end_secret"], json!(id.home_end_secret));
-    assert_eq!(res["host"], json!("192.168.50.185:1050"));
-    assert_eq!(res["util_host"], json!("192.168.50.185:1051"));
+    assert_eq!(res["host"], json!("203.0.113.10:1050"));
+    assert_eq!(res["util_host"], json!("203.0.113.10:1051"));
 
     // A second module login rotates the chat but keeps the previous one
     // accepted, so frames in flight across the rotation still decrypt.
@@ -443,7 +443,7 @@ fn login_answer_points_at_the_bridge_and_carries_the_provisioned_identity() {
         "POST",
         "/bmt/e2e-bmt-login/x",
         format!("gm=2&iv={iv}&json={}", envelope::encode_field(2, Some(&iv), "{}")).as_bytes(),
-        "192.168.50.185:51002".parse().unwrap(),
+        "203.0.113.10:51002".parse().unwrap(),
         &[],
     );
     let env: Value = serde_json::from_slice(&api.handle(&r2).body).unwrap();
@@ -634,10 +634,10 @@ fn mode_switch_rewrites_only_the_managed_hosts_block() {
     )
     .unwrap();
 
-    mode::pin_hosts(&bridge, "192.168.50.185").unwrap();
+    mode::pin_hosts(&bridge, "203.0.113.10").unwrap();
     let text = std::fs::read_to_string(&hosts).unwrap();
     for h in emaldo_proto::params::VENDOR_API_HOSTS {
-        assert!(text.contains(&format!("192.168.50.185")), "{h} not pinned: {text}");
+        assert!(text.contains(&format!("203.0.113.10")), "{h} not pinned: {text}");
         assert!(text.contains(h), "{h} missing from the pin line");
     }
     assert!(text.contains("printer.local"), "operator lines were lost");
@@ -652,7 +652,7 @@ fn mode_switch_rewrites_only_the_managed_hosts_block() {
     let text = std::fs::read_to_string(&hosts).unwrap();
     assert_eq!(text.matches("emaldo-local (managed)").count() / 2, 1, "block duplicated: {text}");
     assert!(text.contains("192.168.50.186"));
-    assert!(!text.contains("192.168.50.185\n"));
+    assert!(!text.contains("203.0.113.10\n"));
 
     // Vendor mode: the block disappears, everything else is untouched.
     mode::unpin_hosts(&bridge).unwrap();

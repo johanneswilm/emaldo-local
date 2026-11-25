@@ -216,7 +216,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = Config::default();
         let dns = vec!["api.emaldo.com".to_string(), "dp.emaldo.com".to_string()];
-        let ips: Vec<IpAddr> = vec!["192.168.50.185".parse().unwrap()];
+        let ips: Vec<IpAddr> = vec!["203.0.113.10".parse().unwrap()];
         let a = ensure(&cfg, &dir, &dns, &ips).unwrap();
         assert!(a.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(a.ca_pem.contains("BEGIN CERTIFICATE"));

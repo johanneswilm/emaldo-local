@@ -193,14 +193,13 @@ impl Default for Config {
             block_vendor_egress: true,
             vendor_block_addrs: vec![
                 // api.emaldo.com / dp.emaldo.com and the e2e relay, as captured
-                // from the vendor DNS answers. The home's own public address is
-                // in the list as well: the hosted stack used to be reached
-                // through the router's DNS override and port-forward there, and
-                // local mode must not fall back to that path when the resolver
-                // pin is momentarily lost.
+                // from the vendor DNS answers. An installation that previously
+                // reached a hosted stack through a router DNS override and port
+                // forward should add that address here too (in config.json, not
+                // in the source), so local mode cannot fall back to it when the
+                // resolver pin is momentarily lost.
                 "34.53.168.64".into(),
                 "35.187.68.18".into(),
-                "83.254.141.244".into(),
                 // Public resolvers reachable over DoH (443) and DoT (853).
                 "1.1.1.1".into(),
                 "1.0.0.1".into(),

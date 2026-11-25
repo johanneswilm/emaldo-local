@@ -5,7 +5,7 @@ Run on the NAS, where the fake vendor stack keeps the ids the module and Home
 Assistant were given. Nothing is written to disk here and nothing is committed:
 pipe it straight to the battery.
 
-    ssh lund.fiduswriter.org 'python3 - 192.168.50.185' < deploy/seed_identity.py \\
+    ssh lund.fiduswriter.org 'python3 - $BATTERY_IP' < deploy/seed_identity.py \\
       | ssh emaldo-battery 'cat > /root/emaldo-local/state/identity.json && chmod 600 /root/emaldo-local/state/identity.json'
 
 The module re-reads its e2e credentials at every login, so the ids below are

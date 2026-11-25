@@ -412,7 +412,7 @@ mod tests {
 
     fn map() -> BTreeMap<String, std::net::Ipv4Addr> {
         let mut m = BTreeMap::new();
-        m.insert("api.emaldo.com".into(), "192.168.50.185".parse().unwrap());
+        m.insert("api.emaldo.com".into(), "203.0.113.10".parse().unwrap());
         m
     }
 
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(&r[0..2], &[0x12, 0x34], "id must be echoed");
         assert_eq!(r[2] & 0x80, 0x80, "QR must be set");
         assert_eq!(&r[6..8], &[0x00, 0x01], "one answer record");
-        assert_eq!(&r[r.len() - 4..], &[192, 168, 50, 185], "answer is the bridge");
+        assert_eq!(&r[r.len() - 4..], &[203, 0, 113, 10], "answer is the bridge");
     }
 
     #[test]

@@ -132,3 +132,32 @@ The highest-value contributions right now: (1) validate the register map
 against real hardware (`docs/REGISTERS.md` checklist), (2) the BLE
 provisioning channel, (3) FW-2 control paths. Open issues/PRs against
 [this repo](https://github.com/johanneswilm/emaldo-local).
+
+## What may live in this repository
+
+Product-wide protocol constants belong here. The vendor's DinSafer `AppID` and
+`AppSecret` used by the REST envelope are identical in every install: the pair
+ships inside the vendor's own app (`com.hps.emaldo.apk` ->
+`DinSaferApplication.java`, `withAppID(...).withAppSecret(...)`), and every
+codec and decoder in this tree needs them. They are protocol facts, not secrets
+of anyone's battery.
+
+Material that belongs to a single installation does not belong in git:
+
+- the vendor-issued E2E identity (`end_id`, `end_secret`, `chat_secret`,
+  `group_id`) and the registration token;
+- this unit's `device_id` / `home_id`, its LAN and BLE MAC addresses;
+- the home's LAN and public addresses.
+
+Those live where they are used: on the battery, 0600 files under
+`/root/emaldo-local/state/` plus installation-specific lists in
+`/root/emaldo-local/config.json`; on a workstation, `~/.config/emaldo-local/`
+(`EMALDO_LEARN_CREDS` points the capture tools at another path), which is also
+where `learn/learn_server.py` reads the ids for its fake answers. Test fixtures
+use documentation address ranges, not the addresses of a real site.
+
+Before pushing this history anywhere: commits before the 2026-11-25 cleanup
+contain ids of one real installation (`learn/learn_server.py`,
+`scripts/README.md`, `scripts/arp_relay.py`, `scripts/run_stack.sh`), and the
+GitHub remote is public. The rewrite has to happen before that history is
+published; nothing new has been pushed since.

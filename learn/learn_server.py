@@ -10,9 +10,31 @@ Log: learn.log (jsonl) + learn_readable.txt
 """
 import http.server
 import json
+import os
 import secrets
 import socketserver
 import time
+
+# `app_secret` is the vendor's product-wide DinSafer AppSecret: the same value is
+# in every copy of the vendor app (`DinSaferApplication.java` ->
+# `withAppID("CXRqKjx2...").withAppSecret(...)` in com.hps.emaldo.apk), so it is a
+# protocol constant, not a secret of this installation. Installation-specific
+# material (this module's ids, and the vendor-issued e2e identity) never lives in
+# the repository: it is read from a 0600 file outside it, or from the path in
+# EMALDO_LEARN_CREDS.
+CREDS_PATH = os.environ.get(
+    "EMALDO_LEARN_CREDS", os.path.expanduser("~/.config/emaldo-local/learn-creds.json")
+)
+try:
+    with open(CREDS_PATH) as _f:
+        CREDS = json.load(_f)
+except OSError:
+    CREDS = {}
+
+
+def cred(key: str, placeholder: str) -> str:
+    return CREDS.get(key) or placeholder
+
 
 APP_SECRET = b"FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
 
@@ -85,18 +107,18 @@ def fake_result(path: str) -> dict | None:
             "chat_secret": "e2eChatSecret000000000000000000AA",
             "end_id": "e2eEndId0000000000000000000000000000AA",
             "end_secret": "e2eEndSecret00000000000000000000AA",
-            "group_id": "e2eGroup000000000000000000000000@0",
+            "group_id": cred("group_id", "SET-group_id-from-creds"),
             "host": "homeassistant.lund.fiduswriter.org:1050",
             "util_host": "homeassistant.lund.fiduswriter.org:1051",
         }
     if "list-home" in p or "list_home" in p:
         return {"gmtime": 0, "list_homes": [{
-            "home_id": "67e95df15e4443ebecbc453a",
+            "home_id": cred("home_id", "SET-home_id"),
             "home_name": "HOME", "level": 30}]}
     if "list-bmt" in p or "search" in p:
-        return {"bmts": [{"name": "Power Core 2.0", "id": "HMvSUfAafuYCokvv",
-                          "group_id": "c3y3IUIM3Z398WE4TPqKXex6IeLUlo@0",
-                          "end_id": "bXx0MKrYuhmNLgqHLt2zTGqSzCeB2Zo",
+        return {"bmts": [{"name": "Power Core 2.0", "id": cred("bmt_id", "SET-bmt_id"),
+                          "group_id": cred("group_id", "SET-group_id"),
+                          "end_id": cred("bmt_end_id", "SET-bmt_end_id"),
                           "addr": "0.0.0.0:0", "model": "PC1-BAK15-HS10",
                           "addtime": 1773390936371683540,
                           "country_code": "SE", "delivery_area": "SE4",

@@ -62,10 +62,10 @@ Useful:
 ## Verified facts (2026-11-17)
 
 - BLE provisioning channel is ALIVE in normal operation: advertises
-  `bcf25cee-fbad-4f85-a41c-8da2bd9ed1ac`, name `HMvSUfAafuYCokvv`, AES-256-CBC
+  `bcf25cee-fbad-4f85-a41c-8da2bd9ed1ac`, name `<bmt_id in ~/.config/emaldo-local/learn-creds.json>`, AES-256-CBC
   with public hardcoded key/IV (key/IV are the ASCII strings, not hex-decoded:
   `fbade9e36a3f36d3d676c1b808451dd7` / `dfcf28d0734569a6`); write char
-  `156df971-…`, notify char `1c7d885f-…`; BLE MAC = LAN MAC+1 (`d8:74:ef:02:c4:c4`).
+  `156df971-…`, notify char `1c7d885f-…`; BLE MAC = LAN MAC+1 ((this unit's BLE MAC, = its LAN MAC + 1)).
   `get_version`→`v2.35.3`, `get_model`, `get_ethernet_state` OK.
 - **TLS-MITM test (23:51–23:55): module VALIDATES server certificates**
   (`SSLV3_ALERT_BAD_CERTIFICATE` on our self-signed; retry ladder 5/10/20/40 s).
@@ -79,8 +79,8 @@ Useful:
   (verified reconnection). MQTT host (`mqtt1.emaldo.com`) is NOT covered by
   these commands — it stayed on Emaldo's broker during the test.
 - Relay credentials seen in cloud ACK options (plaintext MSCT options):
-  battery end_id `bXx0MKrYuhmNLgqHLt2zTGqSzCeB2Zo`,
-  group `c3y3IUIM3Z398WE4TPqKXex6IeLUlo@0`.
+  battery end_id `<bmt_end_id in ~/.config/emaldo-local/learn-creds.json>`,
+  group id (both in the vendor capture on the NAS workstation, not in the repo).
 - Module listens on no TCP/UDP ports on the LAN (no direct LAN API in this
   firmware); battery is wired to the router.
 
