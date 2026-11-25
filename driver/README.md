@@ -9,35 +9,46 @@ OFF by default** (`control.writes_enabled=false`) — with writes off every
 command is validated and journaled as a dry-run. No OTA, no vendor cloud,
 vendor app and identity files untouched.
 
-Context and constraints: see [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md) and
-[`../docs/REGISTERS.md`](../docs/REGISTERS.md). Register map status:
-[`../docs/REGISTERS.md`](../docs/REGISTERS.md).
+Context and constraints: register map status and live-hardware findings are
+in [`../docs/REGISTERS.md`](../docs/REGISTERS.md) and
+[`../docs/ISSUES.md`](../docs/ISSUES.md).
 
 ## Layout
 
 | file | role |
 |---|---|
-| `src/main.rs` | wiring (port of `cmd/emaldo-local/main.go`); `--rollback` CLI |
+| `src/main.rs` | wiring, CLI (`--rollback`, `--mcu-probe`, `--can-probe`, `--prices-probe`, …) |
 | `src/bus.rs` | shared Modbus bus (poller + controller, single-master) |
-| `src/control.rs` | Phase-2 write controller: gates, journal, snapshot/rollback |
-| `src/policy.rs` | Phase-2 policy engine (modes/reserve/limits/override/grid/watchdog) |
-| `src/commands.rs` | shared REST/MQTT command dispatch |
-| `src/config.rs` | TOML config at `/root/emaldo-driver.toml`, atomic writes, masked secrets |
+| `src/poll.rs` | Modbus polling loop: HiSolar `0x0FA0`×43 + `0x0FAF`×18 blocks, backoff; never panics |
+| `src/regs.rs` | register map constants recovered from the vendor binary (HiSolar blocks/control regs) |
+| `src/modbus.rs` | Modbus RTU CRC16, fc 0x03/0x04 reads, exception/CRC/timeout, slave walk |
 | `src/serial.rs` | raw tty (termios 8N1), best-effort RS485 (`TIOCSRS485`), plain-UART fallback |
-| `src/modbus.rs` | Modbus RTU CRC16, fc 0x03/0x04 reads, exception/CRC/timeout errors, slave walk |
-| `src/regs.rs` | register map constants — recovered from the vendor binary (HiSolar blocks/control regs; field names provisional) |
-| `src/poll.rs` | polling loop: HiSolar `0x0FA0`×43 + `0x0FAF`×18 blocks, backoff; never panics |
-| `src/bms.rs` | BMS XOR-frame checksum + stream extractor (layout not yet captured) |
+| `src/rs485.rs` | read-only CH9344 discovery probe (writes nothing) |
+| `src/can.rs` | passive SocketCAN listener: DIN page reassembly + BAK TLV decode |
+| `src/can_poll.rs` | active CAN BMS poller (enumerate packs, poll SOC/voltages…) |
+| `src/bms.rs` | BMS XOR-frame checksum + stream extractor (alt. BST ASCII path) |
 | `src/mcu.rs` | `/sys/class/mcu/mcu1/*` sysfs reader (safe next to the vendor app) |
-| `src/telemetry.rs` | state store, event ring (200), subscriber fan-out |
+| `src/mcu_proto.rs` | housekeeping-MCU Bmtp protocol (bench-validated) |
+| `src/meter.rs` | b-sensor grid/load meter on `/dev/ttyCH9344USB1` + energy counters |
+| `src/prices.rs` | Nordpool day-ahead prices (keyless) + on-disk cache |
+| `src/solar.rs` | Open-Meteo PV forecast (own string model) |
+| `src/optimizer.rs` | deterministic cost-aware planner (prices × PV × SOC → 96×15-min slots) |
+| `src/policy.rs` | policy engine (modes/reserve/limits/override/grid/watchdog) |
+| `src/control.rs` | write controller: gates, journal, snapshot/rollback (FC16 setpoints) |
+| `src/commands.rs` | shared REST/MQTT command dispatch |
+| `src/history.rs` | 48 h rolling history (`history.jsonl`) for the dashboard |
+| `src/config.rs` | TOML config at `/root/emaldo-driver.toml`, atomic writes, masked secrets |
+| `src/telemetry.rs` | state store, event ring (200), subscriber fan-out, derived load |
 | `src/mqtt.rs` | MQTT 3.1.1 client (QoS 0/1, TLS, reconnect), single I/O thread |
-| `src/discovery.rs` | HA discovery + state topics (same layout as the Go firmware) |
+| `src/discovery.rs` | HA discovery + state topics |
 | `src/dns.rs` | tiny UDP DNS resolver (static glibc cannot use NSS) |
 | `src/tls.rs` | rustls server/client config; self-signed cert auto-generated + persisted |
-| `src/web.rs` | HTTP/1.1 server: auth (setup/login/sessions), REST, SSE, embedded UI |
-| `src/display.rs` + `src/font.rs` | e-ink `/dev/fb0` renderer: shadow-buffer diff, 8x8 font, SOC glyph |
+| `src/web.rs` + `src/history.rs` | HTTP/1.1 server: auth, REST, SSE, PWA/UI, 48 h charts |
+| `src/display.rs` + `src/font.rs` | e-ink `/dev/fb0` renderer: shadow-buffer diff, 8x8 font, SOC glyph, `msync` refresh |
+| `src/timectl.rs` | minimal civil-time helpers (local delivery dates for prices) |
 | `src/sim.rs` | synthetic telemetry (`hardware.simulate = true`) |
-| `static/index.html` | embedded web UI (no CDN) |
+| `src/ptytest.rs` | PTY end-to-end Modbus test harness (host tests) |
+| `static/` | embedded web UI (no CDN): `index.html`, PWA manifest, service worker, icon |
 
 ## Build
 
@@ -89,92 +100,74 @@ start and persisted next to the config (`web-cert.pem` / `web-key.pem`,
 ### Configuration (`/root/emaldo-driver.toml`)
 
 Deliberately **not** `/root/config.toml` — that file belongs to the vendor
-app and stays untouched. All keys with defaults:
+app and stays untouched. The config is a TOML tree of sections `device`,
+`mqtt`, `web`, `hardware`, `admin`, `policy` (+ `policy.optimizer`),
+`control`, `prices`, `solar`; the exhaustive, always-current field list is
+`driver/src/config.rs`. A minimal live (read-only) example:
 
 ```toml
 [device]
-name = ""            # shown in UI/discovery
-location = ""
+name = "Power Core"
 
 [mqtt]
-broker_url = ""      # mqtt://host:1883 or mqtts://host:8883; empty = off
-username = ""
-password = ""
+broker_url = ""          # mqtt://host:1883 or mqtts://host:8883; empty = off
 topic_prefix = "emaldo/powercore"
 ha_discovery = true
-discovery_prefix = "homeassistant"
-tls_insecure = false # mqtts to LAN brokers with self-signed certs
 
 [web]
 listen_addr = "0.0.0.0:8443"
-tls_cert = ""        # empty = auto self-signed (persisted in the state dir)
-tls_key = ""
 
 [hardware]
-serial_port = "/dev/ttymxc2"
-serial_baud = 9600
-inverter_slave_id = 1     # TODO(validate) — walk the bus first
-battery_slave_id = 247    # TODO(validate)
-poll_interval_secs = 5
-simulate = false          # synthetic telemetry; never on a real install
-bus_enabled = true        # false = MCU-sysfs-only (live battery next to the vendor app)
-map_unvalidated = false   # apply provisional register->field mapping (bench only)
-mcu_sysfs = "/sys/class/mcu/mcu1"
-mcu_protocol = false      # opt-in: read-only Bmtp over /dev/mcu1 (single-master!)
-mcu_port = "/dev/mcu1"    # emulator: /dev/ttymxc2
-mcu_baud = 115200         # only applied to a tty; /dev/mcu1 is a char device
-mcu_timeout_ms = 800
-can_listen = false        # passive SocketCAN DIN/BMS listener
-can_iface = "can0"
-meter_enabled = false     # b-sensor grid/load meter (windowed sampling)
+simulate = false         # synthetic telemetry; never on a real install
+bus_enabled = false      # false = no Modbus/MCU UARTs (live next to vendor app)
+can_poll = true          # active CAN BMS poller (packs are responders)
+meter_enabled = true     # b-sensor grid meter on /dev/ttyCH9344USB1
 meter_port = "/dev/ttyCH9344USB1"
-meter_baud = 9600
-meter_slave = 1
-meter_interval_secs = 15
 
-[prices]                  # Nordpool day-ahead (keyless), cached on disk
-enabled = false
+[prices]                 # Nordpool day-ahead (keyless), cached on disk
+enabled = true
 area = "SE4"
 currency = "EUR"
-tz_offset_secs = 3600
-refresh_secs = 21600
-framebuffer = "/dev/fb0"
-display_enabled = true
+
+[solar]                  # Open-Meteo PV forecast (keyless)
+enabled = true
+latitude = 55.7
+longitude = 13.2
 
 [policy]
 enabled = true
-mode = "auto"             # auto | idle | charge | discharge
-reserve_percent = 20      # never discharge below this SOC
-charge_limit_w = 0        # 0 = no policy limit
-discharge_limit_w = 0
-grid_limit_w = 0          # basic anti-reflux (0 = off)
-override_slots = []       # 96x15min, e2e semantics (PROTOCOL.md §8)
-override_high = 72
-override_low = 20
+mode = "optimize"        # auto | idle | charge | discharge | optimize
+reserve_percent = 20     # never discharge below this SOC
+override_slots = []      # 96x15min, e2e semantics (PROTOCOL.md §8)
 
 [control]
-writes_enabled = false    # MASTER SWITCH for bus writes; runtime-flippable
-power_scale = 10          # register units per watt (unconfirmed; bench uses 10)
+writes_enabled = false   # MASTER SWITCH for bus writes; runtime-flippable
+power_scale = 10         # register units per watt (bench uses 10)
 min_write_interval_ms = 5000
 max_writes_per_minute = 12
 watchdog_secs = 60
 ```
 
-Writes are atomic (tmp + rename) with one `.bak`. Secrets are masked in API
-responses (`********` round-trips as "keep existing").
+Other `[hardware]` keys (Modbus poll, MCU, CAN listener, meter timing),
+`[policy.optimizer]` and `[solar.strings]` are documented inline in
+`driver/src/config.rs`. Writes are atomic (tmp + rename) with one `.bak`.
+Secrets are masked in API responses (`********` round-trips as "keep
+existing").
 
 ## Running next to the vendor app (live battery)
 
-Modbus RTU is **single-master**. On the live battery the vendor app owns
-`/dev/ttymxc2`, so a second bus master would collide. Two supported modes:
+Modbus RTU is **single-master**. On the live battery the vendor app owns the
+Modbus devices (CH9344 inverter/b-sensor ports) and the MCU link, so a second
+bus master would collide. Two supported modes:
 
 1. **`bus_enabled = false`** (default for live use): the driver never opens
-   the MCU UART. Telemetry comes from the MCU sysfs
-   (`/sys/class/mcu/mcu1/{inverter_0..2,mcu_status,con_power}`) and, with
-   `can_listen = true`, the passive CAN/BMS listener (`can0`). Display, web,
-   MQTT all work. This is the deployed live mode. `mcu_protocol` stays
-   false; see below.
-2. **Exclusive MCU/Modbus window** (only in a controlled window, reversible):
+   the Modbus/MCU UARTs. Telemetry comes from the MCU sysfs
+   (`/sys/class/mcu/mcu1/*`), the passive **CAN/BMS** listener (`can0`,
+   `can_listen=true`) or the **active CAN poller** (`can_poll=true`), and the
+   **b-sensor** meter (`meter_enabled=true`, `/dev/ttyCH9344USB1`, which is
+   quiet enough to share). Display, web, MQTT, prices, PV forecast and the
+   planner all work. This is the deployed live mode.
+2. **Exclusive Modbus/MCU window** (only in a controlled window, reversible):
    `systemctl stop monitor-dog.service monitor.service; pkill -x app`
    (verify `ps -C app` is empty), run `--mcu-probe` or a driver with
    `bus_enabled = true`, then
@@ -232,39 +225,43 @@ interfere with them.
 
 ## Live-hardware status (2026-11-25)
 
-Phase 1 runs on the live battery in `bus_enabled=false` mode (MCU sysfs
-telemetry, web UI on :8443). A controlled live window established that
-**this unit has no direct Modbus inverter bus**: the inverter is behind
-the housekeeping MCU (`/dev/mcu1`) and the batteries behind a CAN bridge
-(`/run/cabinet/*`). The Bmtp MCU protocol was recovered and
-bench-validated, but the live `/dev/mcu1` path produced no responses (even
-for the kernel driver's own open-time DIN queries) in a controlled
-window, before and after an `mcu_rst` pulse. The vendor app's own display
-also showed Solar 0 / Grid 0, so the inverter telemetry path is absent on
-this unit, not just for us.
+**Read-only on the live battery** (`bus_enabled=false`, writes dry-run,
+passive CAN), serving the PWA web UI on `:8443`. Validated live:
 
-The working live read-only telemetry is the **CAN/BMS path**:
-`hardware.can_listen=true` (or `--can-probe`) decodes the BAK TLV from the
-type-7 DIN reports. Live check 2026-11-25: 3 packs, 16 cells, 3.26 V
-cells, 52.3 V, −6…−8 A, SOC 56/75/67 %, 15–27 °C, 317–365 cycles,
-98–100 % health. Modbus/MCU writes remain bench-only and
-`control.writes_enabled=false` everywhere. Restore-after-window:
-`systemctl start monitor.service monitor-dog.service`.
+- **CAN/BMS** — active BMS polling of the 3 packs (`hardware.can_poll`) gives
+  SOC, cell voltages, pack voltage/current, temps, cycles, health. Live:
+  3 packs, 16 cells, 3.26 V cells, 52.3 V, −6…−8 A, SOC 56/75/67 %,
+  15–27 °C, 317–365 cycles, 98–100 % health.
+- **b-sensor grid meter** (`/dev/ttyCH9344USB1`) — grid power, and load
+  derived as `load = PV + grid − battery_charge` on every CAN/grid update.
+- **Nordpool** day-ahead prices (keyless) and **Open-Meteo** PV forecast.
+- **On-box planner/optimizer** (mode `optimize`) over 96×15-min slots.
+- **MQTT / HA discovery** (code complete; broker off by default).
 
-## Phase 1 limitations / known unknowns
+**Writes (FC16 setpoints)** pass the controller gates and are proven on the
+bench and in a one-off live write; the **service-path write currently times
+out** — open bug (see `../docs/ISSUES.md` #2). A 30-min live soak completed
+and auto-reverted.
+
+**E-ink display**: the refresh fix (`msync` of the fb mapping, like the
+vendor's framebuffer `Sync`) landed this session and needs a live
+confirmation (`../docs/ISSUES.md` #1).
+
+The housekeeping MCU (`/dev/mcu1`) Bmtp read set is recovered and
+bench-validated, but its inverter telemetry is silent on this unit; the live
+inverter path is Modbus RTU on the CH9344 ports (see
+`../docs/REGISTERS.md`). `control.writes_enabled=false` on the live unit.
+Restore-after-window: `systemctl start monitor.service monitor-dog.service`.
+
+## Limitations / known unknowns
 
 - **Register block addresses are binary-verified** (HiSolar 0x0FA0/0x0FAF);
-  field names/scales inside the block are provisional until confirmed
-  against live telemetry (checklist in `../docs/REGISTERS.md`). Raw windows
-  are exposed in the UI/API; `hardware.map_unvalidated=true` applies the
-  provisional mapping (bench only).
-- BMS XOR frame layout is not captured yet; `src/bms.rs` implements the
-  checksum + extractor and is unit-tested, but no live BMS data is parsed.
-- Cabinet / b-sensor / EV-gun slave ids unknown; the slave walk is the
-  discovery tool.
+  field names/scales inside the block are provisional until confirmed against
+  live telemetry (checklist in `../docs/REGISTERS.md`). Live PV *power* is not
+  yet read (see ISSUES #3); the Open-Meteo forecast feeds the planner instead.
+- Cabinet / b-sensor / EV-gun slave ids: inverter and b-sensor are slave 1;
+  EV-gun id unknown (the slave walk is the discovery tool).
 - RS485 vs plain UART on the service port is untested (dongle decides);
   `TIOCSRS485` is best-effort.
-- No local history database (MQTT retain + HA history instead), matching
-  the Go firmware's FW-1 decision.
-- Control commands, schedules, policy engine: Phase 2, behind feature
-  flags, after Phase 1 sign-off.
+- History is a local 48 h ring (`history.jsonl`), not a long-term database.
+  MQTT retain + HA history cover longer retention.
