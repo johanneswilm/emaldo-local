@@ -213,34 +213,38 @@ Never commit that file: it contains live end/chat secrets.
 - `/bmt/get-global-config` returns a **list** of `{config_id, config_item,
   default_value, bmt_value, note}` items (see `vendor_get-global-config.json`),
   not an object under `config`.
-### Command injection (validated 2026-11-24)
+### e2e command injection: what the emulator must implement
 
-`emulator/e2e_inject.py` builds a PROTOCOL.md §4.3 command frame and sends it
-through the fake relay with a distinct app sender identity. The relay forwards
-it to the device session and routes the answer back:
+The firmware accepts **msct app commands** on its e2e channel (its own logs
+contain `recv 0xa103 cmd ...`), and this is how the live module's firmware
+was updated. The wire format is a full TLV, not the simplified frame in
+`emulator/e2e_inject.py`:
 
 ```
-app 10.0.2.15 30a0 len 225
-FWD app->dev 30a0 to ('10.0.2.15',51601)
-dev 10.0.2.15 30a0 len 211
-FWD dev->app and_... to ('10.0.2.15',42806)
+D9 | END_ID 0xA0 | GROUP 0xA1 | RECEIVER 0xA2 | AES-IV 0xA3 |
+PROXY=1 0xF1 (2-byte LE) | APP_ID 0xB5 | MSGID 0xF6 |
+METHOD 0xF5 (2-byte LE short) | CTYPE 183 | AES-CBC(chat_secret, iv)
 ```
 
-**Correction (2026-11-24 23:55): the device ACKs the frame but does not execute
-it.** A side-effect test with the device's own `request_check_update` method
-produced no OTA request, and 168 app support opcodes plus 15 ASCII support/diag
-names produced no diagchan footprint. The 211-byte reply is the msct transport
-ACK, not an application response. The e2e layer needs the real session
-establishment/trust handshake (app end_id/secret status exchange), which the
-fake relay does not implement. Next step: replay a complete real app->device
-session from the captures byte-for-byte, then re-test a documented command.
+Before a command, establish the session (`estab`: METHOD `estab`, JSON
+payload, key = sender end_secret) and run the alive/wake/heartbeat
+handshake. Only then do commands dispatch; `get_chips_status` (0xA011 ->
+`11 a1`) answers `[error,status]` and `update_chips` (0xA103 -> `03 a1`)
+triggers the staged install. A bare frame without `estab`/PROXY is ACKed by
+the relay but not executed - that is what the earlier emulator attempt
+observed (the 211-byte reply is the transport ACK).
 
-- OTA: `/bmt/get-latest-ver-url` -> download -> md5 -> `[RootfsUpgrade]` /
-  `versions`, with `user-ota-preference`. **Rootfs updates are APT-based**
-  (`rootfs.UpgradeWithApt`, `bootstrapAptKeyring`, vendor mirror), so a custom
-  rootfs needs the vendor apt key; per-device inverter/BMS firmware OTA is
-  md5-only but runs on other MCUs. Use OTA to test *our* firmware's own signed
-  self-update once it runs on the module, not to install it on a live battery.
+- **The app OTA is the proven remote-code channel.** `/bmt/get-latest-ver-url`
+  returns a manifest (md5 + url + version) that the takeover server authors;
+  the iot artifact is a **bare static ARM Go ELF** and the only integrity check
+  is **md5** (no signature). The module downloads, stages and applies it
+  in-session (~60 min timer, then re-exec). This is how the live module went
+  from v2.35.3 to v2.35.5 with a patched vendor ELF; rollback is a manifest
+  pointing at the reference ELF. Only the OS-level `RootfsUpgrade` path is
+  APT-signed - never offer it (it can wipe `/root`). The full procedure and
+  the exact msct details live in the private lab notebook
+  (`HANDOFF_REMOTE_ACCESS.md`, `ha/docs/OTA.md`, `ha/docs/APP_COMMANDS.md`,
+  `scripts/inject_msct2.py`).
 
 ## What is still not emulated
 
@@ -248,8 +252,10 @@ session from the captures byte-for-byte, then re-test a documented command.
   but does not answer them; the panel therefore shows 0 kW everywhere and the
   inverter/BMS values are absent.
 - **e2e/MSCT handshake.** The device leg reaches the relay over eth0
-  (`relay_live.log: dev 10.0.2.15 alive`), but the login loop only stops while
-  the module accepts the replayed identity; making that deterministic is open.
+  (`relay_live.log: dev 10.0.2.15 alive`), but command dispatch needs the
+  session establishment (`estab`) + alive/wake/heartbeat handshake. The fake
+  relay does not implement it yet; porting the working injector to the
+  emulator is the next step before judging any command result.
 - **Cloud semantics.** The sandbox API returns canned JSON (login creds, price
   template, config); it is not a faithful emulator of auth/crypto or of the
   data the real cloud expects. OTA/update, MQTT/cloudr and FCR flows are not
