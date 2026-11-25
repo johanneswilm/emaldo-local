@@ -16,6 +16,7 @@ claims are folded into the current statement rather than kept as
 | [`BLE-GATT.md`](BLE-GATT.md) | Vendor BLE GATT profile: service/characteristics, per-model UUIDs, command verbs |
 | [`VENDOR-CONFIG.md`](VENDOR-CONFIG.md) | Vendor `config.toml` keys (the stock firmware's own settings) |
 | [`ISSUES.md`](ISSUES.md) | Open issues in the **driver** (display refresh, service-path write timeout, PV mapping) |
+| [`ACCESS.md`](ACCESS.md) | SSH access to the module, persisting it, and isolating the vendor (cloud + remote tunnel), with safety/rollback |
 
 Approach-specific docs live with the approach:
 

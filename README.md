@@ -30,6 +30,13 @@ what they give up, and in how ready they are.
 > ~31 MB, *not* in this repo) is your rollback image — back it up offline.
 > License: GPL-3.0-only (see `LICENSE`).
 
+## Access & isolation
+
+How to get **SSH access** to a Power Core module, **persist** it, and **shut
+the vendor out** (cloud + its remote-access tunnel) — plus the safety and
+reversal steps — is in [`docs/ACCESS.md`](docs/ACCESS.md). Read it before
+changing anything on a live box.
+
 ## The two approaches
 
 ### A. Replacement driver — [`driver/`](driver/README.md)

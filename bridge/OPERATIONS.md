@@ -4,6 +4,10 @@ Concrete commands for the daemon in `bridge/crates/emaldo-bridge`. Verified agai
 the live Power Core (i.MX6 ULL, 236 MiB RAM, Debian 11, vendor app v2.35.5)
 on 2026-11-25. Every command below is the one actually used.
 
+SSH access to the box (keys, persistence, shutting the vendor out, and the
+safety/rollback steps) is shared across approaches and lives in
+[`../docs/ACCESS.md`](../docs/ACCESS.md).
+
 ## Install
 
 ```sh

@@ -11,7 +11,9 @@ vendor app and identity files untouched.
 
 Context and constraints: register map status and live-hardware findings are
 in [`../docs/REGISTERS.md`](../docs/REGISTERS.md) and
-[`../docs/ISSUES.md`](../docs/ISSUES.md).
+[`../docs/ISSUES.md`](../docs/ISSUES.md). SSH access to the box, persisting
+it, and isolating the vendor (cloud + remote tunnel), with rollback, is in
+[`../docs/ACCESS.md`](../docs/ACCESS.md).
 
 ## Layout
 
