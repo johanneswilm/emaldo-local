@@ -175,6 +175,13 @@ impl WebServer {
                 }
                 let _ = respond_json(stream, 200, &self.day_summary());
             }
+            ("GET", "/api/v1/history") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let samples = crate::history::load(&self.cfg.dir());
+                let _ = respond_json(stream, 200, &serde_json::json!({ "samples": samples }));
+            }
             ("GET", "/api/v1/broker") => {
                 if !self.check_auth(stream, &headers) {
                     return;

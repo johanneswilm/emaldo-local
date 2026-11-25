@@ -93,6 +93,8 @@
   .tabs { display:flex; gap:8px; flex-wrap:wrap; margin: 6px 0 12px; }
   .tabs a { padding:7px 14px; border-radius:999px; background:#ffffff0f; color:var(--fg); text-decoration:none; font-size:13px; border:1px solid transparent; }
   .tabs a:hover { border-color:var(--line); }
+  .tabs .tabbtn { padding:7px 14px; border-radius:999px; background:#ffffff0f; color:var(--fg); font-size:13px; border:1px solid transparent; box-shadow:none; margin:0; font-weight:400; }
+  .tabs .tabbtn:hover { border-color:var(--line); transform:none; }
   .banner { display:flex; align-items:center; gap:12px; }
   .banner .dot { width:9px; height:9px; border-radius:50%; background:var(--acc); box-shadow:0 0 12px var(--acc); }
 </style>
@@ -183,13 +185,26 @@
     </section>
 
     <div class="tabs">
-      <a href="#app">Dashboard</a>
-      <a href="/api/v1/day" target="_blank" rel="noopener">REST API (today, JSON)</a>
-      <a href="#settings">Settings</a>
+      <a href="#history">History</a>
+      <a href="#planner_card">Plan</a>
+      <a href="/api/v1/day" target="_blank" rel="noopener">API</a>
+      <button class="ghost tabbtn" onclick="toggleSettings()">⚙ Settings</button>
       <a href="#" onclick="doLogout();return false">Log out</a>
     </div>
 
-  <section class="card">
+  <section class="card" id="history">
+      <h2>History · last 48 hours</h2>
+      <div class="planner-legend" style="margin-bottom:6px;color:var(--mut);font-size:12px">
+        <i style="background:var(--battery)"></i>SOC
+        <i style="background:var(--grid)"></i>Grid
+        <i style="background:var(--solar)"></i>PV
+        <i style="background:var(--load)"></i>Load
+      </div>
+      <svg id="histchart" viewBox="0 0 720 200" preserveAspectRatio="none" aria-label="48 hour history"></svg>
+      <div class="mut" id="hist_note" style="font-size:12px;margin-top:4px">Building history…</div>
+    </section>
+
+    <section class="card">
       <h2>Device tree</h2>
       <div class="tree" id="s_tree">–</div>
     </section>
@@ -200,7 +215,7 @@
       <table id="s_raw"><tr><th>block</th><th>value</th></tr></table>
     </section>
 
-    <section class="card">
+    <section class="card" id="planner_card">
       <h2>Policy &amp; control <span class="pill" id="c_writes">…</span></h2>
       <div class="row">
         <div><div class="mut">Mode</div><div class="big" id="c_mode">–</div></div>
@@ -251,7 +266,7 @@
       <pre id="s_events">–</pre>
     </section>
 
-    <section class="card">
+    <section class="card hidden" id="settings_card">
       <h2>Settings</h2>
       <p class="mut">Edit and save configuration; changes are written to the driver's TOML
       and applied live where possible. Some hardware fields take effect after a restart.
@@ -354,7 +369,7 @@ async function startApp() {
   const j = await r.json().catch(() => ({}));
   renderState(j);
   startStream();
-  loadEvents(); loadConfig();
+  loadEvents(); loadHistory();
 }
 
 async function doSetup() {
@@ -404,6 +419,49 @@ function fmtW(w) { return (w === undefined || w === null) ? '–' : Math.round(w
 function setArc(id, active) {
   const el = document.getElementById(id);
   if (el) el.classList.toggle('active', !!active);
+}
+
+function toggleSettings() {
+  const c = document.getElementById('settings_card');
+  c.classList.toggle('hidden');
+  if (!c.classList.contains('hidden')) { loadConfig(); c.scrollIntoView({behavior:'smooth'}); }
+}
+
+let HIST = [];
+async function loadHistory() {
+  const r = await api('/api/v1/history');
+  if (!r.ok) return;
+  const j = await r.json().catch(() => ({samples:[]}));
+  HIST = j.samples || [];
+  renderHistory();
+}
+
+function renderHistory() {
+  const svg = document.getElementById('histchart');
+  const note = document.getElementById('hist_note');
+  if (!svg) return;
+  const d = HIST;
+  if (!d.length) { svg.innerHTML=''; if (note) note.textContent='No history yet — samples are recorded every 5 minutes.'; return; }
+  const W=720,H=200,padL=8,padB=18,padT=10;
+  const n=d.length, x=i=>padL+(i/Math.max(1,n-1))*(W-2*padL);
+  // ranges
+  let gmax=1,pmaxv=1,lmax=1; d.forEach(s=>{gmax=Math.max(gmax,Math.abs(s.grid));pmaxv=Math.max(pmaxv,s.pv);lmax=Math.max(lmax,s.load);});
+  const pwmax=Math.max(gmax,pmaxv,lmax);
+  const yPow=v=> (H-padB) - Math.max(0,v)/pwmax*(H-padB-padT)*0.75;
+  const ySoc=v=> (H-padB) - (v/100)*(H-padB-padT);
+  let g='';
+  // grid area (blue) — import above 0
+  const zero=H-padB;
+  g+='<polyline points="'+d.map((s,i)=>x(i).toFixed(1)+','+yPow(s.grid).toFixed(1)).join(' ')+'" fill="none" stroke="var(--grid)" stroke-width="1.6" opacity="0.85"/>';
+  g+='<polyline points="'+d.map((s,i)=>x(i).toFixed(1)+','+yPow(s.pv).toFixed(1)).join(' ')+'" fill="none" stroke="var(--solar)" stroke-width="1.8"/>';
+  g+='<polyline points="'+d.map((s,i)=>x(i).toFixed(1)+','+yPow(s.load).toFixed(1)).join(' ')+'" fill="none" stroke="var(--load)" stroke-width="1.2" opacity="0.8"/>';
+  // SOC line (green, bright)
+  g+='<polyline points="'+d.map((s,i)=>x(i).toFixed(1)+','+ySoc(s.soc).toFixed(1)).join(' ')+'" fill="none" stroke="var(--battery)" stroke-width="2.4"/>';
+  // hour ticks every 6h
+  d.forEach((s,i)=>{ const hh=new Date(s.t*1000).getHours(); if(hh%6===0){ g+='<line x1="'+x(i)+'" y1="'+padT+'" x2="'+x(i)+'" y2="'+zero+'" stroke="#ffffff12"/>'; g+='<text x="'+x(i)+'" y="'+(H-4)+'" fill="var(--mut)" font-size="10" text-anchor="middle">'+String(hh).padStart(2,'0')+':00</text>'; }});
+  svg.innerHTML=g;
+  const last=d[d.length-1];
+  if(note) note.textContent='SOC '+(last.soc||0).toFixed(0)+'% · '+(d.length*5/60).toFixed(1)+' h of data · grid now '+fmtkW(last.grid)+', PV '+fmtkW(last.pv)+', load '+fmtkW(last.load);
 }
 
 function renderPlanner(st) {
@@ -584,6 +642,7 @@ async function loadEvents() {
     new Date(e.time*1000).toLocaleString() + ' [' + e.level + '] ' + e.source + ': ' + e.message
   ).join('\n') || '(no events yet)';
   setTimeout(loadEvents, 10000);
+  setTimeout(loadHistory, 120000);
 }
 
 

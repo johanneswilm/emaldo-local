@@ -25,6 +25,7 @@ mod dns;
 mod font;
 mod mcu;
 mod meter;
+mod history;
 mod mcu_proto;
 mod modbus;
 mod mqtt;
@@ -745,6 +746,9 @@ fn main() {
             telem.clone(),
         );
     }
+    // Rolling 48 h history for the dashboard chart.
+    history::start(state_dir.clone(), telem.clone());
+
     if cfg0.hardware.meter_enabled {
         eprintln!(
             "meter: {} @{} slave {} every {}s (windowed; vendor app may own it)",

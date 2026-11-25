@@ -690,6 +690,11 @@ impl Store {
         }))
     }
 
+    /// Directory holding the config (and our state files: journal, history).
+    pub fn dir(&self) -> std::path::PathBuf {
+        self.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     pub fn get(&self) -> Config {
         self.inner.read().unwrap().clone()
     }
