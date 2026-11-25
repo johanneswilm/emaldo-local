@@ -131,13 +131,13 @@ LICENSE              GPL-3.0-only
 
 ## Go legacy skeleton (repo root `internal/`, `cmd/`, `go.mod`)
 
-The repo root still carries the original **FastFW-1** Go skeleton: a
+The repo root still carries the original **FW-1** Go skeleton: a
 replacement module app (`cmd/emaldo-local` + `internal/{config,web,mqtt,
 hermes,telemetry,bled,ota}`) with a `manifest-tool`. It is **superseded** by
 the Rust driver (`driver/`) for the read/control path and by the bridge for
 the takeover path. It is kept because it is the readable reference for the
-MQTT/HA payload layout and the signed-OTA manifest tooling, and it still
-builds (`scripts/build.sh` → `bin/emaldo-local-linux-arm`). It is not the
+MQTT/HA payload layout and the signed-OTA manifest tooling; `scripts/build.sh`
+still cross-compiles it (`go build ./cmd/emaldo-local`). It is not the
 recommended path.
 
 ## What belongs in this repository
