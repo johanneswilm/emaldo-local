@@ -203,7 +203,7 @@ pub fn parse_battery_info(p: &[u8]) -> Option<BatteryInfo> {
         *i += n;
         s
     };
-    Some(BatteryInfo {
+    let info = BatteryInfo {
         state_flags: flags,
         discharging: flags & 1 == 1,
         charging: flags & 2 == 2,
@@ -221,7 +221,16 @@ pub fn parse_battery_info(p: &[u8]) -> Option<BatteryInfo> {
         id_info: rd_str(&mut i),
         version: rd_str(&mut i),
         barcode: rd_str(&mut i),
-    })
+    };
+    // Plausibility gate. The `0x06` command number also carries answers that
+    // are not a pack record, and any payload decoded at the wrong offset comes
+    // out as a pack with SOC in the thousands and a 700 degC BMS (seen live:
+    // soc 10778, soh 4112). Rejecting here is what keeps that junk out of the
+    // web UI, the MQTT telemetry and the history log.
+    if info.soc > 100 || info.soh > 100 || !(-40.0..=125.0).contains(&info.bms_temp_c) {
+        return None;
+    }
+    Some(info)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -591,6 +600,33 @@ pub fn parse_vpp_state(p: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn battery_record_is_rejected_when_it_is_not_one() {
+        // The live unit answers 0x06 with frames that are not pack records;
+        // decoded at the pack offsets they claim SOC 10778 and SOH 4112.
+        let mut ok = vec![0u8; 24];
+        ok[0..2].copy_from_slice(&3u16.to_le_bytes()); // charging + discharging flags
+        for at in [2usize, 4, 6] {
+            ok[at..at + 2].copy_from_slice(&2981u16.to_le_bytes()); // 24.95 degC
+        }
+        ok[14..16].copy_from_slice(&72u16.to_le_bytes()); // soc
+        ok[18..20].copy_from_slice(&9855u16.to_le_bytes()); // full Wh
+        ok[22..24].copy_from_slice(&98u16.to_le_bytes()); // soh
+        let b = super::parse_battery_info(&ok).expect("plausible pack");
+        assert_eq!((b.soc, b.soh, b.full_energy_wh), (72, 98, 9855));
+
+        let mut junk = ok.clone();
+        junk[14..16].copy_from_slice(&10778u16.to_le_bytes());
+        assert!(super::parse_battery_info(&junk).is_none(), "SOC 10778 is not a pack");
+
+        let mut hot = ok.clone();
+        hot[22..24].copy_from_slice(&4112u16.to_le_bytes());
+        assert!(super::parse_battery_info(&hot).is_none(), "SOH 4112 is not a pack");
+        let mut hot = ok.clone();
+        hot[2..4].copy_from_slice(&9689u16.to_le_bytes()); // 695.75 degC
+        assert!(super::parse_battery_info(&hot).is_none(), "a 695 degC BMS is not a pack");
+    }
+
     use super::*;
 
     #[test]

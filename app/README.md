@@ -228,8 +228,13 @@ no entities. `<prefix>/status` also carries a retained last will (`offline`), so
 HA marks the device unavailable if the process dies, and discovery is
 re-published after **every** CONNACK — a broker or HA restart re-registers the
 device without restarting the driver. Unique ids are
-`emaldo-local:<device-id>:<object>`; HA tombstones deleted entity ids, so the
-namespace is part of the config rather than the bare device id.
+`<unique_prefix>:<device-id>:<object>` (`mqtt.unique_prefix`, default
+`emaldo-local`); HA tombstones deleted entity ids, so the namespace is a config
+value rather than a bare constant — bump it after deleting entities in the HA UI
+and the entities come back. Both roles publish the same topic set: the driver
+from the Modbus/CAN bus, the bridge role from the module's E2E reports
+(`src/bridge/mqtt_pub.rs`), so Home Assistant does not need to know which one is
+running — but only one of them should be publishing at a time.
 `cmd/#` is subscribed but commands are ignored in Phase 1 (logged to the event
 ring).
 

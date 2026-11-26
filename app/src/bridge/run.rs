@@ -392,6 +392,9 @@ fn run(config_path: &Path, state_override: Option<&str>) -> std::process::ExitCo
     // --- telemetry poller -------------------------------------------------
     let poll = poller::spawn(bridge.clone(), relay.clone());
 
+    // --- MQTT telemetry (off until config.json has an [mqtt]/mqtt section) --
+    crate::bridge::mqtt_pub::spawn(bridge.clone());
+
     // --- signals ----------------------------------------------------------
     unsafe {
         // systemd sends SIGTERM; a stuck SIGHUP must not kill the bridge either.

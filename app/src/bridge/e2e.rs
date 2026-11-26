@@ -29,6 +29,12 @@ use crate::bridge::state::Bridge;
 /// milliseconds, so a short timeout fails fast when it is busy or offline.
 pub const CMD_TIMEOUT: Duration = Duration::from_millis(2500);
 
+/// Reply window for the reads that make the module walk its own buses. Pack
+/// (`0x06`) and cabinet/inverter (`0x0E`, `0x0D`, `0x04`) queries go over the
+/// module's CAN side, and the live unit answers those well past the 2.5 s the
+/// power-flow poll uses; at 2.5 s they only ever timed out.
+pub const BUS_CMD_TIMEOUT: Duration = Duration::from_secs(9);
+
 #[derive(Debug)]
 pub enum Error {
     /// The module has no live relay session (it is not talking to the bridge).
@@ -63,7 +69,7 @@ pub fn command(
     cmd: cmds::Cmd,
     payload: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    command_validated(bridge, relay, cmd, payload, &|p| !p.is_empty())
+    command_window(bridge, relay, cmd, payload, &|p| !p.is_empty(), CMD_TIMEOUT)
 }
 
 /// As [`command`], but only accepts replies that `validate` recognises. The
@@ -77,6 +83,18 @@ pub fn command_validated(
     cmd: cmds::Cmd,
     payload: &[u8],
     validate: &dyn Fn(&[u8]) -> bool,
+) -> Result<Vec<u8>, Error> {
+    command_window(bridge, relay, cmd, payload, validate, CMD_TIMEOUT)
+}
+
+/// As [`command_validated`] with an explicit reply window.
+pub fn command_window(
+    bridge: &Arc<Bridge>,
+    relay: &Arc<Relay>,
+    cmd: cmds::Cmd,
+    payload: &[u8],
+    validate: &dyn Fn(&[u8]) -> bool,
+    wait: Duration,
 ) -> Result<Vec<u8>, Error> {
     let id = bridge.ident.get();
     if id.chat_secret.is_empty() {
@@ -101,7 +119,7 @@ pub fn command_validated(
         &msgid,
         payload,
     );
-    exchange(bridge, relay, &frame, &msgid, &nonce, validate)
+    exchange(bridge, relay, &frame, &msgid, &nonce, validate, wait)
 }
 
 /// The app-side credentials the module accepts: the end the bridge handed to
@@ -134,6 +152,7 @@ pub fn exchange(
     msgid: &str,
     nonce: &str,
     validate: &dyn Fn(&[u8]) -> bool,
+    wait: Duration,
 ) -> Result<Vec<u8>, Error> {
     let id = bridge.ident.get();
     if id.chat_secret.is_empty() {
@@ -154,7 +173,7 @@ pub fn exchange(
     relay.route_reply(msgid, addr);
     relay.send_to_device(frame).map_err(|_| Error::NoDevice)?;
 
-    let deadline = std::time::Instant::now() + CMD_TIMEOUT;
+    let deadline = std::time::Instant::now() + wait;
     let mut why = String::from("no frame with that msgid");
     loop {
         let now = std::time::Instant::now();
@@ -289,9 +308,14 @@ pub fn read_batteries(bridge: &Arc<Bridge>, relay: &Arc<Relay>, slots: &[u8]) ->
     let mut items: Vec<Value> = Vec::new();
     let mut last_err = None;
     for slot in slots {
-        match command_validated(bridge, relay, cmds::C_BATTERY_INFO, &[*slot], &|p| {
-            cmds::parse_battery_info(p).is_some()
-        }) {
+        match command_window(
+            bridge,
+            relay,
+            cmds::C_BATTERY_INFO,
+            &[*slot],
+            &|p| cmds::parse_battery_info(p).is_some(),
+            BUS_CMD_TIMEOUT,
+        ) {
             Ok(pt) => match cmds::parse_battery_info(&pt) {
                 Some(b) => {
                     let mut v = serde_json::to_value(&b).unwrap();
@@ -319,13 +343,25 @@ pub fn read_batteries(bridge: &Arc<Bridge>, relay: &Arc<Relay>, slots: &[u8]) ->
 /// Cabinet sensors and inverter records (`0x0E`, `0x0D`, `0x04`).
 pub fn read_accessories(bridge: &Arc<Bridge>, relay: &Arc<Relay>) -> Result<Value, Error> {
     let mut out = serde_json::Map::new();
-    if let Ok(pt) = command(bridge, relay, cmds::C_CABINET_ALL, b"") {
+    if let Ok(pt) = command_window(
+        bridge,
+        relay,
+        cmds::C_CABINET_ALL,
+        b"",
+        &|p| !p.is_empty(),
+        BUS_CMD_TIMEOUT,
+    ) {
         out.insert("cabinet_all".into(), json!(emaldo_proto::codec::hex_encode(&pt)));
     }
     for idx in 0..3u8 {
-        if let Ok(pt) = command_validated(bridge, relay, cmds::C_CABINET_STATE, &[idx], &|p| {
-            cmds::parse_cabinet_state(p).is_some()
-        }) {
+        if let Ok(pt) = command_window(
+            bridge,
+            relay,
+            cmds::C_CABINET_STATE,
+            &[idx],
+            &|p| cmds::parse_cabinet_state(p).is_some(),
+            BUS_CMD_TIMEOUT,
+        ) {
             if let Some(cs) = cmds::parse_cabinet_state(&pt) {
                 let mut v = serde_json::to_value(cs).unwrap();
                 if let Some(o) = v.as_object_mut() {
@@ -334,9 +370,14 @@ pub fn read_accessories(bridge: &Arc<Bridge>, relay: &Arc<Relay>) -> Result<Valu
                 out.insert(format!("cabinet_state_{idx}"), v);
             }
         }
-        if let Ok(pt) = command_validated(bridge, relay, cmds::C_INVERTER_INFO, &[idx], &|p| {
-            cmds::parse_inverter_info(p).is_some()
-        }) {
+        if let Ok(pt) = command_window(
+            bridge,
+            relay,
+            cmds::C_INVERTER_INFO,
+            &[idx],
+            &|p| cmds::parse_inverter_info(p).is_some(),
+            BUS_CMD_TIMEOUT,
+        ) {
             if let Some(ii) = cmds::parse_inverter_info(&pt) {
                 let mut v = serde_json::to_value(ii).unwrap();
                 if let Some(o) = v.as_object_mut() {
@@ -440,7 +481,7 @@ pub fn write_override(
     let msgid = msct::app_msgid();
     let payload = cmds::encode_override_write(high, low, u8::from(enable), slots);
     let frame = msct::set_override(&app_creds(bridge), &dev_end, &nonce, &msgid, &payload);
-    exchange(bridge, relay, &frame, &msgid, &nonce, &|p| !p.is_empty())?;
+    exchange(bridge, relay, &frame, &msgid, &nonce, &|p| !p.is_empty(), CMD_TIMEOUT)?;
     // Mirror the write into the relay's own table so `0x1b` readers (HA, the UI)
     // see it immediately, exactly as the vendor relay does.
     relay.put_override(

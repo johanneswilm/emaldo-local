@@ -157,6 +157,9 @@ pub struct Config {
     /// here; `/etc/hosts` alone never moves it.
     pub app_config_file: String,
     pub pin_app_url: bool,
+    /// MQTT telemetry (`[mqtt]` in the driver's TOML, same shape here). Empty
+    /// `broker_url` keeps the bridge from publishing anything.
+    pub mqtt: crate::config::MqttConfig,
     /// systemd units used by the mode switch.
     pub bridge_unit: String,
     pub monitor_units: Vec<String>,
@@ -181,6 +184,7 @@ impl Default for Config {
             relay_advertise_host: None,
             control_bind: "127.0.0.1".into(),
             control_port: 1052,
+            mqtt: crate::config::MqttConfig::default(),
             ui_bind: "0.0.0.0".into(),
             ui_port: 4443,
             lan_only: true,

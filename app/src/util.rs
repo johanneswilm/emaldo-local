@@ -63,6 +63,34 @@ pub fn hash_password(pw: &str, salt_b64: &str) -> String {
     b64_encode(h.as_ref())
 }
 
+/// Stable identity used by MQTT discovery and the web UI.
+///
+/// `/root/.device_id` is the id the vendor app itself carries, so the local
+/// stack reuses it: Home Assistant keeps exactly one device per unit no matter
+/// which role is publishing, and a reinstall does not fork the entity ids.
+pub fn device_id(state_dir: &std::path::Path) -> String {
+    if let Ok(id) = std::fs::read_to_string("/root/.device_id") {
+        let id = id.trim();
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    let p = state_dir.join("device_id");
+    if let Ok(id) = std::fs::read_to_string(&p) {
+        let id = id.trim();
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    let id = format!(
+        "emaldo-{}",
+        random_bytes(6).iter().map(|x| format!("{x:02x}")).collect::<String>()
+    );
+    let _ = std::fs::create_dir_all(state_dir);
+    let _ = std::fs::write(&p, &id);
+    id
+}
+
 pub fn random_bytes(n: usize) -> Vec<u8> {
     use ring::rand::SecureRandom;
     let rng = ring::rand::SystemRandom::new();

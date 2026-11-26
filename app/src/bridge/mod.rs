@@ -12,6 +12,7 @@ pub mod dns;
 pub mod e2e;
 pub mod log;
 pub mod mode;
+pub mod mqtt_pub;
 pub mod net;
 pub mod poller;
 pub mod relay;

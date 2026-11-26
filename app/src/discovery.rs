@@ -93,7 +93,15 @@ pub fn publish_availability(c: &Client, base: &str) {
     c.publish_retained(&format!("{base}/status"), b"online");
 }
 
-pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name: &str, st: &State, base: &str) -> usize {
+pub fn publish_discovery(
+    c: &Client,
+    prefix: &str,
+    device_id: &str,
+    device_name: &str,
+    st: &State,
+    base: &str,
+    uniq_prefix: &str,
+) -> usize {
     let base = base.trim_end_matches('/');
     let dev = serde_json::json!({
         "ids": [device_id],
@@ -104,7 +112,7 @@ pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name:
     let mut add = |comp: &str, object_id: &str, name: &str, extra: serde_json::Value| {
         let mut obj = serde_json::json!({
             "name": name,
-            "uniq_id": format!("emaldo-local:{device_id}:{object_id}"),
+            "uniq_id": uniq_id(uniq_prefix, device_id, object_id),
             "avty_t": format!("{base}/status"),
             "dev": dev,
         });
@@ -191,4 +199,29 @@ pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name:
         }
     }
     n
+}
+
+/// Home Assistant unique id for one entity. The prefix is configurable
+/// ([`crate::config::MqttConfig::unique_prefix`]) because Home Assistant keeps
+/// the unique ids of entities deleted in its UI and then ignores their discovery
+/// configs; bumping the prefix is how an operator re-registers the device.
+fn uniq_id(prefix: &str, device_id: &str, object_id: &str) -> String {
+    format!("{prefix}:{device_id}:{object_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uniq_id;
+
+    #[test]
+    fn unique_id_honours_the_configured_namespace() {
+        assert_eq!(
+            uniq_id("emaldo-local", "HMvSUfAafuYCokvv", "battery_soc"),
+            "emaldo-local:HMvSUfAafuYCokvv:battery_soc"
+        );
+        assert_eq!(
+            uniq_id("emaldo-local2", "HMvSUfAafuYCokvv", "battery_soc"),
+            "emaldo-local2:HMvSUfAafuYCokvv:battery_soc"
+        );
+    }
 }

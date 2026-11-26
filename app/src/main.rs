@@ -55,26 +55,6 @@ const VERSION: &str = "0.2.0-phase2";
 /// Stable device id for MQTT topics and HA discovery. Prefers the vendor
 /// module identity (/root/.device_id, READ-ONLY — it is the vendor-account
 /// binding); otherwise generates and persists our own under the state dir.
-fn device_id(state_dir: &std::path::Path) -> String {
-    if let Ok(id) = std::fs::read_to_string("/root/.device_id") {
-        let id = id.trim();
-        if !id.is_empty() {
-            return id.to_string();
-        }
-    }
-    let p = state_dir.join("device_id");
-    if let Ok(id) = std::fs::read_to_string(&p) {
-        let id = id.trim();
-        if !id.is_empty() {
-            return id.to_string();
-        }
-    }
-    let id = format!("emaldo-{}", hex(&util::random_bytes(6)));
-    let _ = std::fs::create_dir_all(state_dir);
-    let _ = std::fs::write(&p, &id);
-    id
-}
-
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -669,7 +649,7 @@ fn main() {
         }
     };
     let _ = std::fs::create_dir_all(&state_dir);
-    let dev_id = device_id(&state_dir);
+    let dev_id = util::device_id(&state_dir);
     let bus = bus::Bus::new();
     // Single write controller for the whole process (its worker thread
     // serializes every bus write).
@@ -774,18 +754,14 @@ fn main() {
                 let dev2 = dev_id.clone();
                 let telem3 = telem.clone();
                 let discover = cfg.mqtt.ha_discovery;
+                let uniq = cfg.mqtt.unique_prefix.clone();
                 let weak = Arc::downgrade(&mc);
                 mc.set_on_connect(Arc::new(move || {
                     let Some(c) = weak.upgrade() else { return };
                     discovery::publish_availability(&c, &base);
                     if discover {
                         let n = discovery::publish_discovery(
-                            &c,
-                            &dpfx,
-                            &dev2,
-                            &name,
-                            &telem3.current(),
-                            &base,
+                            &c, &dpfx, &dev2, &name, &telem3.current(), &base, &uniq,
                         );
                         telem3.add_event("info", "mqtt", format!("published {n} discovery configs"));
                     }

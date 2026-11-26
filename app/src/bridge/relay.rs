@@ -805,6 +805,7 @@ impl Relay {
 /// {"op":"send","b64":"..."}               -> frame to the module
 /// {"op":"send","b64":"...","end":"<id>"}  -> frame to one session
 /// {"op":"override"}                       -> override tables (group, markers, slots)
+/// {"op":"telemetry"}                     -> last decoded device reports (topic, age, value)
 /// ```
 pub fn serve_control(bridge: Arc<Bridge>, relay: Arc<Relay>) -> std::io::Result<std::thread::JoinHandle<()>> {
     let cfg = bridge.cfg.get();
@@ -837,6 +838,13 @@ pub fn serve_control(bridge: Arc<Bridge>, relay: Arc<Relay>) -> std::io::Result<
                     "override" => {
                         let id = bridge.ident.get();
                         json!({"group": id.group_id, "override": relay.override_for_group(&id.group_id)})
+                    }
+                    "telemetry" => {
+                        let now = unix_s();
+                        let map = bridge.telemetry.read().unwrap();
+                        json!({"topics": map.iter().map(|(k, s)| json!({
+                            "topic": k, "ts": s.ts, "age_s": now.saturating_sub(s.ts), "value": s.value,
+                        })).collect::<Vec<_>>()})
                     }
                     "send" => {
                         let b64 = req.get("b64").and_then(|v| v.as_str()).unwrap_or("");

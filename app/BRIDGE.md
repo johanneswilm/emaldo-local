@@ -68,6 +68,15 @@ binds/ports (`api_bind/api_port=443`, `relay_bind/relay_port=1050`,
 `block_vendor_egress`, `lte_off`) that `mode vendor` undoes. See
 `src/bridge/config.rs`.
 
+The optional `mqtt` block (same shape as the driver's `[mqtt]` TOML section:
+`broker_url`, `username`, `password`, `topic_prefix`, `ha_discovery`,
+`discovery_prefix`, `unique_prefix`, `tls_insecure`) makes the bridge publish
+the plant over MQTT/Home Assistant discovery from the module's E2E reports —
+see [README.md](README.md) (MQTT / Home Assistant). Empty `broker_url`, the
+default, publishes nothing. Only one role should publish at a time: with the
+bridge publishing, `emaldo-driver.service` must be stopped, or both write the
+same topics.
+
 ## How the takeover works (summary)
 
 - The module's `base_url`/`data_url` (vendor config keys, or BLE

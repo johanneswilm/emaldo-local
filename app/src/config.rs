@@ -31,6 +31,12 @@ pub struct MqttConfig {
     pub ha_discovery: bool,
     #[serde(default = "default_discovery_prefix")]
     pub discovery_prefix: String,
+    /// Namespace of the Home Assistant unique ids (`<prefix>:<device>:<object>`).
+    /// Bump this after entities were deleted in the HA UI: Home Assistant keeps
+    /// deleted unique ids and ignores (and cleans up) their discovery configs
+    /// forever, so re-publishing the same ids never brings the entities back.
+    #[serde(default = "default_unique_prefix")]
+    pub unique_prefix: String,
     /// Skip TLS certificate verification for mqtts (LAN brokers).
     #[serde(default)]
     pub tls_insecure: bool,
@@ -475,6 +481,10 @@ fn default_topic_prefix() -> String {
 fn default_discovery_prefix() -> String {
     "homeassistant".into()
 }
+
+fn default_unique_prefix() -> String {
+    "emaldo-local".into()
+}
 fn default_listen() -> String {
     "0.0.0.0:8443".into()
 }
@@ -533,6 +543,7 @@ impl Default for MqttConfig {
             topic_prefix: default_topic_prefix(),
             ha_discovery: true,
             discovery_prefix: default_discovery_prefix(),
+            unique_prefix: default_unique_prefix(),
             tls_insecure: false,
         }
     }

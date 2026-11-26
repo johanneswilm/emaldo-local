@@ -138,8 +138,15 @@ re-assertion (`/etc/resolv.conf was rewritten: ...`).
 - Is the module talking to us? `grep peer=<battery-ip> logs/access.log` for
   `/bmt/login` and `ss -unp | grep -E ':1050|:1051'` for the E2E session; the
   poller logs `module E2E session is live` when telemetry starts.
-- Relay internals: `echo '{"op":"state"}' | nc 127.0.0.1 1052` (also `rx`, and
+- Relay internals: `echo '{"op":"state"}' | nc 127.0.0.1 1052` (also `rx`,
+  `override`, `telemetry` — the last decoded device reports with their age — and
   `send` with `{"b64":...}`).
+- MQTT/HA shows stale or unavailable entities: `{"op":"telemetry"}` shows how
+  old the module's last report is (`age_s`), and `logs/bridge.log` lines tagged
+  `mqtt`/`poll` show the publisher and the E2E reads. `sensor.power_core_live_*`
+  entities are created by discovery; if they were deleted in the HA UI, bump
+  `mqtt.unique_prefix` (HA remembers deleted unique ids and ignores their
+  configs forever) and restart the role that publishes.
 - The app probes a connectivity URL before it will talk to its cloud. The
   answer must be an **empty 204**: `curl -k https://<battery-ip>/generate_204`
   should return `status=204 size=0`. A body reads as a captive portal and the

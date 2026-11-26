@@ -30,6 +30,16 @@ Done:
 - MQTT path fixed on the way: retained QoS 1 discovery configs + availability,
   retained last will, re-publish after every CONNACK (Home Assistant had zero
   entities because the configs were never replayed to a subscribing HA).
+- Bridge telemetry: `app/src/bridge/mqtt_pub.rs` maps what the bridge learned
+  from the module over E2E (`power_flow`, `battery`, the day integration in
+  `Bridge::record_power_flow`) into the same `telemetry::State` the driver
+  builds from the bus, and publishes it plus MQTT discovery under the shared
+  `[mqtt]` settings — the bridge role now has its own publisher (`mqtt` block in
+  `config.json`). Proof on the live box with `emaldo-driver.service` stopped: 8
+  discovery configs, retained `online`, and in Home Assistant
+  `sensor.power_core_live_battery_soc` 73.0 %, `battery_temperature` 24.95 degC,
+  `battery_power` 800 W, `load_net_power`, `grid_net_power`, `pv_power` and the
+  two daily totals, all from the module's E2E reports.
 - Proof: emulator `mode local` run with the merged binary — module login,
   `module E2E session is live`, UI auth + CSRF rejection,
   `POST /api/schedule` → `{"ok":true,"slots":96}` with the markers reading back
@@ -41,9 +51,10 @@ Remaining:
 
 - One config file: the bridge still reads `config.json` (identity, certs,
   ports) and the driver still reads TOML.
-- One telemetry model: the bridge keeps `bridge::state::Bridge`; the `Source` /
-  `Control` traits below are not introduced yet, so the bridge role has no MQTT
-  publisher and no driver web UI.
+- One telemetry model: the bridge now feeds `telemetry::State` for MQTT, but it
+  still keeps `bridge::state::Bridge` as its store and its own `bridge::ui`; the
+  `Source` / `Control` traits below are not introduced, so the shared driver web
+  UI and the shared write path are still driver-only.
 - One unit + one command for the role switch (parking/restoring the vendor app),
   then deleting the bridge-only modules as the driver's control path matures.
 
@@ -237,6 +248,21 @@ writes (0x5B/0x18/0x5F equivalents in the register map), schedule/override
   the LAN at `192.168.50.68:1883` (`192.168.50.68:8883` is TLS and demands a
   client certificate). Broker user/password are the ones HA itself uses; they now
   live in `/root/emaldo-driver.toml` (0600) — not in git.
+- Three live findings behind the bridge telemetry work, each with a test:
+  - The pack/cabinet reads (`0x06`, `0x0D`, `0x04`) never answered inside
+    `CMD_TIMEOUT` (2.5 s) — they cross the module's own CAN side. `e2e` now has
+    `BUS_CMD_TIMEOUT` (9 s) for exactly those reads; before the change the log
+    filled with `battery failed: module did not answer in time` and SOC never
+    arrived.
+  - The same `0x06` command number carries answers that are not pack records.
+    Decoded at the pack offsets they looked like a battery with SOC 10778, SOH
+    4112 and a 695 degC BMS, and those numbers reached the UI.
+    `cmds::parse_battery_info` now rejects anything with SOC/SOH > 100 or a BMS
+    temperature outside -40..125 degC.
+  - The MQTT publisher published a retained `offline` for the first tick (no
+    report yet) and then never said `online` again: Home Assistant kept the
+    entities unavailable while fresh values were arriving. Availability is now
+    published on the transition in both directions.
 - `emaldo_local` (the HA-side repoint component) was being silently skipped by
   HA: `manifest.json` was YAML (HA parses it with `json.load`) and the flow
   handler lived in `__init__.py` instead of `config_flow.py`. Both fixed in the

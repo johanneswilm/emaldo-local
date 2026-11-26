@@ -792,3 +792,71 @@ fn ui_flag_accepts_bools_and_numbers() {
     let v = json!({"on": true});
     assert!(!crate::bridge::ui::Ui::flag(&v, "expand"), "missing key must be false");
 }
+
+#[test]
+fn bridge_reports_map_into_the_shared_telemetry_state() {
+    // The MQTT publisher (and later the shared web UI) reads the plant through
+    // `telemetry::State`, so the E2E reports have to land in it with the right
+    // signs and the pack aggregate the cabinet behaves like.
+    let (_dir, bridge) = fixture("mqttmap");
+    let now = unix_s();
+    bridge.put_telemetry(
+        "power_flow",
+        json!({"battery_w": -617, "solar_w": 1200, "grid_w": -300,
+                "addition_load_w": 400, "other_load_w": 200, "ev_w": 0,
+                "grid_valid": true, "bsensor_valid": true}),
+    );
+    bridge.put_telemetry(
+        "battery",
+        json!({"items": [
+            {"slot": 0, "soc": 80, "soh": 98, "cycle_count": 120, "faults": 0,
+             "full_energy_wh": 5000, "current_energy_wh": 4000,
+             "voltage_mv": 400000, "current_ma": -1500, "bms_temp_c": 24.0},
+            {"slot": 1, "soc": 60, "soh": 96, "cycle_count": 130, "faults": 4,
+             "full_energy_wh": 5000, "current_energy_wh": 3000,
+             "voltage_mv": 401000, "current_ma": -1500, "bms_temp_c": 27.5},
+        ]}),
+    );
+    {
+        let mut day = bridge.day.lock().unwrap();
+        day.last_pf = now;
+        day.imported_wh = 4200.0;
+        day.exported_wh = 1500.0;
+    }
+
+    let st = crate::bridge::mqtt_pub::state_from_bridge(&bridge).expect("mapped state");
+    assert_eq!(st.grid.net_w, -300.0, "grid keeps the protocol sign: export");
+    assert_eq!((st.grid.import_w, st.grid.export_w), (0.0, 300.0));
+    assert_eq!(st.pv.power_w, 1200.0);
+    assert_eq!(st.load.net_w, 600.0, "the three load legs add up");
+    assert_eq!(st.battery.power_w, -617.0, "battery keeps the protocol sign: discharge");
+    assert_eq!(st.battery.soc_percent, 70.0, "capacity-weighted SOC");
+    assert_eq!(st.battery.soh_percent, 97.0);
+    assert_eq!(st.battery.modules, 2);
+    assert_eq!(st.battery.cycle_count, 130);
+    assert_eq!(st.battery.remaining_wh, 7000.0);
+    assert_eq!(st.battery.capacity_wh, 10000.0);
+    assert_eq!(st.battery.current_a, -3.0, "packs are in parallel: currents sum");
+    assert_eq!(st.battery.temp_c, 27.5, "hottest pack is the one that matters");
+    assert_eq!(st.meter.import_kwh, 4.2);
+    assert_eq!(st.meter.export_kwh, 1.5);
+    assert_eq!(st.faults.len(), 1, "only the pack with flags reports a fault");
+    assert!(st.faults[0].contains("pack 1"), "{}", st.faults[0]);
+
+    // A stale report must not keep HA numbers alive.
+    bridge
+        .telemetry
+        .write()
+        .unwrap()
+        .insert("power_flow".into(), crate::bridge::state::Sample { ts: now - 400, value: json!({"grid_w": 0}) });
+    assert!(crate::bridge::mqtt_pub::state_from_bridge(&bridge).is_none());
+}
+#[test]
+fn bridge_config_round_trips_the_mqtt_section() {
+    let json = r#"{"mode":"off","mqtt":{"broker_url":"mqtt://10.0.0.1:1883","username":"u","password":"p","topic_prefix":"tp","ha_discovery":true,"discovery_prefix":"homeassistant","unique_prefix":"up","tls_insecure":false}}"#;
+    let c: crate::bridge::config::Config = serde_json::from_str(json).unwrap();
+    assert_eq!(c.mqtt.broker_url, "mqtt://10.0.0.1:1883");
+    assert_eq!(c.mqtt.unique_prefix, "up");
+    let back = serde_json::to_string(&c).unwrap();
+    assert!(back.contains("\"broker_url\":\"mqtt://10.0.0.1:1883\""), "{back}");
+}

@@ -6,6 +6,47 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# Bridge role publishes telemetry; three E2E/MQTT fixes (2026-11-26)
+
+The bridge role now feeds the shared `telemetry::State` and publishes it, so a
+single MQTT/HA surface works whichever role is running. New
+`app/src/bridge/mqtt_pub.rs`: `state_from_bridge` folds the module's E2E reports
+(`0x30` power flow, `0x06` pack records, `Bridge::record_power_flow` daily
+totals) into `State` — protocol signs kept (battery + = charge, grid + = import),
+the three load legs summed, packs aggregated capacity-weighted (SOC/SOH), summed
+energy and current, hottest pack for temperature — and a thread reconciles the
+running client with the `mqtt` block of `config.json` (off by default),
+publishing availability on transitions and discovery on every CONNACK. The
+device id comes from one shared rule (`util::device_id`, `/root/.device_id`
+first), so both roles register the same Home Assistant device.
+
+Three bugs found on the live unit, each with a test:
+
+- pack/cabinet/inverter reads (`0x06`, `0x0D`, `0x04`) never answered inside the
+  2.5 s `CMD_TIMEOUT` (they cross the module's CAN side); `e2e` now uses
+  `BUS_CMD_TIMEOUT` (9 s) for those, and the log stopped filling with
+  `battery failed: module did not answer in time`.
+- the same `0x06` number also carries non-pack answers; decoded at the pack
+  offsets they looked like SOC 10778 / SOH 4112 / 695 degC and reached the UI.
+  `emaldo-proto::cmds::parse_battery_info` now rejects SOC/SOH > 100 and a BMS
+  temperature outside -40..125 degC.
+- the MQTT publisher retained `offline` on the first tick and never published
+  `online` again, so Home Assistant kept entities unavailable while fresh
+  values arrived. Availability is now published on the transition both ways.
+
+Also: `mqtt.unique_prefix` (default `emaldo-local`) makes the Home Assistant
+unique-id namespace configurable, because HA ignores discovery configs for
+unique ids whose entities were deleted in its UI; `{"op":"telemetry"}` added to
+the `127.0.0.1:1052` control socket (last decoded device reports with age).
+113 app tests + 19 `emaldo-proto` tests green.
+
+Live proof (`emaldo-driver.service` stopped, bridge publishing): 8 discovery
+configs, retained `online`, HA shows `sensor.power_core_live_*` = SOC 73.0 %,
+battery 800 W, 24.95 degC, 52.87 V, −15.15 A, 21168 Wh of 29592 Wh across 3
+packs, plus grid/PV/load and the two daily totals — all from module E2E reports.
+
+---
+
 # Display refresh: vendor uses fb fsync/msync, not an ioctl
 
 Fix for ISSUES #1 (panel blank when only our renderer drives `/dev/fb0`). RE of
