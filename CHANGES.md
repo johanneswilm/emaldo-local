@@ -2,7 +2,7 @@
 
 Dated entries, newest first. This is a chronological log of changes; for the
 current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
-`PROTOCOL.md`, …) and `driver/README.md`.
+`PROTOCOL.md`, …) and `app/README.md`.
 
 ---
 

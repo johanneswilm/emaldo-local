@@ -14,6 +14,39 @@ One config file, one web UI, one MQTT publisher, one systemd unit, one telemetry
 model. As the driver learns to control more, bridge-only modules get deleted —
 no cross-crate interface work is needed to do that, which is the whole point.
 
+## Status (2026-11-26)
+
+Done:
+
+- One package (`app/`, binary `emaldo-local`); the bridge modules live in
+  `app/src/bridge/`, the old `emaldo-bridge` crate is deleted, and
+  `bridge/crates/emaldo-proto` remains as the only other workspace member.
+- Role selection by command word in `main` (`run|mode|certs|config|lte|version`
+  → bridge, `driver`/driver flags → driver), dispatched before a TLS provider is
+  installed. Existing systemd unit lines and docs keep working unchanged.
+- Deploy assets moved to `app/deploy/`; the ARMv7 artifact is one file,
+  installed at `/root/emaldo-local/emaldo-local` and run by both units on the
+  live box (`emaldo-local.service` → `run`, `emaldo-driver.service` → `driver`).
+- MQTT path fixed on the way: retained QoS 1 discovery configs + availability,
+  retained last will, re-publish after every CONNACK (Home Assistant had zero
+  entities because the configs were never replayed to a subscribing HA).
+- Proof: emulator `mode local` run with the merged binary — module login,
+  `module E2E session is live`, UI auth + CSRF rejection,
+  `POST /api/schedule` → `{"ok":true,"slots":96}` with the markers reading back
+  from the module, `mode vendor`/`mode local` hosts round-trip. Live box: both
+  units active on the single artifact, egress pins reported correctly
+  (8 prohibit routes), bridge RSS 3.8 MB, driver RSS 3.1 MB, 110 tests.
+
+Remaining:
+
+- One config file: the bridge still reads `config.json` (identity, certs,
+  ports) and the driver still reads TOML.
+- One telemetry model: the bridge keeps `bridge::state::Bridge`; the `Source` /
+  `Control` traits below are not introduced yet, so the bridge role has no MQTT
+  publisher and no driver web UI.
+- One unit + one command for the role switch (parking/restoring the vendor app),
+  then deleting the bridge-only modules as the driver's control path matures.
+
 ## Package layout (single cargo package + the protocol lib)
 
 ```

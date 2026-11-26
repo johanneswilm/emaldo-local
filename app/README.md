@@ -1,4 +1,20 @@
-# emaldo-driver (Rust) — Phase 1 + Phase 2
+# emaldo-local (Rust) — one binary, two roles
+
+`emaldo-local` runs on the Power Core module in one of two roles:
+
+| role | how you start it | what it is |
+|---|---|---|
+| **bridge** | `emaldo-local run --config /root/emaldo-local/config.json` (unit `emaldo-local.service`, `Before=monitor.service`) | the vendor front: REST on `:443`, E2E relay `:1050/:1051`, local resolver `:53`, control socket `:1052`, operator UI `:4443`; the vendor Go app stays the hardware controller with no cloud egress. Details: [`BRIDGE.md`](BRIDGE.md), operations: [`OPERATIONS.md`](OPERATIONS.md) |
+| **driver** | `emaldo-local driver [--config PATH]` (unit `emaldo-driver.service`) | this driver: Modbus/CAN/MCU/meter telemetry, TLS web UI `:8443`, MQTT/Home Assistant discovery; the vendor app and its supervisor are parked when it controls the hardware |
+
+The role is chosen by the leading word — `run|mode|certs|config|lte|version` go
+to the bridge, `driver` (or any driver flag) to the driver — before any TLS
+provider is installed, so the existing unit lines and docs keep working. One
+config file per role for now (`config.json` for the bridge, TOML for the
+driver); unifying them is the next step in
+[`../docs/SINGLE_APP_PLAN.md`](../docs/SINGLE_APP_PLAN.md).
+
+The rest of this file documents the driver role.
 
 A lean Rust driver that replaces the vendor's Go module application
 (`/root/bin/app`) as the hardware controller of an Emaldo Power Core 2.0.
@@ -39,7 +55,7 @@ it, and isolating the vendor (cloud + remote tunnel), with rollback, is in
 | `src/control.rs` | write controller: gates, journal, snapshot/rollback (FC16 setpoints) |
 | `src/commands.rs` | shared REST/MQTT command dispatch |
 | `src/history.rs` | 48 h rolling history (`history.jsonl`) for the dashboard |
-| `src/config.rs` | TOML config at `/root/emaldo-driver.toml`, atomic writes, masked secrets |
+| `src/config.rs` | TOML config at `/root/emaldo-local.toml` (the driver-era `/root/emaldo-driver.toml` is still read if the new name is absent), atomic writes, masked secrets |
 | `src/telemetry.rs` | state store, event ring (200), subscriber fan-out, derived load |
 | `src/mqtt.rs` | MQTT 3.1.1 client (QoS 0/1, TLS, reconnect), single I/O thread |
 | `src/discovery.rs` | HA discovery + state topics |
@@ -99,7 +115,7 @@ MQTT broker in the setup wizard. The TLS cert is self-generated on first
 start and persisted next to the config (`web-cert.pem` / `web-key.pem`,
 0600) — replace via `web.tls_cert`/`web.tls_key` if you have your own.
 
-### Configuration (`/root/emaldo-driver.toml`)
+### Configuration (`/root/emaldo-local.toml`)
 
 Deliberately **not** `/root/config.toml` — that file belongs to the vendor
 app and stays untouched. The config is a TOML tree of sections `device`,
@@ -197,17 +213,25 @@ All writes pass the controller gates: writable table (HiSolar
 0x0FD3..0x0FF6), range, rate limits, `writes_enabled`, pre-write
 snapshot, read-back verify. Journal: `writes.log` (JSON lines) next to
 the config. Rollback: `POST /api/v1/cmd {"cmd":"rollback"}` or
-`emaldo-driver --rollback`.
+`emaldo-local driver --rollback`.
 
 ## MQTT / Home Assistant
 
 State topics under `<topic_prefix>/...` (`grid/net_w`,
 `battery/soc_percent`, `pv/power_w`, `load/net_w`, `inverter/N/...`,
-`mcu/...`), availability `<topic_prefix>/status` (`online`, LWT-ready),
-discovery configs under `homeassistant/sensor/<device-id>/...`. Payload
-layout matches the Go firmware (`internal/mqtt/discovery.go`), so an
-existing HA MQTT setup keeps working. `cmd/#` is subscribed but commands
-are ignored in Phase 1 (logged to the event ring).
+`mcu/...`), availability `<topic_prefix>/status`, discovery configs under
+`homeassistant/sensor/<device-id>/<object>/config`. Both the availability flag
+and the configs are published **retained, QoS 1**: without retain, Home
+Assistant never received them (it subscribes after the publish and a non-retained
+QoS 1 publish is not replayed), which is why the device used to appear in HA with
+no entities. `<prefix>/status` also carries a retained last will (`offline`), so
+HA marks the device unavailable if the process dies, and discovery is
+re-published after **every** CONNACK — a broker or HA restart re-registers the
+device without restarting the driver. Unique ids are
+`emaldo-local:<device-id>:<object>`; HA tombstones deleted entity ids, so the
+namespace is part of the config rather than the bare device id.
+`cmd/#` is subscribed but commands are ignored in Phase 1 (logged to the event
+ring).
 
 ## Emulator bench
 

@@ -7,9 +7,10 @@ When the vendor cloud goes away (the company's bankruptcy is the working
 assumption), a stock unit becomes an unmanaged battery.
 
 This repository is a community effort to keep Power Core batteries **fully
-local**. It contains **two independent approaches** plus shared
-reverse-engineering and test bench tooling. They differ in what they keep and
-what they give up, and in how ready they are.
+local**. One Rust binary, `emaldo-local`, does the work in one of **two
+roles** — it either keeps the vendor app and takes over its cloud, or it
+replaces the vendor app on the buses — plus shared reverse-engineering and
+test bench tooling. The roles differ in what they keep and what they give up.
 
 > ## ⚠ Safety: do not flash while the vendor is alive
 >
@@ -19,10 +20,12 @@ what they give up, and in how ready they are.
 > programmes that may pay you** — and keeps OTA working. Changing its
 > endpoints can cost you that and can brick remote manageability.
 >
-> - Approach **A (driver)** runs *alongside* the vendor app in read-only mode
+> - The **driver** role can run *alongside* the vendor app in read-only mode
 >   (no bus writes, passive CAN). That is safe to run today.
-> - Approach **B (bridge)** deliberately redirects the vendor app's cloud; it
->   is reversible (`mode vendor`) but currently **does not work** (see below).
+> - The **bridge** role deliberately redirects the vendor app's cloud. It works
+>   and is reversible in one command (`emaldo-local mode vendor`), but it
+>   rewrites `/etc/hosts`, routes and the resolver — read
+>   [`app/OPERATIONS.md`](app/OPERATIONS.md) before doing it on a live box.
 >
 > Treat any change to the vendor app's environment as potentially
 > unrecoverable without hardware access (UART console). The original vendor
@@ -44,80 +47,57 @@ the vendor out** (cloud + its remote-access tunnel) — plus the safety and
 reversal steps — is in [`docs/ACCESS.md`](docs/ACCESS.md). Read it before
 changing anything on a live box.
 
-## The two approaches
+## One binary, two roles
 
-### A. Replacement driver — [`driver/`](driver/README.md)
+Since 2026-11-26 the two approaches are **one Rust package** (`app/`, binary
+`emaldo-local`) with two roles selected by the leading command word:
 
-A standalone Rust binary (`emaldo-driver`) that becomes the hardware
-controller itself: it talks the inverter over Modbus, the batteries over CAN,
-the b-sensor grid meter, reads Nordpool prices + an Open-Meteo PV forecast,
-runs an on-box planner/optimizer, and serves a PWA web UI + MQTT/HA
-discovery. No vendor cloud, and the vendor app is left untouched (in
-read-only mode it runs next to it).
-
-**Status (2026-11-25):** builds as a static ARMv7 binary; 71 unit tests; runs
-on the live unit **read-only** (bus disabled, writes dry-run, passive/active
-CAN), serving the PWA UI on `:8443`. Live-validated: active CAN BMS polling
-(SOC), b-sensor grid meter + derived load, Nordpool prices, Open-Meteo PV
-forecast, on-box planner (mode `optimize`), MQTT/HA discovery (code; broker
-off by default), gated FC16 setpoint writes (bench + one-off live write
-proven — **the service-path write currently times out: open bug**). A 30-min
-live soak completed and auto-reverted. E-ink refresh fix (`fb msync`) landed
-this session, needs a live check. See [`docs/ISSUES.md`](docs/ISSUES.md).
-
-### B. Bridge / takeover stack — [`bridge/`](bridge/README.md)
-
-A Rust workspace that keeps the **stock vendor app running** but intercepts
-its cloud: a managed `/etc/hosts` block, egress `prohibit` routes, a local
-relay on `:443`/`:1050`/`:1051`, and a control socket on `:1052`. The app
-keeps thinking it is online; the box runs locally and cellular can be
-closed.
-
-**Status (2026-11-25): does NOT currently work — a bug is under active
-investigation.** The protocol is understood and the stack installs and runs,
-but it is not usable on a live battery yet. See
-[`bridge/OPERATIONS.md`](bridge/OPERATIONS.md).
-
-### Comparison
-
-| | **A. Replacement driver** (`driver/`) | **B. Bridge / takeover** (`bridge/`) |
+| role | command | what it does |
 |---|---|---|
-| What runs | our Rust binary controls the buses | the **stock vendor app** stays alive; we redirect its cloud |
-| Works today | read-only + planner; **writes = open bug** | **no — bug under investigation** |
-| Vendor cloud reachability | not needed | redirected to the box (reversible with `mode vendor`) |
-| Grid-rewards / FCR | not implemented (planner is price/cost oriented) | keeps the vendor app's own FCR/rewards path intact |
-| E-ink display | we render `/dev/fb0` (fix landed, live check pending) | vendor app drives it unchanged |
-| EV / accessories | not yet (slave-walk tooling only) | vendor app handles them unchanged |
-| OTA of the app | N/A (we own the binary) | vendor OTA path preserved (manifest can be repointed) |
-| Depends on vendor app | no | **yes** — if the app stops, the bridge has nothing to relay |
-| MQTT / Home Assistant | built-in publisher + HA discovery | no publisher; HA is repointed via the bridge CA |
-| Config surface | `emaldo-driver.toml`, web UI | `config.json`, operator UI on `:4443` |
-| Risk to the vendor setup | low in read-only mode | higher (rewrites hosts/routes/resolver; reversible) |
-| Maturity | read-only validated live, writes in progress | protocol understood, end-to-end not working |
+| **bridge** | `emaldo-local run --config /root/emaldo-local/config.json` | keeps the **stock vendor app** as hardware controller and intercepts its cloud: vendor REST on `:443`, E2E relay `:1050/:1051`, local resolver `:53`, control socket `:1052`, operator UI `:4443`; `mode local` pins the vendor names in a managed `/etc/hosts` block, adds `prohibit` routes for vendor + public-DNS addresses, closes cellular; `mode vendor` undoes all of it. Details: [`app/BRIDGE.md`](app/BRIDGE.md), operations: [`app/OPERATIONS.md`](app/OPERATIONS.md) |
+| **driver** | `emaldo-local driver --config /root/emaldo-local.toml` | becomes the hardware controller itself: Modbus inverter, CAN BMS, b-sensor grid meter, MCU link, Nordpool prices + Open-Meteo PV forecast, on-box planner, PWA web UI on `:8443`, MQTT/Home Assistant discovery. Bus writes are a runtime option, **off by default** |
 
-### Which to pick
+On the live Power Core both roles currently run side by side from one artifact
+(`/root/emaldo-local/emaldo-local`): the bridge unit `emaldo-local.service`
+(`Before=monitor.service`, so the front listens before the vendor app dials) and
+the driver unit `emaldo-driver.service` in read-only telemetry mode. Bridge RSS
+3.8 MB, driver RSS 3.1 MB.
 
-- **Want a local dashboard / telemetry / planner today, without disturbing
-  the vendor setup:** use **A** in read-only mode (`bus_enabled = false`).
-- **Want the vendor app's own behaviour (grid rewards, EV, e-ink, OTA)
-  preserved after the cloud is gone:** **B** is the design for that, but it
-  is currently broken — wait for the fix, or help debug it.
-- The two are **independent**; they are not designed to run against the same
-  bus at the same time (Modbus and the MCU link are single-master). The
-  driver's read-only mode coexists with the vendor app; a full driver
-  takeover and the bridge are mutually exclusive.
+### Status (2026-11-26)
+
+| | bridge role | driver role |
+|---|---|---|
+| On the live unit | **yes** — `mode local`: module logs in, E2E session live seconds after a restart, vendor egress closed (8 `prohibit` routes), cellular closed, operator UI with PBKDF2 + cookie session + CSRF header + LAN gate | **yes** — read-only: Modbus/CAN/meter telemetry, prices, PV forecast, planner in `optimize` mode, PWA UI; bus disabled and writes dry-run |
+| Control writes | through the vendor app's own E2E commands (`0x1a` override write proven end-to-end in the emulator; the HA optimizer uses this path) | FC16 setpoints behind the gates: bench-proven, one live write proven; the service-path write still times out (open bug, [`docs/ISSUES.md`](docs/ISSUES.md)) |
+| Home Assistant | no publisher of its own; the stock HA integration is repointed at the bridge through the bridge CA | built-in publisher: retained QoS 1 discovery configs, retained availability with a last will, re-published on every reconnect |
+| Depends on the vendor app | yes | no (it parks the vendor app when it controls the hardware) |
+| E-ink display | vendor app drives it | we render `/dev/fb0`; `fb msync` fix landed, live check pending |
+| Grid rewards / FCR | vendor app's own path preserved | not implemented (planner is price/cost oriented) |
+
+They are not designed to drive the same bus at the same time (Modbus and the MCU
+link are single-master): the driver's read-only mode coexists with the vendor
+app, a full driver takeover and the bridge are mutually exclusive.
+
+Unifying the two roles further — one config file, one telemetry model, one
+MQTT publisher in both roles — is the plan in
+[`docs/SINGLE_APP_PLAN.md`](docs/SINGLE_APP_PLAN.md).
 
 ## Repository layout
 
 ```
 README.md            this file
-driver/              Approach A: replacement driver (own Cargo workspace)
-  README.md  src/  static/  Cargo.toml  build.rs
-bridge/              Approach B: takeover bridge (Cargo workspace root)
-  README.md  OPERATIONS.md  crates/  deploy/  Cargo.toml  .cargo/
+app/                 the single Rust package (binary `emaldo-local`, two roles)
+  README.md            driver role + the shared runtime (telemetry, web, MQTT)
+  BRIDGE.md            bridge role design
+  OPERATIONS.md        operating it on a battery: install, mode switch, rollback
+  deploy/              deploy.sh, install.sh, uninstall.sh, emaldo-local.service
+  src/  src/bridge/  src/web/  static/  Cargo.toml  build.rs  .cargo/
+bridge/              now only `crates/emaldo-proto` (vendor wire codec), consumed
+                     by app/ as a path dependency
 docs/                shared docs: registers/protocol, RE notes, emulator bench ref
   REGISTERS.md  PROTOCOL.md  API.md  FINDINGS.md  EMULATOR_BENCH.md
   EMALDO_STATE_GATE.md  BLE-GATT.md  VENDOR-CONFIG.md  ISSUES.md
+  SINGLE_APP_PLAN.md   the merge into one binary, two roles
 emulator/            shared QEMU bench (runs the stock firmware + fake cloud)
 scripts/             shared RE + bench helpers (pclntab, ghidra, e2e relay, …)
 emaldo_re/           shared Python E2E/RE library

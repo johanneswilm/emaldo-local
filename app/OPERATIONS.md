@@ -1,6 +1,6 @@
 # Operating the local bridge on a battery
 
-Concrete commands for the daemon in `bridge/crates/emaldo-bridge`. Verified against
+Concrete commands for the daemon in `app/src/bridge`. Verified against
 the live Power Core (i.MX6 ULL, 236 MiB RAM, Debian 11, vendor app v2.35.5)
 on 2026-11-25. Every command below is the one actually used.
 
@@ -11,8 +11,8 @@ safety/rollback steps) is shared across approaches and lives in
 ## Install
 
 ```sh
-bridge/deploy/deploy.sh <ssh-target> --install            # build ARMv7 static, push, install
-bridge/deploy/deploy.sh <ssh-target> --install --identity  # also seed ids from the NAS capture
+app/deploy/deploy.sh <ssh-target> --install            # build ARMv7 static, push, install
+app/deploy/deploy.sh <ssh-target> --install --identity  # also seed ids from the NAS capture
 ```
 
 `deploy.sh` cross-builds (`armv7-unknown-linux-gnueabihf`), copies the binary to
@@ -126,7 +126,7 @@ re-assertion (`/etc/resolv.conf was rewritten: ...`).
 - Bridge state: `state/` (identity, CA and leaf, `hosts.bak`,
   `resolv.conf.bak`, `override.bak`) and `config.json`. Copy them; they are all
   0600 and contain credential material, so they must not end up in the repo.
-- Uninstall: `bridge/deploy/uninstall.sh` (device copy at `/root/emaldo-local/`)
+- Uninstall: `app/deploy/uninstall.sh` (device copy at `/root/emaldo-local/`)
   removes the unit, the managed blocks and `/root/emaldo-local`, leaving the
   vendor app and its supervisor exactly as they were.
 

@@ -20,9 +20,9 @@ claims are folded into the current statement rather than kept as
 
 Approach-specific docs live with the approach:
 
-- Driver: [`../driver/README.md`](../driver/README.md)
-- Bridge: [`../bridge/README.md`](../bridge/README.md),
-  [`../bridge/OPERATIONS.md`](../bridge/OPERATIONS.md)
+- Driver: [`../app/README.md`](../app/README.md)
+- Bridge: [`../app/BRIDGE.md`](../app/BRIDGE.md),
+  [`../app/OPERATIONS.md`](../app/OPERATIONS.md)
 - Emulator architecture + build: [`../emulator/README.md`](../emulator/README.md)
 
 The emulator is shared tooling used by both approaches.
