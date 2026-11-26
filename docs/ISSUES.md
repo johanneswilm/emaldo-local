@@ -53,8 +53,39 @@ app retired). Each has the symptom, the evidence, and the current status.
 - **Suspects:** contention between the 3-port poll loop and the write
   (mutex is shared but timing/inter-round-trip), the write-all fan-out, or the
   inverter rejecting a repeated no-op FC16 with the same value.
-- **Status:** OPEN. Debug on the bench against `fake_inverter_stateful.py`
-  (records every frame) before another write-verifying live soak.
+- **Status:** ROOT CAUSE FOUND + FIXED on the emulator bench (not yet
+  re-verified live). The timeout message was misleading: the writes never
+  reached the bus.
+  - **Cause:** in service mode `hardware.mcu_protocol` and
+    `hardware.bus_enabled` are both true. The poll thread took
+    `run_mcu()` first, which loops forever on the MCU Bmtp UART and
+    therefore never reached the "open inverter ports / attach to `Bus`"
+    code. The `Bus` stayed empty, `ensure_snapshot()` failed with
+    "bus not connected yet", and once the snapshot existed every FC16 was
+    rejected with `bus not connected` (logged as a per-inverter write
+    failure). The write fan-out, FC16 framing and the shared mutex were
+    never involved.
+  - **Fix:** `poll.rs` only gives the poll thread to the MCU when the bus
+    is disabled (`mcu_protocol && !bus_enabled`, live next to the vendor
+    app). In service mode the MCU is polled once per bus tick with a
+    persistent client (`poll_mcu_tick`), so battery SOC still arrives and
+    the bus is attached/open for the controller. `mcu_proto` gained
+    path/baud accessors and `read_snapshot_strict`, which reports a dead
+    port (write/read error) as `Err` so the client is dropped and reopened
+    instead of quietly timing out forever. The startup event claiming
+    "mcu_protocol overrides bus_enabled" is corrected.
+  - **Rollback:** `rollback()` now restores the setpoint block with one
+    FC16 per port (FC06 on the block failed live) and verifies every
+    register on every attached inverter instead of only the primary port
+    (`bus::read_block_all/write_block_at/write_single_at/read_holding_at`).
+  - **Bench evidence (3 fakes @9600 + fake MCU, optimize mode):**
+    `writes.log` shows `0x0fdd 300 -> written+verified`, each fake logs
+    `WRITE multi 0x0fd8 x6 = [3600, 3600, 0, 0, 0, 300]`, and rollback
+    restores `[... 3600]` on all three with `written+verified` per
+    register. `cargo test --offline`: 73 passed.
+  - **Still to do live:** confirm the MCU and the three inverter TTYs are
+    genuinely independent on the hardware (different CH9344 ports) before
+    enabling both.
 
 ## 3. PV power reads 0 / not parsed from inverter (daytime load understated)
 - The provisional inverter register map is off by default (`map_unvalidated`),

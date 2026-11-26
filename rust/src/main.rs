@@ -814,9 +814,9 @@ fn main() {
     }
     if cfg0.hardware.mcu_protocol && cfg0.hardware.bus_enabled {
         telem.add_event(
-            "warn",
+            "info",
             "hermes",
-            "hardware.mcu_protocol overrides hardware.bus_enabled (single MCU master)",
+            "service mode: MCU/Bmtp telemetry polled once per bus tick alongside the inverters",
         );
     }
 

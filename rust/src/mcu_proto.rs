@@ -220,6 +220,8 @@ impl Splitter {
 }
 
 pub struct Client {
+    path: String,
+    baud: u32,
     port: SerialPort,
     seq: u16,
     timeout: Duration,
@@ -228,10 +230,22 @@ pub struct Client {
 impl Client {
     pub fn open(path: &str, baud: u32, timeout: Duration) -> Result<Client, String> {
         Ok(Client {
+            path: path.to_string(),
+            baud,
             port: SerialPort::open_mcu(path, baud)?,
             seq: 1,
             timeout,
         })
+    }
+
+    /// Device path this client was opened on.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Baud rate this client was opened at.
+    pub fn baud(&self) -> u32 {
+        self.baud
     }
 
     /// Send a read-only request and wait for the matching response. Error
@@ -732,6 +746,33 @@ impl Snapshot {
 /// Read the vendor app's read-only poll set. Returns whatever answered; it
 /// does not fail the whole pass when one command times out.
 pub fn read_snapshot(c: &mut Client, read_registers: bool) -> Snapshot {
+    match read_snapshot_inner(c, read_registers) {
+        Ok(s) => s,
+        Err(e) => {
+            let mut s = Snapshot::default();
+            s.errors.push(e);
+            s
+        }
+    }
+}
+
+/// `true` for failures of the port itself (as opposed to a command the
+/// device did not answer in time).
+fn is_transport(e: &str) -> bool {
+    e.starts_with("mcu read:") || e.starts_with("io:") || e.starts_with("serial:")
+        || e.contains("write:") || e.contains("poll at")
+}
+
+/// Snapshot that distinguishes a dead port (`Err`) from a device that
+/// answered slowly or not at all (`Ok` with `errors`).
+pub fn read_snapshot_strict(c: &mut Client) -> Result<Snapshot, String> {
+    read_snapshot_inner(c, true)
+}
+
+/// Core snapshot. A transport-level failure (write/read error, not a
+/// per-command timeout) aborts with `Err` so the caller can reopen the
+/// port; every other per-command error is recorded in `Snapshot::errors`.
+fn read_snapshot_inner(c: &mut Client, read_registers: bool) -> Result<Snapshot, String> {
     let mut s = Snapshot::default();
 
     macro_rules! one {
@@ -742,6 +783,7 @@ pub fn read_snapshot(c: &mut Client, read_registers: bool) -> Snapshot {
                     $slot = Some(d);
                     s.responses += 1;
                 }
+                Err(e) if is_transport(&e) => return Err(e),
                 Err(e) => s.errors.push(e),
             }
         };
@@ -777,6 +819,9 @@ pub fn read_snapshot(c: &mut Client, read_registers: bool) -> Snapshot {
                 s.responses += 1;
             }
             Err(e) => {
+                if is_transport(&e) {
+                    return Err(e);
+                }
                 if idx == 0 {
                     s.errors.push(e);
                 }
@@ -794,6 +839,9 @@ pub fn read_snapshot(c: &mut Client, read_registers: bool) -> Snapshot {
                 s.responses += 1;
             }
             Err(e) => {
+                if is_transport(&e) {
+                    return Err(e);
+                }
                 if idx == 0 {
                     s.errors.push(e);
                 }
@@ -842,13 +890,14 @@ pub fn read_snapshot(c: &mut Client, read_registers: bool) -> Snapshot {
                     s.registers.insert(key.into(), hex(&d));
                     s.responses += 1;
                 }
+                Err(e) if is_transport(&e) => return Err(e),
                 Err(e) => s.errors.push(e),
             }
         }
     }
 
     s.compute_powers();
-    s
+    Ok(s)
 }
 
 /// Read a block of inverter registers through the MCU. `len` is a u8

@@ -412,26 +412,111 @@ impl Controller {
         let cfg = self.cfg.get();
         let slave = cfg.hardware.inverter_slave_id;
         let timeout = Duration::from_millis(2000);
+        // The inverter rejects FC06 writes to the 0x0FD8..0x0FDD setpoint
+        // block (same restriction as the normal write path), so restore that
+        // block with one FC16 per port and everything else with FC06.
+        const BLK_START: u16 = 0x0FD8;
+        const BLK_LEN: u16 = 6; // 0x0FD8..0x0FDD
+        let in_block = |a: u16| a >= BLK_START && a < BLK_START + BLK_LEN;
+        let want: Vec<(u16, u16)> = snap
+            .as_object()
+            .ok_or("bad snapshot format")?
+            .iter()
+            .map(|(k, v)| {
+                let addr = u16::from_str_radix(k.trim_start_matches("0x"), 16)
+                    .map_err(|e| e.to_string())?;
+                let val = v.as_u64().ok_or("bad snapshot value")? as u16;
+                Ok((addr, val))
+            })
+            .collect::<Result<_, String>>()?;
+        // Per-port read-back of the setpoint block (FC03, one round trip per
+        // port) - for the FC16 read-modify-write and for verification.
+        let read_blocks = |me: &Controller| -> Vec<(usize, Option<Vec<u16>>, Option<String>)> {
+            me.bus
+                .read_block_all(slave, BLK_START, BLK_LEN, timeout)
+                .into_iter()
+                .map(|(i, r)| match r {
+                    Ok(b) if b.len() >= BLK_LEN as usize * 2 => (
+                        i,
+                        Some(b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect()),
+                        None,
+                    ),
+                    Ok(b) => (i, None, Some(format!("short block {}B", b.len()))),
+                    Err(e) => (i, None, Some(e)),
+                })
+                .collect()
+        };
         let mut done = Vec::new();
-        for (k, v) in snap.as_object().ok_or("bad snapshot format")? {
-            let addr = u16::from_str_radix(k.trim_start_matches("0x"), 16)
-                .map_err(|e| e.to_string())?;
-            let val = v.as_u64().ok_or("bad snapshot value")? as u16;
-            self.bus
-                .write_single(slave, addr, val, timeout)
-                .map_err(|e| format!("rollback write {k}: {e}"))?;
-            let b = self
-                .bus
-                .read_holding(slave, addr, 1, timeout)
-                .map_err(|e| format!("rollback verify {k}: {e}"))?;
-            if b.len() < 2 || u16::from_be_bytes([b[0], b[1]]) != val {
-                return Err(format!("rollback verify failed on {k}"));
+        // 1. Restore the setpoint block with one FC16 per port (read-modify-
+        //    write on that port's current block, so its other fields stay).
+        let block_writes: Vec<(u16, u16)> =
+            want.iter().copied().filter(|(a, _)| in_block(*a)).collect();
+        let blocks = read_blocks(self);
+        if blocks.is_empty() {
+            return Err("rollback: bus not connected".into());
+        }
+        let mut restorable = 0usize;
+        for (i, vals, err) in &blocks {
+            let Some(mut vals) = vals.clone() else {
+                self.telem.add_event("warn", "control", format!(
+                    "rollback: port{i} setpoint block unreadable ({}), skipped", err.clone().unwrap_or_default()));
+                continue;
+            };
+            for &(addr, val) in &block_writes {
+                vals[(addr - BLK_START) as usize] = val;
             }
-            done.push(format!("{k}={val}"));
+            self.bus
+                .write_block_at(*i, slave, BLK_START, &vals, timeout)
+                .map_err(|e| format!("rollback write block port{i}: {e}"))?;
+            restorable += 1;
+        }
+        if restorable == 0 {
+            return Err("rollback: no inverter answered".into());
+        }
+        // 2. FC06 the remaining writable registers on the ports that answered.
+        let ports: Vec<usize> = blocks.iter().filter(|(_, v, _)| v.is_some()).map(|(i, _, _)| *i).collect();
+        for &(addr, val) in &want {
+            if in_block(addr) {
+                continue;
+            }
+            for &i in &ports {
+                self.bus
+                    .write_single_at(i, slave, addr, val, timeout)
+                    .map_err(|e| format!("rollback write port{i} {addr:#06x}: {e}"))?;
+            }
+        }
+        // 3. Verify every register on every port: one block read per port
+        //    covers the setpoint block, single reads cover the rest.
+        let blocks = read_blocks(self);
+        let mut bad = Vec::new();
+        for (i, vals, err) in &blocks {
+            let Some(vals) = vals else {
+                bad.push(format!("port{i}: verify read {}", err.clone().unwrap_or_default()));
+                continue;
+            };
+            for &(addr, val) in &want {
+                let got = if in_block(addr) {
+                    Some(vals[(addr - BLK_START) as usize])
+                } else {
+                    self.bus
+                        .read_holding_at(*i, slave, addr, 1, timeout)
+                        .ok()
+                        .and_then(|b| (b.len() >= 2).then(|| u16::from_be_bytes([b[0], b[1]])))
+                };
+                if got != Some(val) {
+                    bad.push(format!("port{i}: {addr:#06x} {got:?} != {val}"));
+                }
+            }
+        }
+        if !bad.is_empty() {
+            return Err(format!("rollback verify failed: {bad:?}"));
+        }
+        for &(addr, val) in &want {
+            done.push(format!("{addr:#06x}={val}"));
             self.journal(&WriteRecord {
                 ts: crate::telemetry::now_unix(),
                 source: "rollback".into(),
-                register: k.clone(),
+                register: format!("{addr:#06x}"),
                 name: reg_spec(addr).map(|s| s.name.into()).unwrap_or_default(),
                 value: val as i32,
                 result: "written+verified".into(),

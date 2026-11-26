@@ -20,7 +20,7 @@ use crate::regs;
 use crate::serial::SerialPort;
 use crate::telemetry::{InverterState, Store as TelemStore};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub enum Cmd {
@@ -33,6 +33,10 @@ pub struct Poller {
     pub telem: Arc<TelemStore>,
     pub bus: Arc<Bus>,
     cmd_tx: Sender<Cmd>,
+    /// Persistent read-only MCU/Bmtp client, used only when the bus is
+    /// enabled too (service mode): the MCU is polled once per bus tick
+    /// instead of owning the poll thread.
+    mcu: Mutex<Option<crate::mcu_proto::Client>>,
 }
 
 impl Poller {
@@ -43,6 +47,7 @@ impl Poller {
             telem,
             bus,
             cmd_tx: tx,
+            mcu: Mutex::new(None),
         });
         let p2 = p.clone();
         std::thread::Builder::new()
@@ -66,10 +71,14 @@ impl Poller {
             // MCU sysfs every cycle, bus or not.
             self.poll_mcu();
 
-            // Read-only Bmtp polling over the housekeeping MCU. This owns
-            // the MCU UART, so it is mutually exclusive with the vendor app
-            // (controlled window only) and with hardware.bus_enabled.
-            if cfg.hardware.mcu_protocol {
+            // Read-only Bmtp polling over the housekeeping MCU. With the
+            // bus disabled (live battery next to the vendor app) it owns
+            // the MCU UART and therefore the whole poll thread. With the
+            // bus enabled (service mode) the MCU is a separate UART and is
+            // polled once per bus tick (poll_loop); running run_mcu() here
+            // would never return and the controller would never get the
+            // bus, failing every write with "bus not connected".
+            if cfg.hardware.mcu_protocol && !cfg.hardware.bus_enabled {
                 self.run_mcu(&rx);
                 continue;
             }
@@ -127,11 +136,83 @@ impl Poller {
                 format!("serial connected {} port(s)", opened.len()),
             );
             self.bus.attach_all(opened);
+            if cfg.hardware.mcu_protocol {
+                self.poll_mcu_tick(&rx);
+            }
             if let Err(e) = self.poll_loop(&rx) {
                 self.telem
                     .add_event("warn", "hermes", format!("serial lost: {e} (reconnecting)"));
             }
             self.bus.detach();
+        }
+    }
+
+    /// One MCU/Bmtp snapshot over the persistent client (service mode,
+    /// where the bus is enabled as well). Reconnects when the port or baud
+    /// changes or the device goes away.
+    fn poll_mcu_tick(&self, rx: &std::sync::mpsc::Receiver<Cmd>) {
+        let cfg = self.cfg.get();
+        let mut guard = self.mcu.lock().unwrap();
+        // Drop any client whose port/baud no longer matches the config.
+        if guard.as_ref().is_some_and(|c| c.path() != cfg.hardware.mcu_port || c.baud() != cfg.hardware.mcu_baud) {
+            *guard = None;
+        }
+        if guard.is_none() {
+            self.open_mcu(&mut guard);
+        }
+        self.poll_mcu();
+        let mut give_up = false;
+        {
+            if let Some(client) = guard.as_mut() {
+                match mcu_proto::read_snapshot_strict(client) {
+                    Ok(snap) => {
+                        if let Some(e) = snap.errors.first() {
+                            self.telem.add_event("warn", "mcu", format!("poll: {e}"));
+                        }
+                        self.publish_snapshot(&snap);
+                    }
+                    Err(e) => {
+                        // Port gone (USB reset, unplug): drop it, reopen on
+                        // the next tick, and shorten this tick so a dead
+                        // MCU never stalls the bus for long.
+                        *guard = None;
+                        self.telem.add_event("warn", "mcu", format!("poll: {e} (reopening)"));
+                        give_up = true;
+                    }
+                }
+            }
+        }
+        drop(guard);
+        if give_up {
+            return;
+        }
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                Cmd::WalkSlaves(ids) => self.do_walk(&ids),
+            }
+        }
+    }
+
+    /// (Re)open the MCU client, recording one event per failure.
+    fn open_mcu(&self, guard: &mut std::sync::MutexGuard<'_, Option<crate::mcu_proto::Client>>) {
+        let cfg = self.cfg.get();
+        let timeout = Duration::from_millis(cfg.hardware.mcu_timeout_ms.max(100));
+        match crate::mcu_proto::Client::open(&cfg.hardware.mcu_port, cfg.hardware.mcu_baud, timeout) {
+            Ok(c) => {
+                self.telem.add_event(
+                    "info",
+                    "mcu",
+                    format!("MCU connected {} (read-only Bmtp)", cfg.hardware.mcu_port),
+                );
+                **guard = Some(c);
+            }
+            Err(e) => {
+                self.telem.add_event(
+                    "warn",
+                    "mcu",
+                    format!("open {}: {e}", cfg.hardware.mcu_port),
+                );
+            }
         }
     }
 

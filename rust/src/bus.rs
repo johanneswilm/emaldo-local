@@ -65,6 +65,23 @@ impl Bus {
         f(port).map_err(|e| e.to_string())
     }
 
+    /// Run `f` against port `idx` (primary-first order). Per-port helpers
+    /// below take the same lock as everything else, so an op is atomic
+    /// against the poller; `read_block_all` returns port indices that the
+    /// write helpers can be pointed at one at a time.
+    fn with_port_at<T>(
+        &self,
+        idx: usize,
+        f: impl FnOnce(&mut SerialPort) -> Result<T, ModbusError>,
+    ) -> Result<T, String> {
+        let mut guard = self.ports.lock().unwrap();
+        let port = guard
+            .get_mut(idx)
+            .and_then(|p| p.as_mut())
+            .ok_or_else(|| format!("bus port {idx} not connected"))?;
+        f(port).map_err(|e| e.to_string())
+    }
+
     pub fn read_input(
         &self,
         slave: u8,
@@ -133,6 +150,64 @@ impl Bus {
             }
         }
         (out, errs)
+    }
+
+    /// FC03 read of the same block from EVERY attached port. Returns
+    /// `(port index, bytes)` per port.
+    pub fn read_block_all(
+        &self,
+        slave: u8,
+        addr: u16,
+        count: u16,
+        timeout: Duration,
+    ) -> Vec<(usize, Result<Vec<u8>, String>)> {
+        let mut guard = self.ports.lock().unwrap();
+        let mut out = Vec::new();
+        for (i, slot) in guard.iter_mut().enumerate() {
+            let Some(port) = slot.as_mut() else {
+                continue;
+            };
+            let r = modbus::read_registers(port, modbus::FC_READ_HOLDING, slave, addr, count, timeout)
+                .map_err(|e| e.to_string());
+            out.push((i, r));
+        }
+        out
+    }
+
+    /// FC16 block write to one port by index.
+    pub fn write_block_at(
+        &self,
+        idx: usize,
+        slave: u8,
+        addr: u16,
+        values: &[u16],
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.with_port_at(idx, |p| modbus::write_multiple_registers(p, slave, addr, values, timeout))
+    }
+
+    /// FC06 single write to one port by index.
+    pub fn write_single_at(
+        &self,
+        idx: usize,
+        slave: u8,
+        addr: u16,
+        value: u16,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.with_port_at(idx, |p| modbus::write_single_register(p, slave, addr, value, timeout))
+    }
+
+    /// FC03 single-register read from one port by index.
+    pub fn read_holding_at(
+        &self,
+        idx: usize,
+        slave: u8,
+        addr: u16,
+        count: u16,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
+        self.with_port_at(idx, |p| modbus::read_registers(p, modbus::FC_READ_HOLDING, slave, addr, count, timeout))
     }
 
     /// Write an FC16 block to the setpoint on EVERY attached inverter, doing

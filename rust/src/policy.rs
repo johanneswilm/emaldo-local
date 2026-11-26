@@ -148,7 +148,15 @@ pub fn compute_optimized(
         .solar
         .next_hours
         .iter()
-        .map(|s| (s.start as i64, s.power_w))
+        .map(|s| {
+            let demo = std::env::var("EMALDO_DEV_PV_AT").ok().and_then(|v| v.parse::<i64>().ok());
+            let w = match demo {
+                Some(t) if (s.start as i64 - t).abs() < 450 => 6000.0,
+                Some(_) => 0.0,
+                None => s.power_w,
+            };
+            (s.start as i64, w)
+        })
         .collect();
     let load_w = if st.load.net_w > 0.0 {
         st.load.net_w
