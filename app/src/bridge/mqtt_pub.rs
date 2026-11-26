@@ -213,7 +213,7 @@ fn run(bridge: Arc<Bridge>) {
                     // meter is present. The bridge always integrates its own
                     // power-flow samples into daily totals, so the config set
                     // is the same whether or not a report has landed yet.
-                    let mut st = state_from_bridge(&b2).unwrap_or_default();
+                    let mut st = b2.telem.current();
                     st.meter.available = true;
                     let n = discovery::publish_discovery(
                         &c, &dpfx, &dev2, &device_name(&b2), &st, &prefix, &uniq,
@@ -234,7 +234,9 @@ fn run(bridge: Arc<Bridge>) {
         next = Instant::now() + Duration::from_secs(PUBLISH_S);
         let Some(c) = client.as_ref() else { continue };
         let prefix = m.topic_prefix.clone();
-        match state_from_bridge(&bridge) {
+        let st = bridge.telem.current();
+        let age = crate::telemetry::now_unix().saturating_sub(st.updated_at);
+        match if age > FRESH_S { None } else { Some(st) } {
             Some(st) => {
                 discovery::publish_state(c, &prefix, &st);
                 // Home Assistant only clears the unavailable flag on an

@@ -172,6 +172,7 @@ pub fn exchange(
     // HA's own session for `app_end` must stay where it is.
     relay.route_reply(msgid, addr);
     relay.send_to_device(frame).map_err(|_| Error::NoDevice)?;
+    let frame_cmd = Frame::parse(frame).cmd().unwrap_or([0, 0]);
 
     let deadline = std::time::Instant::now() + wait;
     let mut why = String::from("no frame with that msgid");
@@ -197,7 +198,23 @@ pub fn exchange(
         if let Some(pt) = decrypt_reply(&f, &keys, nonce, validate) {
             return Ok(pt);
         }
-        why = format!("unusable reply: {} B frame, decrypt/parse failed (chat mismatch?)", n);
+        // The reply decrypted but the command's parser rejected it: say what
+        // actually came back, otherwise the log only claims a timeout.
+        let shape = first_decrypt(&f, &keys, nonce)
+            .map(|pt| {
+                let head: String = pt.iter().take(24).map(|b| format!("{b:02x}")).collect();
+                format!("{} B decrypted, starts {head}", pt.len())
+            })
+            .unwrap_or_else(|| "nothing decrypted (chat mismatch?)".to_string());
+        why = format!("unusable reply: {shape}");
+        bridge.note(
+            Level::Debug,
+            "e2e",
+            format!(
+                "reply to {:02x}/{:02x} rejected: {shape}",
+                frame_cmd[0], frame_cmd[1]
+            ),
+        );
     }
 }
 
@@ -207,6 +224,22 @@ pub fn exchange(
 /// body start from the strict content-type boundary and then from the end of the
 /// datagram backwards. The caller's parser decides what is the real payload.
 fn decrypt_reply(
+    f: &Frame,
+    keys: &[Vec<u8>],
+    nonce: &str,
+    validate: &dyn Fn(&[u8]) -> bool,
+) -> Option<Vec<u8>> {
+    decrypt_with(f, keys, nonce, validate)
+}
+
+/// The first frame that decrypts at all, whatever it holds: for the log line
+/// that explains why a reply was rejected (a live `0x06` answer is one of
+/// these - it decrypts, but it is not a pack record).
+fn first_decrypt(f: &Frame, keys: &[Vec<u8>], nonce: &str) -> Option<Vec<u8>> {
+    decrypt_with(f, keys, nonce, &|_| true)
+}
+
+fn decrypt_with(
     f: &Frame,
     keys: &[Vec<u8>],
     nonce: &str,

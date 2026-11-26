@@ -77,6 +77,40 @@ default, publishes nothing. Only one role should publish at a time: with the
 bridge publishing, `emaldo-driver.service` must be stopped, or both write the
 same topics.
 
+### Cost-aware control in this role
+
+The bridge role runs the same policy engine as the driver role, but its setpoint
+reaches the module through the module's own schedule commands instead of a
+register. Four sections of `config.json` carry it, with the same names and shapes
+as the driver's TOML sections:
+
+| section | what it does here |
+| --- | --- |
+| `policy` | `enabled`, `mode` (`optimize` / `charge` / `discharge` / `idle`), `reserve_percent`, charge/discharge limits, and the `[policy.optimizer]` block the planner uses |
+| `control` | `writes_enabled` - dry-run by default: the table is computed, journaled as `WOULD-WRITE` and never sent; `power_scale` is unused here (no register), `watchdog_secs` is not |
+| `prices` | Nordpool feed the planner plans against (`area`, `currency`, `tz_offset_secs`); a failed fetch keeps the cached days in the state dir (`prices-<AREA>-<DATE>.json`) |
+| `solar` | PV forecast feed (`enabled`, latitude/longitude, strings) |
+
+Telemetry for it comes from the module: `bridge::telem` folds the E2E reports
+into `telemetry::State` every 5 s, and the engine's output is pushed by
+`bridge::actuate::E2eActuator` as the 96-slot quarter-hour table (the `0x1a`
+write Home Assistant uses). The table names SOC targets, not watts: `1..=100`
+charge up to, `0x81..=0xFF` discharge down to `256-value`, `0x00` forced idle,
+`0x80` leave it to the module. So the module's own charge/discharge limits decide
+the actual current, and confirmation is directional. `optimize` needs the
+module's pack report (SOC/capacity); without it the engine holds at `warming up:
+no battery data yet` rather than planning against SOC 0.
+
+`/api/status` carries the result under `optimizer` (policy state, actuator
+status including `write_count` and `last_result`, price and PV inputs).
+
+`resolv_immutable` (default on) is why the DNS pin survives: the vendor network
+stack keeps a dhclient alive and dhclient rewrites `/etc/resolv.conf`, so the
+bridge writes its block and locks the file with `chattr +i` rather than re-arguing
+with it every couple of seconds. `mode vendor` clears the attribute and restores
+the file. Hand edits to `config.json` while the bridge runs are reported in the
+log - the running copy is what gets written back, so restart to pick them up.
+
 ## How the takeover works (summary)
 
 - The module's `base_url`/`data_url` (vendor config keys, or BLE

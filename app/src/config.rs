@@ -689,6 +689,16 @@ pub struct Store {
     path: PathBuf,
 }
 
+/// The driver's config store answers the policy loop's two sections.
+impl crate::policy::PolicySource for Store {
+    fn policy(&self) -> PolicyConfig {
+        self.inner.read().unwrap().policy.clone()
+    }
+    fn control(&self) -> ControlConfig {
+        self.inner.read().unwrap().control.clone()
+    }
+}
+
 #[cfg(test)]
 mod profile_tests {
     use super::*;

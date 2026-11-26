@@ -15,7 +15,9 @@ fi
 sleep 2
 for p in /proc/[0-9]*; do
   c=$(cat $p/comm 2>/dev/null)
-  case "$c" in emaldo*) kill -9 ${p#/proc/} 2>/dev/null;; esac
+  # Match the firmware only: "emaldo-local" (our bridge) must never be caught
+  # by this sweep.
+  case "$c" in emaldo_iot_fw*) kill -9 ${p#/proc/} 2>/dev/null;; esac
 done
 sleep 1
 setsid sh -c "exec /app/emaldo_iot_fw" </dev/null >/tmp/app_hb.log 2>&1 &

@@ -110,6 +110,13 @@ pub struct Config {
     /// dhclient hook that regenerates `/etc/resolv.conf`; the local resolver is
     /// prepended there too so a lease renewal keeps it. Empty skips the file.
     pub dhclient_conf: String,
+    /// Lock the resolver file read-only in the kernel (`chattr +i`) after
+    /// pinning it. The vendor network stack runs dhclient (`netctl-supervisor`
+    /// keeps it alive and re-owns it), and dhclient rewrites the file on its
+    /// own cycle; re-pinning from userspace every couple of seconds works but
+    /// leaves a window and a lot of log lines. Vendor mode clears the attribute
+    /// again before restoring the file.
+    pub resolv_immutable: bool,
     pub vendor_hosts: Vec<String>,
     /// Extra SANs for the generated certificate (e.g. a takeover domain).
     pub cert_dns_names: Vec<String>,
@@ -160,6 +167,17 @@ pub struct Config {
     /// MQTT telemetry (`[mqtt]` in the driver's TOML, same shape here). Empty
     /// `broker_url` keeps the bridge from publishing anything.
     pub mqtt: crate::config::MqttConfig,
+    /// The shared policy engine (see `crate::policy`). In this role its
+    /// setpoint reaches the module through the E2E override table instead of
+    /// the inverter's register block, and `control.writes_enabled` gates it
+    /// exactly the same way: off by default, dry-run until it is turned on.
+    pub policy: crate::config::PolicyConfig,
+    /// Write gating for the actuator above.
+    pub control: crate::config::ControlConfig,
+    /// Price feed the optimizer plans against (`prices::start`).
+    pub prices: crate::config::PricesConfig,
+    /// PV forecast feed (`solar::start`).
+    pub solar: crate::config::SolarConfig,
     /// systemd units used by the mode switch.
     pub bridge_unit: String,
     pub monitor_units: Vec<String>,
@@ -185,6 +203,10 @@ impl Default for Config {
             control_bind: "127.0.0.1".into(),
             control_port: 1052,
             mqtt: crate::config::MqttConfig::default(),
+            policy: crate::config::PolicyConfig::default(),
+            control: crate::config::ControlConfig::default(),
+            prices: crate::config::PricesConfig::default(),
+            solar: crate::config::SolarConfig::default(),
             ui_bind: "0.0.0.0".into(),
             ui_port: 4443,
             lan_only: true,
@@ -198,6 +220,7 @@ impl Default for Config {
             dns_upstream: String::new(),
             dns_hosts: VENDOR_API_HOSTS.iter().map(|s| s.to_string()).collect(),
             resolv_file: "/etc/resolv.conf".into(),
+            resolv_immutable: true,
             dhclient_conf: "/etc/dhcp/dhclient.conf".into(),
             block_vendor_egress: true,
             vendor_block_addrs: vec![
@@ -341,6 +364,40 @@ impl Identity {
 pub struct Store<T> {
     path: PathBuf,
     value: std::sync::Arc<RwLock<T>>,
+    /// `(mtime_secs, size)` of the file as we last read or wrote it, plus a
+    /// flag for "someone edited it in between".
+    inner: std::sync::Arc<StoreState>,
+}
+
+#[derive(Default)]
+struct StoreState {
+    stamp: std::sync::atomic::AtomicU64,
+    conflict: std::sync::atomic::AtomicBool,
+}
+
+fn stamp_of(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|m| {
+            let secs = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (secs << 20) ^ (m.len() & 0xffff_f)
+        })
+        .unwrap_or(0)
+}
+
+/// The bridge's config answers the policy loop's two sections, so the same
+/// `policy::Engine` runs in either role.
+impl crate::policy::PolicySource for Store<Config> {
+    fn policy(&self) -> crate::config::PolicyConfig {
+        self.value.read().unwrap().policy.clone()
+    }
+    fn control(&self) -> crate::config::ControlConfig {
+        self.value.read().unwrap().control.clone()
+    }
 }
 
 /// Cloning a store shares the value: the main loop and the bridge see one
@@ -350,6 +407,7 @@ impl<T> Clone for Store<T> {
         Store {
             path: self.path.clone(),
             value: self.value.clone(),
+            inner: self.inner.clone(),
         }
     }
 }
@@ -362,14 +420,22 @@ impl<T: serde::de::DeserializeOwned + Serialize + Default> Store<T> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => T::default(),
             Err(e) => return Err(e),
         };
+        let state = StoreState::default();
+        state.stamp.store(stamp_of(path), std::sync::atomic::Ordering::Relaxed);
         let s = Store {
             path: path.to_path_buf(),
             value: std::sync::Arc::new(RwLock::new(value)),
+            inner: std::sync::Arc::new(state),
         };
         if !path.exists() {
             s.save()?;
         }
         Ok(s)
+    }
+
+    /// Where this store persists (for logs and the UI).
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn get(&self) -> T
@@ -392,9 +458,31 @@ impl<T: serde::de::DeserializeOwned + Serialize + Default> Store<T> {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        // A hand edit to the file while the bridge is running would otherwise be
+        // overwritten in silence: the in-memory config is the one written back.
+        // The bridge's own copy still wins (identity and pins live there), but
+        // the mismatch is flagged for the operator and the log.
+        if std::path::Path::new(&self.path).exists() {
+            let now = stamp_of(&self.path);
+            let last = self.inner.stamp.load(std::sync::atomic::Ordering::Relaxed);
+            if now != last {
+                self.inner.conflict.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         let bytes = serde_json::to_vec_pretty(&*self.value.read().unwrap())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        write_atomic(&self.path, &bytes)
+        write_atomic(&self.path, &bytes)?;
+        self.inner
+            .stamp
+            .store(stamp_of(&self.path), std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// True when the file on disk changed since the bridge last read or wrote
+    /// it, i.e. an edit made by hand (or another tool) has just been replaced by
+    /// the bridge's in-memory copy. Cleared on read.
+    pub fn conflict(&self) -> bool {
+        self.inner.conflict.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -488,6 +576,57 @@ fn cidr_match(spec: &str, ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The optimizer sections exist in this role too, stay safe by default, and
+    /// reach the policy loop through the shared seam.
+    #[test]
+    fn policy_sections_default_safe_and_round_trip() {
+        let dir = std::env::temp_dir().join(format!("emaldo-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let store = Store::<Config>::load(&path).unwrap();
+        use crate::policy::PolicySource;
+        assert!(
+            !store.control().writes_enabled,
+            "actuation must be dry-run until someone turns it on"
+        );
+        store
+            .update(|c| {
+                c.policy.enabled = true;
+                c.policy.mode = "optimize".into();
+                c.policy.reserve_percent = 35.0;
+                c.prices.enabled = true;
+                c.prices.area = "SE4".into();
+                c.control.writes_enabled = true;
+            })
+            .unwrap();
+        let again = Store::<Config>::load(&path).unwrap();
+        let c = again.get();
+        assert_eq!(c.policy.mode, "optimize");
+        assert_eq!(c.prices.area, "SE4");
+        assert_eq!(again.policy().reserve_percent, 35.0);
+        assert!(again.control().writes_enabled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Editing `config.json` by hand while the bridge runs must not be silently
+    /// overwritten the next time the bridge saves its in-memory copy.
+    #[test]
+    fn hand_edit_of_the_file_is_flagged() {
+        let dir = std::env::temp_dir().join(format!("emaldo-clobber-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let store = Store::<Config>::load(&path).unwrap();
+        assert!(!store.conflict(), "fresh load has nothing to report");
+        // Different length, so the stamp moves even within the same clock second.
+        std::fs::write(&path, b"{ \"timezone\": \"Europe/Berlin\", \"x\": 1 }").unwrap();
+        store.save().unwrap();
+        assert!(store.conflict(), "the outside edit has to surface");
+        assert!(!store.conflict(), "and is reported once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn user_hash_verifies_and_rejects() {

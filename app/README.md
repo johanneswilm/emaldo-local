@@ -219,7 +219,10 @@ the config. Rollback: `POST /api/v1/cmd {"cmd":"rollback"}` or
 
 State topics under `<topic_prefix>/...` (`grid/net_w`,
 `battery/soc_percent`, `pv/power_w`, `load/net_w`, `inverter/N/...`,
-`mcu/...`), availability `<topic_prefix>/status`, discovery configs under
+`mcu/...`, and - once the policy engine has ticked - `policy/mode`,
+`policy/setpoint_w`, `policy/reason`, `policy/status` (plan summary as entity
+attributes), `control/writes_enabled`, `control/write_count`,
+`control/last_result`), availability `<topic_prefix>/status`, discovery configs under
 `homeassistant/sensor/<device-id>/<object>/config`. Both the availability flag
 and the configs are published **retained, QoS 1**: without retain, Home
 Assistant never received them (it subscribes after the publish and a non-retained

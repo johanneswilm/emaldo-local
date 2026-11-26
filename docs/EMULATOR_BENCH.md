@@ -412,3 +412,59 @@ Two important qualifications found 2026-11-25:
    unreachable to the app; set `E2E_RELAY=10.0.2.3` in `sandbox-api.service`.
 10. **`baseinfo_v1` is not a provisioning input.** It is the app's own filedb
     bucket store and changes when identity is persisted; do not try to forge it.
+
+## Running the app against the bridge role (2026-11-26)
+
+What has to be true for the firmware in the guest to talk to `emaldo-local
+run` instead of the python sandbox, in the order that actually took:
+
+1. **Name resolution.** `/etc/hosts` carries the bridge's managed block
+   (`10.0.2.15 api.emaldo.com dp.emaldo.com e2e2.emaldo.com files.digi.iot.emaldo.com`),
+   and the sink must answer the same way: `/etc/dnssink.conf` says
+   `.emaldo.com 10.0.2.15`. The config *file* is what the running sink reads
+   (`DNSINK_CONF`, comma-separated, first match wins); `DNSINK_SANDBOX` in
+   `dns-sink.service` only seeds defaults, and a sink started by hand keeps its
+   own environment. Check with `ss -lnup | grep ':53 '` that exactly one
+   process owns the port before believing any answer.
+2. **Port 443 is the DoH front, not the API.** `dnshijack.service` relays the
+   DoH literals and `10.0.2.15:443` to `UPSTREAM`, and the DoH front
+   (`dnssink.py`, `DNSINK_DOH`) answers `/dns-query` and the connectivity
+   probes there. It does not proxy `/bmt`. So the app's own
+   `/root/config.toml` must say `base_url = "https://10.0.2.15:1443"` (the
+   bridge's `api_port`), or every request lands on the DoH handler.
+3. **The python sandbox has to be out of the way.** `sandbox-api.service` and
+   `e2e-relay.service` keep `10.0.2.3:443` answering with `Server: BaseHTTP`
+   and respawn under `Restart=always`; stop them and confirm by process list,
+   not by exit code.
+4. **The firmware is started by hand**, `setsid nohup /app/emaldo_iot_fw &`:
+   `emaldo.service` runs a straced variant, and an app launched from
+   `exp-hb.service` dies with the unit's cgroup. `exp-hb.sh`'s single-instance
+   sweep now matches `emaldo_iot_fw*` only - the old `emaldo*` pattern killed
+   the bridge as well.
+5. **Load the Bluetooth stubs** (`systemctl start bt-mod-stub.service`,
+   `insmod rtk_btusb aic_btusb`) before the app starts, or it dies in
+   `sockets/ble.(*Ble).Advertise` a couple of minutes in (the reload/reboot
+   gate, see `firmware/BT_RELOAD_RE.md`).
+6. **Prices without egress**: the bridge's price feed has no route out of the
+   guest, so seed its cache - `emaldo-local --prices-probe` on the host, then
+   copy `prices-<AREA>-<DATE>.json` into the bridge's **state dir** (not the
+   config dir). A failed fetch falls back to that cache and the plan builds.
+7. **MQTT is in-guest only**: qemu `restrict=on` does not carry the guest to the
+   host's broker on `10.0.2.2:1883` (connection refused). Use
+   `/sandbox/fake_mqtt_broker.py` (`127.0.0.1:1883`, prints `PUB <topic> = …`)
+   or a copy on another port, and read its output.
+8. **`journalctl` can wedge the session.** journald in the guest corrupts its
+   journal under the app's load (`File … corrupted or uncleanly shut down`) and
+   a `journalctl` call over `vmssh` then hangs to the timeout. Read
+   `/sandbox/*.log`, `/root/emaldo-local/logs/*` and `/var/log/dns_queries.log`.
+
+Probe helpers live next to this document: `emulator/statusprobe.py` (telemetry,
+optimizer block, schedule, events) and `emulator/modeprobe.py` (hosts pin,
+resolver pin and its immutable lock, egress routes, cellular, vendor units).
+
+Observed with the bridge acting as the cloud (app v2.35.3, `policy.mode=charge`,
+`control.writes_enabled=true`): the module logs in, the E2E session comes up
+(`module E2E session is live; telemetry polling enabled`), and the actuator
+reports `override written (96 slots, high 72 low 20)` - the schedule the module
+reports back then reads `charge-high (72%)` across the day. 949 state publishes
+and 11 discovery configs reached the broker.

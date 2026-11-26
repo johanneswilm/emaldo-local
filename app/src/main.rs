@@ -50,14 +50,8 @@ mod web;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-const VERSION: &str = "0.2.0-phase2";
-
-/// Stable device id for MQTT topics and HA discovery. Prefers the vendor
-/// module identity (/root/.device_id, READ-ONLY — it is the vendor-account
-/// binding); otherwise generates and persists our own under the state dir.
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
+/// One version string for both roles: the crate version from Cargo.toml.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Which role the argv selects. The bridge keeps its own command words (they
 /// are what the existing systemd unit and the operator docs already use), so
@@ -79,10 +73,38 @@ const BRIDGE_COMMANDS: [&str; 8] = [
 ];
 
 fn role_of(argv: &[String]) -> Role {
-    match argv.first().map(String::as_str) {
+    // Global options may precede the command word (`emaldo-local --config X
+    // mode status`), so the command is the first token that is neither an
+    // option nor the value of one.
+    const VALUE_OPTS: [&str; 2] = ["--config", "--state-dir"];
+    let mut i = 0;
+    while i < argv.len() {
+        let w = argv[i].as_str();
+        if VALUE_OPTS.contains(&w) {
+            i += 2;
+            continue;
+        }
+        if w.starts_with('-') && !BRIDGE_COMMANDS.contains(&w) {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    match argv.get(i).map(String::as_str) {
         Some("driver") => Role::Driver,
         Some(w) if BRIDGE_COMMANDS.contains(&w) => Role::Bridge,
         _ => Role::Driver,
+    }
+}
+
+/// The bridge's own argument list: everything except a leading `bridge` word.
+/// Global options (`--config`, `--state-dir`) stay where the operator put them;
+/// the bridge parser accepts them on either side of the command word.
+fn bridge_args(argv: &[String]) -> &[String] {
+    if argv.first().map(String::as_str) == Some("bridge") {
+        &argv[1..]
+    } else {
+        argv
     }
 }
 
@@ -91,12 +113,7 @@ fn main() {
     // crypto provider it is built and tested with.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if let Role::Bridge = role_of(&argv) {
-        let rest = if argv.first().map(String::as_str) == Some("bridge") {
-            &argv[1..]
-        } else {
-            &argv[..]
-        };
-        let code = bridge::run::cli(rest);
+        let code = bridge::run::cli(bridge_args(&argv));
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
     }
 
@@ -621,7 +638,7 @@ fn main() {
         }
         if c.policy.enabled && c.policy.mode == "optimize" {
             let st = telem.current();
-            let (w, reason, plan) = crate::policy::compute_optimized(&c, &st);
+            let (w, reason, plan) = crate::policy::compute_optimized(&c.policy, &st);
             telem.update(|s| {
                 s.policy.mode = "optimize".into();
                 s.policy.setpoint_w = w;
@@ -892,7 +909,11 @@ fn main() {
 
     // ---- Policy engine (Phase 2; computes always, writes only when
     // control.writes_enabled) ----
-    let engine = policy::Engine::new(store.clone(), telem.clone(), ctrl.clone());
+    let engine = policy::Engine::new(
+        store.clone(),
+        telem.clone(),
+        control::RegisterActuator::new(store.clone(), ctrl.clone()),
+    );
     let _ = engine;
 
     // ---- Display ----
@@ -970,5 +991,44 @@ fn main() {
     // restarts; state is in the config file, nothing to flush.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    fn a(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn global_options_do_not_hide_the_command_word() {
+        // The installer and the operator type both forms; the bridge must win.
+        assert!(matches!(role_of(&a("mode status")), Role::Bridge));
+        assert!(matches!(
+            role_of(&a("--config /root/emaldo-local/config.json config")),
+            Role::Bridge
+        ));
+        assert!(matches!(
+            role_of(&a("--state-dir /root/emaldo-local/state --config /c.json version")),
+            Role::Bridge
+        ));
+        assert!(matches!(
+            role_of(&a("bridge mode vendor")),
+            Role::Bridge
+        ));
+        assert!(matches!(role_of(&a("--mcu-probe")), Role::Driver));
+        assert!(matches!(role_of(&a("driver --config x")), Role::Driver));
+        assert!(matches!(role_of(&a("")), Role::Driver));
+    }
+
+    #[test]
+    fn the_bridge_receives_options_and_the_command_word() {
+        assert_eq!(
+            bridge_args(&a("--config /c.json mode status")).join(" "),
+            "--config /c.json mode status"
+        );
+        assert_eq!(bridge_args(&a("bridge run --config /c.json")).join(" "), "run --config /c.json");
     }
 }

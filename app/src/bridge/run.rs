@@ -56,6 +56,41 @@ options:
   --help              this text
 ";
 
+/// Bind with a short backoff. During a service restart the previous instance
+/// can still be holding the listener for a second or two (systemd starts the
+/// replacement immediately, and our own shutdown drains the relay and poller
+/// first), so exiting on the first `EADDRINUSE` shows up as a crash loop in the
+/// unit. Ten attempts span ~6 s, enough for a clean restart, short enough that
+/// a real conflict still fails fast.
+fn bind_retry<T, E: std::fmt::Display, F: FnMut() -> Result<T, E>>(
+    bridge: &crate::bridge::state::Bridge,
+    tag: &str,
+    what: String,
+    mut f: F,
+) -> Option<T> {
+    const ATTEMPTS: u32 = 10;
+    let mut delay = std::time::Duration::from_millis(300);
+    for attempt in 1..=ATTEMPTS {
+        match f() {
+            Ok(v) => return Some(v),
+            Err(e) if attempt < ATTEMPTS => {
+                bridge.log.write(
+                    log::Level::Warn,
+                    tag,
+                    format!("cannot bind {what}: {e} (retry {attempt}/{})", ATTEMPTS - 1),
+                );
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(3000));
+            }
+            Err(e) => {
+                bridge.log.write(log::Level::Error, tag, format!("cannot bind {what}: {e}"));
+                return None;
+            }
+        }
+    }
+    None
+}
+
 pub fn cli(argv: &[String]) -> std::process::ExitCode {
     let args: Vec<String> = argv.to_vec();
     let mut config_path = std::env::var("EMALDO_LOCAL_CONFIG")
@@ -272,20 +307,15 @@ fn run(config_path: &Path, state_override: Option<&str>) -> std::process::ExitCo
             let api_handler = Arc::new(api::Api {
                 bridge: bridge.clone(),
             });
-            match net::serve_tls(&cfg.api_bind, cfg.api_port, server.clone(), api_handler, bridge.access.clone()) {
-                Ok(port) => bridge.log.write(
+            match bind_retry(&bridge, "api", format!("{}:{}", cfg.api_bind, cfg.api_port), || {
+                net::serve_tls(&cfg.api_bind, cfg.api_port, server.clone(), api_handler.clone(), bridge.access.clone())
+            }) {
+                Some(port) => bridge.log.write(
                     log::Level::Info,
                     "api",
                     format!("vendor REST front on {}:{}", cfg.api_bind, port),
                 ),
-                Err(e) => {
-                    bridge.log.write(
-                        log::Level::Error,
-                        "api",
-                        format!("cannot bind {}:{}: {e}", cfg.api_bind, cfg.api_port),
-                    );
-                    return std::process::ExitCode::from(1);
-                }
+                None => return std::process::ExitCode::from(1),
             }
 
                     // Local policy at start: a unit that boots into local mode keeps the
@@ -322,20 +352,15 @@ fn run(config_path: &Path, state_override: Option<&str>) -> std::process::ExitCo
 
             // --- operator UI ----------------------------------------------
             let ui_handler = Arc::new(ui::Ui::new(bridge.clone()));
-            match net::serve_tls(&cfg.ui_bind, cfg.ui_port, server, ui_handler, bridge.access.clone()) {
-                Ok(port) => bridge.log.write(
+            match bind_retry(&bridge, "ui", format!("{}:{}", cfg.ui_bind, cfg.ui_port), || {
+                net::serve_tls(&cfg.ui_bind, cfg.ui_port, server.clone(), ui_handler.clone(), bridge.access.clone())
+            }) {
+                Some(port) => bridge.log.write(
                     log::Level::Info,
                     "ui",
                     format!("operator UI on https://{}:{port}", ip.map(|a| a.to_string()).unwrap_or_else(|| cfg.ui_bind.clone())),
                 ),
-                Err(e) => {
-                    bridge.log.write(
-                        log::Level::Error,
-                        "ui",
-                        format!("cannot bind {}:{}: {e}", cfg.ui_bind, cfg.ui_port),
-                    );
-                    return std::process::ExitCode::from(1);
-                }
+                None => return std::process::ExitCode::from(1),
             }
         }
         Err(e) => {
@@ -345,16 +370,14 @@ fn run(config_path: &Path, state_override: Option<&str>) -> std::process::ExitCo
     }
 
     // --- E2E relay --------------------------------------------------------
-    let relay = match relay::Relay::start(bridge.clone(), cfg.relay_port, cfg.util_port) {
-        Ok(r) => r,
-        Err(e) => {
-            bridge.log.write(
-                log::Level::Error,
-                "relay",
-                format!("cannot bind {}:{}/{}: {e}", cfg.relay_bind, cfg.relay_port, cfg.util_port),
-            );
-            return std::process::ExitCode::from(1);
-        }
+    let relay = match bind_retry(
+        &bridge,
+        "relay",
+        format!("{}:{}/{}", cfg.relay_bind, cfg.relay_port, cfg.util_port),
+        || relay::Relay::start(bridge.clone(), cfg.relay_port, cfg.util_port),
+    ) {
+        Some(r) => r,
+        None => return std::process::ExitCode::from(1),
     };
     if let Err(e) = relay::serve_control(bridge.clone(), relay.clone()) {
         bridge.log.write(
@@ -392,8 +415,35 @@ fn run(config_path: &Path, state_override: Option<&str>) -> std::process::ExitCo
     // --- telemetry poller -------------------------------------------------
     let poll = poller::spawn(bridge.clone(), relay.clone());
 
-    // --- MQTT telemetry (off until config.json has an [mqtt]/mqtt section) --
+    // --- shared telemetry model, MQTT telemetry, policy engine -----------
+    // The module's E2E reports are folded into `telemetry::State` (the same
+    // model the driver role fills from the bus); MQTT publishes it, and the
+    // policy engine actuates the module through its E2E override table.
+    crate::bridge::telem::spawn(bridge.clone());
     crate::bridge::mqtt_pub::spawn(bridge.clone());
+    {
+        let cfg = bridge.cfg.get();
+        let dir = boot.state_dir.clone();
+        if cfg.prices.enabled && !cfg.prices.area.is_empty() {
+            crate::prices::start(
+                dir.clone(),
+                cfg.prices.area.clone(),
+                cfg.prices.currency.clone(),
+                cfg.prices.tz_offset_secs,
+                cfg.prices.refresh_secs,
+                3,
+                bridge.telem.clone(),
+            );
+        }
+        if cfg.solar.enabled {
+            crate::solar::start(dir, cfg.solar.clone(), 3600, bridge.telem.clone());
+        }
+        if cfg.policy.enabled {
+            let act = crate::bridge::actuate::E2eActuator::new(bridge.clone(), relay.clone());
+            // `Store` clones share the live config, so the engine sees edits at once.
+            crate::policy::Engine::new(Arc::new(bridge.cfg.clone()), bridge.telem.clone(), act);
+        }
+    }
 
     // --- signals ----------------------------------------------------------
     unsafe {
@@ -571,9 +621,13 @@ fn config_cli(config_path: &Path, args: &[String]) -> std::process::ExitCode {
 }
 
 fn config_set_cli(config_path: &Path, args: &[String]) -> std::process::ExitCode {
+    // Read through the typed config so every known key exists at its default: a
+    // section the file predates (`policy`, `control`, `prices`, `solar`) is then
+    // addressable as `policy.enabled=true` instead of being rejected because the
+    // old file never mentioned it.
     let mut v = match std::fs::read(config_path) {
-        Ok(b) => match serde_json::from_slice::<serde_json::Value>(&b) {
-            Ok(v) => v,
+        Ok(b) => match serde_json::from_slice::<config::Config>(&b) {
+            Ok(cfg) => serde_json::to_value(cfg).unwrap_or_default(),
             Err(e) => {
                 eprintln!("config {}: {e}", config_path.display());
                 return std::process::ExitCode::from(1);
@@ -587,17 +641,6 @@ fn config_set_cli(config_path: &Path, args: &[String]) -> std::process::ExitCode
             return std::process::ExitCode::from(1);
         }
     };
-    let known: Vec<String> = serde_json::to_value(config::Config::default())
-        .ok()
-        .and_then(|d| d.as_object().map(|o| o.keys().cloned().collect()))
-        .unwrap_or_default();
-    let object = match v.as_object_mut() {
-        Some(o) => o,
-        None => {
-            eprintln!("config {}: not a JSON object", config_path.display());
-            return std::process::ExitCode::from(1);
-        }
-    };
     for arg in args {
         let (key, raw) = match arg.split_once('=') {
             Some((k, val)) => (k.trim().to_string(), val.trim().to_string()),
@@ -606,15 +649,10 @@ fn config_set_cli(config_path: &Path, args: &[String]) -> std::process::ExitCode
                 return std::process::ExitCode::from(2);
             }
         };
-        if !known.iter().any(|k| k == &key) {
-            eprintln!("unknown config key {key:?}; known: {}", known.join(", "));
+        if let Err(e) = config_apply(&mut v, &key, &raw) {
+            eprintln!("{e}");
             return std::process::ExitCode::from(2);
         }
-        let shaped = match object.get(&key) {
-            Some(existing) => parse_value_for(existing, &raw),
-            None => parse_value(&raw),
-        };
-        object.insert(key.clone(), shaped);
     }
     match serde_json::from_value::<config::Config>(v.clone()) {
         Ok(cfg) => {
@@ -637,6 +675,40 @@ fn config_set_cli(config_path: &Path, args: &[String]) -> std::process::ExitCode
     }
 }
 
+/// Set one `key=value` in a config tree. The key may be dotted
+/// (`policy.enabled`, `control.writes_enabled`), and it is validated against the
+/// tree, so a typo gets the options that do exist one level up.
+fn config_apply(v: &mut serde_json::Value, key: &str, raw: &str) -> Result<(), String> {
+    let parts: Vec<&str> = key.split('.').map(str::trim).collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(format!("malformed config key {key:?}"));
+    }
+    let mut node = v;
+    for (n, p) in parts.iter().enumerate() {
+        let obj = node
+            .as_object_mut()
+            .ok_or_else(|| format!("{key}: {:?} is not a section", parts[..n].join(".")))?;
+        if !obj.contains_key(*p) {
+            let mut known: Vec<String> = obj.keys().cloned().collect();
+            known.sort();
+            return Err(format!(
+                "unknown config key {key:?}; in {:?} the options are {}",
+                parts[..n].join("."),
+                known.join(", ")
+            ));
+        }
+        let child = obj
+            .get_mut(*p)
+            .expect("presence checked just above");
+        if n + 1 == parts.len() {
+            *child = parse_value_for(child, raw);
+            return Ok(());
+        }
+        node = child;
+    }
+    Err(format!("config key {key:?} is incomplete"))
+}
+
 /// Type the new value by what the key already holds: a list key takes a
 /// comma-separated list (one item is still a list), numbers and booleans are
 /// parsed as such, everything else stays a string.
@@ -649,7 +721,18 @@ fn parse_value_for(existing: &serde_json::Value, raw: &str) -> serde_json::Value
                 .collect(),
         ),
         serde_json::Value::Bool(_) => serde_json::Value::Bool(raw == "true"),
-        serde_json::Value::Number(_) => parse_scalar(raw),
+        serde_json::Value::Number(_) => {
+            // A float field (`latitude`, `reserve_percent`) must not be typed
+            // as a string by a decimal argument.
+            if existing.is_f64() {
+                if let Ok(f) = raw.parse::<f64>() {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        return serde_json::Value::Number(n);
+                    }
+                }
+            }
+            parse_scalar(raw)
+        }
         _ => serde_json::Value::String(raw.to_string()),
     }
 }
@@ -670,6 +753,11 @@ fn parse_scalar(raw: &str) -> serde_json::Value {
     }
     if let Ok(n) = raw.parse::<u64>() {
         return serde_json::Value::Number(n.into());
+    }
+    if let Ok(f) = raw.parse::<f64>() {
+        if let Some(n) = serde_json::Number::from_f64(f) {
+            return serde_json::Value::Number(n);
+        }
     }
     serde_json::Value::String(raw.to_string())
 }
@@ -696,5 +784,62 @@ fn config_show_cli(config_path: &Path) -> std::process::ExitCode {
             eprintln!("config {}: {e}", config_path.display());
             std::process::ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod config_cli_tests {
+    use super::*;
+
+    fn tree() -> serde_json::Value {
+        serde_json::to_value(config::Config::default()).unwrap()
+    }
+
+    #[test]
+    fn dotted_keys_reach_the_sections_the_file_predates() {
+        let mut v = tree();
+        config_apply(&mut v, "policy.enabled", "true").unwrap();
+        config_apply(&mut v, "policy.reserve_percent", "35").unwrap();
+        config_apply(&mut v, "prices.area", "SE4").unwrap();
+        assert_eq!(v["policy"]["enabled"], serde_json::json!(true));
+        assert_eq!(v["policy"]["reserve_percent"], serde_json::json!(35.0), "a float field stays a float");
+        // Float-valued keys keep their type, and a decimal is not a string.
+        config_apply(&mut v, "solar.latitude", "55.72486").unwrap();
+        config_apply(&mut v, "solar.performance_ratio", "0.8").unwrap();
+        assert_eq!(v["solar"]["latitude"], serde_json::json!(55.72486));
+        assert_eq!(v["solar"]["performance_ratio"], serde_json::json!(0.8));
+        // A string field that happens to look numeric stays a string.
+        config_apply(&mut v, "timezone", "1").unwrap();
+        assert_eq!(v["timezone"], serde_json::json!("1"));
+        assert_eq!(v["prices"]["area"], serde_json::json!("SE4"));
+        let cfg: config::Config = serde_json::from_value(v).unwrap();
+        assert!(cfg.policy.enabled, "the section reached the typed config");
+        assert!(
+            !cfg.control.writes_enabled,
+            "the write gate stays closed unless it is named"
+        );
+    }
+
+    #[test]
+    fn flat_keys_still_work_and_lists_stay_lists() {
+        let mut v = tree();
+        config_apply(&mut v, "lan_cidrs", "192.168.50.0/24,10.0.0.0/8").unwrap();
+        assert_eq!(
+            v["lan_cidrs"],
+            serde_json::json!(["192.168.50.0/24", "10.0.0.0/8"])
+        );
+        config_apply(&mut v, "pin_dns", "false").unwrap();
+        assert_eq!(v["pin_dns"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn a_typo_names_the_options_that_exist() {
+        let mut v = tree();
+        let e = config_apply(&mut v, "policy.enabled2", "true").unwrap_err();
+        assert!(e.contains("policy.enabled2"), "{e}");
+        assert!(e.contains("enabled"), "{e}");
+        let e = config_apply(&mut v, "policay.enabled", "true").unwrap_err();
+        assert!(e.contains("policy"), "{e}");
+        assert!(config_apply(&mut v, "policy..enabled", "true").is_err());
     }
 }

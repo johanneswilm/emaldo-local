@@ -16,6 +16,11 @@ pub fn publish_state(c: &Client, base: &str, st: &State) {
             c.publish(&format!("{base}/{t}"), &b, 0);
         }
     };
+    if let Some(v) = optimizer_values(st) {
+        for (t, val) in v {
+            p(t.as_str(), val);
+        }
+    }
     p("grid/net_w", st.grid.net_w.into());
     p("grid/import_w", st.grid.import_w.into());
     p("grid/export_w", st.grid.export_w.into());
@@ -93,6 +98,49 @@ pub fn publish_availability(c: &Client, base: &str) {
     c.publish_retained(&format!("{base}/status"), b"online");
 }
 
+/// The policy engine's and write controller's own topics: what was decided,
+/// and what happened when it was applied. Empty (nothing published) while the
+/// engine has never ticked, so an installation without policy keeps its entity
+/// set unchanged.
+pub fn optimizer_values(st: &State) -> Option<Vec<(String, serde_json::Value)>> {
+    if st.policy.mode.is_empty() {
+        return None;
+    }
+    Some(vec![
+        ("policy/mode".into(), st.policy.mode.clone().into()),
+        ("policy/setpoint_w".into(), st.policy.setpoint_w.into()),
+        ("policy/reason".into(), st.policy.reason.clone().into()),
+        (
+            "control/writes_enabled".into(),
+            if st.control.writes_enabled {
+                serde_json::Value::String("on".into())
+            } else {
+                serde_json::Value::String("off".into())
+            },
+        ),
+        ("control/write_count".into(), st.control.write_count.into()),
+        (
+            "control/last_result".into(),
+            st.control.last_result.clone().into(),
+        ),
+        (
+            "policy/status".into(),
+            serde_json::json!({
+                "mode": st.policy.mode,
+                "setpoint_w": st.policy.setpoint_w,
+                "reason": st.policy.reason,
+                "plan_slots": st.policy.plan.slots.len(),
+                "plan_now_intent": format!("{:?}", st.policy.plan.now_intent),
+                "plan_now_w": st.policy.plan.now_power_w,
+                "plan_est_saving_eur": st.policy.plan.est_saving_eur,
+                "writes_enabled": st.control.writes_enabled,
+                "write_count": st.control.write_count,
+                "last_result": st.control.last_result,
+            }),
+        ),
+    ])
+}
+
 pub fn publish_discovery(
     c: &Client,
     prefix: &str,
@@ -128,6 +176,24 @@ pub fn publish_discovery(
     };
     add("sensor", "grid_net_power", "Grid net power", serde_json::json!({
         "stat_t": format!("{base}/grid/net_w"), "unit_of_meas": "W", "dev_cla": "power", "stat_cla": "measurement"}));
+    if !st.policy.mode.is_empty() {
+        add("sensor", "optimizer", "Optimizer", serde_json::json!({
+            "stat_t": format!("{base}/policy/mode"),
+            "json_attributes_topic": format!("{base}/policy/status"),
+            "json_attributes": [
+                "mode",
+                "setpoint_w",
+                "reason",
+                "plan_slots",
+                "plan_now_intent",
+                "plan_now_w",
+                "plan_est_saving_eur",
+                "writes_enabled",
+                "write_count",
+                "last_result"
+            ],
+        }));
+    }
     add("sensor", "battery_soc", "Battery SOC", serde_json::json!({
         "stat_t": format!("{base}/battery/soc_percent"), "unit_of_meas": "%", "dev_cla": "battery"}));
     add("sensor", "battery_power", "Battery power", serde_json::json!({
@@ -211,7 +277,8 @@ fn uniq_id(prefix: &str, device_id: &str, object_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::uniq_id;
+    use super::{optimizer_values, uniq_id};
+    use crate::telemetry::State;
 
     #[test]
     fn unique_id_honours_the_configured_namespace() {
@@ -222,6 +289,52 @@ mod tests {
         assert_eq!(
             uniq_id("emaldo-local2", "HMvSUfAafuYCokvv", "battery_soc"),
             "emaldo-local2:HMvSUfAafuYCokvv:battery_soc"
+        );
+    }
+    fn state_with_policy() -> State {
+        let mut st = State::default();
+        st.policy.mode = "optimize".into();
+        st.policy.setpoint_w = -1200;
+        st.policy.reason = "mode=optimize; soc=24.0%".into();
+        st.policy.plan.slots = vec![crate::optimizer::PlanSlot::default(); 96];
+        st.policy.plan.est_saving_eur = 1.75;
+        st.control.writes_enabled = false;
+        st.control.write_count = 0;
+        st.control.last_result = "WOULD-WRITE override (96 slots): mode=optimize".into();
+        st
+    }
+
+    /// An installation that never runs the policy engine must not gain entities.
+    #[test]
+    fn no_policy_means_no_optimizer_topics() {
+        assert!(optimizer_values(&State::default()).is_none(), "engine never ticked");
+    }
+
+    #[test]
+    fn the_optimizer_topics_carry_the_decision_and_the_write_result() {
+        let vals = optimizer_values(&state_with_policy()).expect("policy is on");
+        let get = |t: &str| {
+            vals.iter()
+                .find(|(k, _)| k == t)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(get("policy/mode"), serde_json::json!("optimize"));
+        assert_eq!(get("policy/setpoint_w"), serde_json::json!(-1200));
+        assert_eq!(
+            get("control/writes_enabled"),
+            serde_json::json!("off"),
+            "dry-run has to be visible as such"
+        );
+        let attrs = get("policy/status");
+        assert_eq!(attrs["plan_slots"], serde_json::json!(96));
+        assert_eq!(attrs["plan_est_saving_eur"], serde_json::json!(1.75));
+        assert!(
+            attrs["last_result"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("WOULD-WRITE"),
+            "the dry-run note is the operator's evidence: {attrs}"
         );
     }
 }

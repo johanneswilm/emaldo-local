@@ -49,6 +49,14 @@ if [ -x "$BIN" ] && systemctl is-active --quiet emaldo-local.service; then
     systemctl stop emaldo-local.service
 fi
 
+# Keep the binary we are about to replace: roll back with
+#   cp /root/emaldo-local/backups/emaldo-local-<stamp> /root/emaldo-local/emaldo-local
+# and systemctl restart emaldo-local.service. The three newest are kept.
+if [ -x "$BIN" ]; then
+    cp -f "$BIN" "/root/emaldo-local/backups/emaldo-local-$(date +%Y%m%d-%H%M%S)"
+    ls -1t /root/emaldo-local/backups/emaldo-local-* 2>/dev/null | tail -n +4 | xargs -r rm -f
+fi
+
 cp "$NEW" "$BIN.tmp"
 chmod 700 "$BIN.tmp"
 mv -f "$BIN.tmp" "$BIN"

@@ -565,3 +565,126 @@ impl Controller {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Actuation seam
+// ---------------------------------------------------------------------------
+
+/// Where a computed setpoint is applied.
+///
+/// The driver writes the inverter's setpoint register through
+/// [`Controller`]; the bridge role pushes the module's E2E override table
+/// (`bridge::actuate`). Both take watts (+ = charging), so `policy::Engine`
+/// decides what the battery should do without knowing which hardware is
+/// underneath it.
+pub trait Actuator: Send + Sync {
+    /// Ask for `watts` (+ = charging). Implementations apply their own gates:
+    /// the register path honours `control.writes_enabled`, the rate limits and
+    /// the pre-write snapshot; the E2E path honours the same flag.
+    fn apply(&self, watts: i32, reason: &str);
+
+    /// What has actually been applied, for the engine's retry logic and for the
+    /// web UI.
+    fn status(&self) -> Applied;
+}
+
+/// [`Actuator::status`] in actuator-neutral terms.
+#[derive(Clone, Debug, Default)]
+pub struct Applied {
+    pub writes_enabled: bool,
+    pub write_count: u64,
+    pub last_result: String,
+    pub snapshot_taken: bool,
+    /// Setpoint the actuator has confirmed, in watts (+ = charging).
+    pub confirmed_w: Option<i32>,
+}
+
+/// The driver's actuator: one register in the inverter's setpoint block.
+pub struct RegisterActuator {
+    cfg: Arc<ConfigStore>,
+    ctrl: Arc<Controller>,
+}
+
+impl RegisterActuator {
+    pub fn new(cfg: Arc<ConfigStore>, ctrl: Arc<Controller>) -> Arc<RegisterActuator> {
+        Arc::new(RegisterActuator { cfg, ctrl })
+    }
+}
+
+impl Actuator for RegisterActuator {
+    fn apply(&self, watts: i32, reason: &str) {
+        let scale = self.cfg.get().control.power_scale.max(1);
+        let reg = (watts / scale).clamp(
+            -crate::regs::hs_control::POWER_LIMIT_ABS_MAX,
+            crate::regs::hs_control::POWER_LIMIT_ABS_MAX,
+        );
+        self.ctrl
+            .request(crate::regs::hs_control::BAT_MAX_POWER, reg, "policy", reason);
+    }
+
+    fn status(&self) -> Applied {
+        let st = self.ctrl.status();
+        let scale = self.cfg.get().control.power_scale.max(1);
+        Applied {
+            writes_enabled: st.writes_enabled,
+            write_count: st.write_count,
+            last_result: st.last_result.clone(),
+            snapshot_taken: st.snapshot_taken,
+            confirmed_w: st
+                .verified
+                .get(&crate::regs::hs_control::BAT_MAX_POWER)
+                .map(|v| v * scale),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::Store as TelemStore;
+
+    /// The watts -> register translation and the write gate, through the seam
+    /// the policy engine now uses.
+    #[test]
+    fn register_actuator_scales_and_honours_the_gate() {
+        let dir = std::env::temp_dir().join(format!("emaldo-act-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[control]\npower_scale = 100\nwrites_enabled = false\n",
+        )
+        .unwrap();
+        let cfg = ConfigStore::load(&dir.join("config.toml")).unwrap();
+        let ctrl = Controller::new(cfg.clone(), TelemStore::new(), Bus::new(), dir.clone());
+        let act = RegisterActuator::new(cfg.clone(), ctrl.clone());
+
+        act.apply(2500, "test: charge");
+        let journal = loop {
+            let j = std::fs::read_to_string(dir.join("writes.log")).unwrap_or_default();
+            if j.contains("WOULD-WRITE") || j.contains("would-write") {
+                break j;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        // 2500 W at a 100 W/register scale is register value 25, and with the
+        // gate closed nothing is confirmed.
+        assert!(journal.contains("\"value\":25"), "{journal}");
+        let s = act.status();
+        assert!(!s.writes_enabled);
+        assert_eq!(s.confirmed_w, None);
+
+        // Absurd watts: clamped to the register's signed range, not wrapped.
+        act.apply(i32::MAX, "test: absurd");
+        let clamped = format!("\"value\":{}", crate::regs::hs_control::POWER_LIMIT_ABS_MAX);
+        let journal = loop {
+            let j = std::fs::read_to_string(dir.join("writes.log")).unwrap_or_default();
+            if j.contains(&clamped) {
+                break j;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(journal.contains(&clamped), "{journal}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -185,9 +185,72 @@ impl Api {
         if p.contains("get-grid-connection") {
             return Answer::Result(json!({"grid_connection": 1, "gmtime": gmtime_ns()}));
         }
-        // Prices, forecasts, sync, logs, events, metrics uploads: the module
-        // accepts the bare timestamp answer it got from the reference stack.
+        // Metrics uploads: the module reports its own readings here, and what
+        // it reports is the only telemetry guaranteed to arrive (its answers to
+        // our E2E reads can time out on the CAN side). Keep the last body so
+        // the operator and the telemetry fold can see it.
+        if p.contains("submit") {
+            self.capture_metrics(r.json.as_deref(), body);
+            return Answer::Result(json!({"gmtime": gmtime_ns()}));
+        }
+        // Prices, forecasts, sync, logs, events: the module accepts the bare
+        // timestamp answer it got from the reference stack.
         Answer::Result(json!({"gmtime": gmtime_ns()}))
+    }
+
+    /// Store the module's own metrics report and say what it holds. Bodies are
+    /// already decrypted at this point (`gm=2` envelope), and they are device
+    /// data: 0600 in the state dir, never in the log beyond key names.
+    fn capture_metrics(&self, inner: Option<&str>, body: &[u8]) {
+        if let Some(raw) = inner.filter(|s| !serde_json::from_str::<Value>(s).is_ok()) {
+            // Decoded envelope, opaque payload: `data` is a second layer. Keep
+            // what arrived (0600, state dir) so the layout can be identified
+            // instead of guessed at.
+            let shape = json!({
+                "bytes": raw.len(),
+                "head": raw.chars().take(600).collect::<String>(),
+                "form": emaldo_proto::codec::form_decode(body)
+                    .into_iter()
+                    .map(|(k, v)| (k, v.len()))
+                    .collect::<Vec<(String, usize)>>(),
+            });
+            let path = self.bridge.state_dir.join("metrics-raw.json");
+            let _ = crate::bridge::config::write_atomic(&path, shape.to_string().as_bytes());
+            self.bridge.note(
+                Level::Debug,
+                "metrics",
+                format!("upload payload is not JSON after the envelope ({} B); kept the head in {}", raw.len(), path.display()),
+            );
+            return;
+        }
+        let Some(inner) = inner else { return };
+        let Ok(v) = serde_json::from_str::<Value>(inner) else { return };
+        let path = self.bridge.state_dir.join("metrics-last.json");
+        let _ = crate::bridge::config::write_atomic(&path, v.to_string().as_bytes());
+        let described = match &v {
+            Value::Object(_) => {
+                let mut keys: Vec<String> = v
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect())
+                    .unwrap_or_default();
+                keys.sort();
+                format!("metrics: {} keys [{}]", keys.len(), keys.join(","))
+            }
+            Value::Array(items) => {
+                let keys = items
+                    .first()
+                    .and_then(|i| i.as_object())
+                    .map(|o: &serde_json::Map<String, Value>| {
+                        let mut k: Vec<String> = o.keys().cloned().collect();
+                        k.sort();
+                        k.join(",")
+                    })
+                    .unwrap_or_default();
+                format!("metrics: {} records, keys [{}]", items.len(), keys)
+            }
+            other => format!("metrics: neither object nor array ({})", other),
+        };
+        self.bridge.note(Level::Debug, "metrics", described);
     }
 
     /// The login answer: pinned identity, this bridge as the relay, rotating

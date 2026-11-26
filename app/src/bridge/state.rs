@@ -127,6 +127,10 @@ pub struct Bridge {
     /// Relay handle, installed by `relay::start` so the REST/UI side can send
     /// commands through the relay. Weak: the relay owns an Arc to this bridge.
     pub relay: RwLock<Option<std::sync::Weak<crate::bridge::relay::Relay>>>,
+    /// The same telemetry model the driver role builds from the bus, filled
+    /// from the module's E2E reports (`bridge::telem`): MQTT, the policy engine
+    /// and the shared web UI all read it.
+    pub telem: std::sync::Arc<crate::telemetry::Store>,
     /// Certificate identity for the UI (subject + SHA-256 of the leaf).
     pub cert_info: RwLock<Value>,
     /// Login/session bookkeeping for HA-style API sessions.
@@ -150,6 +154,7 @@ impl Bridge {
         Ok(Bridge {
             cfg,
             ident,
+            telem: crate::telemetry::Store::new(),
             log,
             access,
             state_dir: state_dir.to_path_buf(),

@@ -32,6 +32,9 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
     let mut next_resolv = Instant::now();
     let mut next_appcfg = Instant::now();
     let mut last_dns_note: Option<Instant> = None;
+        // How often the vendor app has overwritten the resolver since we started.
+        let mut dns_rewrites: u64 = 0;
+        let mut last_cfg_note: Option<std::time::Instant> = None;
     let mut last_appcfg_note: Option<Instant> = None;
     let mut device_seen = false;
     let mut last_error: Option<String> = None;
@@ -69,6 +72,23 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
         // dhclient owns /etc/resolv.conf and rewrites it on every lease
         // renewal: the local resolver has to be back in front of the upstream
         // one, or the app walks straight to the vendor front end again.
+        // A config edit made by hand while the bridge runs is silently replaced
+        // by the bridge's own copy the next time it saves, so it has to surface.
+        if bridge.cfg.conflict() {
+            note_limited(
+                &bridge,
+                "config",
+                &format!(
+                    "{} was edited outside the bridge; the bridge's running copy was \
+                     written back over it. Restart the bridge to pick the file up, or \
+                     edit through the UI (logged at most once per 10 minutes)",
+                    bridge.cfg.path().display()
+                ),
+                &mut last_cfg_note,
+                now,
+            );
+        }
+
         if cfg.pin_dns && now >= next_resolv {
             // The vendor app's own netmonitor rewrites /etc/resolv.conf from
             // the DHCP answer on its own cycle; the pin has to be back before
@@ -80,11 +100,15 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
             if !pinned {
                 // netmonitor does this every few seconds: the action repeats,
                 // the log line does not (8k lines a day would be pure noise).
+                dns_rewrites += 1;
                 note_limited(
                     &bridge,
                     "dns",
-                    "/etc/resolv.conf was rewritten: putting the local resolver \
-                     back in front (logged at most once per 10 minutes)",
+                    &format!(
+                        "/etc/resolv.conf was rewritten (#{dns_rewrites} since start) by \
+                         the vendor app's netmonitor: putting the local resolver back in \
+                         front (this line is logged at most once per 10 minutes)"
+                    ),
                     &mut last_dns_note,
                     now,
                 );

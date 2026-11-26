@@ -19,22 +19,28 @@
 //   grid_limit     -> basic anti-reflux: discharge reduced by export excess
 //   watchdog       -> telemetry stale while non-auto: setpoint 0 + alarm
 
-use crate::config::Store as ConfigStore;
-use crate::control::Controller;
-use crate::regs::hs_control;
+use crate::control::Actuator;
 use crate::telemetry::Store as TelemStore;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The two config sections the policy loop reads, so both roles can run the
+/// same engine: the driver takes them from its TOML store, the bridge role from
+/// the `policy` / `control` sections of its `config.json`.
+pub trait PolicySource: Send + Sync {
+    fn policy(&self) -> crate::config::PolicyConfig;
+    fn control(&self) -> crate::config::ControlConfig;
+}
+
 pub struct Engine {
-    cfg: Arc<ConfigStore>,
+    src: Arc<dyn PolicySource>,
     telem: Arc<TelemStore>,
-    ctrl: Arc<Controller>,
+    act: Arc<dyn Actuator>,
 }
 
 impl Engine {
-    pub fn new(cfg: Arc<ConfigStore>, telem: Arc<TelemStore>, ctrl: Arc<Controller>) -> Arc<Engine> {
-        let e = Arc::new(Engine { cfg, telem, ctrl });
+    pub fn new(src: Arc<dyn PolicySource>, telem: Arc<TelemStore>, act: Arc<dyn Actuator>) -> Arc<Engine> {
+        let e = Arc::new(Engine { src, telem, act });
         let e2 = e.clone();
         std::thread::Builder::new()
             .name("policy".into())
@@ -49,23 +55,24 @@ impl Engine {
         loop {
             std::thread::sleep(Duration::from_secs(5));
             ticks_since_send = ticks_since_send.saturating_add(1);
-            let cfg = self.cfg.get();
-            if !cfg.policy.enabled {
+            let cfg = self.src.policy();
+            let control = self.src.control();
+            if !cfg.enabled {
                 continue;
             }
             let st = self.telem.current();
             let now = crate::telemetry::now_unix();
 
             // Watchdog: stale telemetry with an active policy is unsafe.
-            let stale = now.saturating_sub(st.updated_at) > cfg.control.watchdog_secs;
-            if stale && cfg.policy.mode != "auto" {
+            let stale = now.saturating_sub(st.updated_at) > control.watchdog_secs;
+            if stale && cfg.mode != "auto" {
                 self.telem.add_event("error", "policy", format!(
                     "watchdog: telemetry stale {}s with mode={} — setpoint 0",
-                    now.saturating_sub(st.updated_at), cfg.policy.mode));
+                    now.saturating_sub(st.updated_at), cfg.mode));
                 if last_sent != Some(0) {
                     last_sent = Some(0);
                     ticks_since_send = 0;
-                    self.ctrl.request(hs_control::BAT_MAX_POWER, 0, "policy", "watchdog: stale telemetry");
+                    self.act.apply(0, "watchdog: stale telemetry");
                 }
                 self.update_policy_state("watchdog", 0);
                 continue;
@@ -73,7 +80,7 @@ impl Engine {
 
             let setpoint_w;
             let reason;
-            if cfg.policy.mode == "optimize" {
+            if cfg.mode == "optimize" {
                 // Don't act until we have a real SOC (CAN/battery present);
                 // otherwise the optimizer sees 0% and only wants to charge.
                 if st.battery.modules == 0 && st.battery.capacity_wh == 0.0 {
@@ -90,9 +97,9 @@ impl Engine {
                 setpoint_w = w;
                 reason = r;
             }
-            let cs = self.ctrl.status();
+            let cs = self.act.status();
             self.telem.update(|s| {
-                s.policy.mode = cfg.policy.mode.clone();
+                s.policy.mode = cfg.mode.clone();
                 s.policy.setpoint_w = setpoint_w;
                 s.policy.reason = reason.clone();
                 s.control.writes_enabled = cs.writes_enabled;
@@ -100,25 +107,21 @@ impl Engine {
                 s.control.last_result = cs.last_result.clone();
                 s.control.snapshot_taken = cs.snapshot_taken;
             });
-            if cfg.policy.mode == "auto" && cfg.policy.override_slots.is_empty() {
+            if cfg.mode == "auto" && cfg.override_slots.is_empty() {
                 last_sent = None; // hands off; next non-auto tick writes fresh
                 continue;
             }
-            let scale = cfg.control.power_scale.max(1);
-            let reg = (setpoint_w / scale).clamp(
-                -hs_control::POWER_LIMIT_ABS_MAX,
-                hs_control::POWER_LIMIT_ABS_MAX,
-            );
+            let reg = setpoint_w;
             // Send on change; refresh every ~30 s as a keepalive; and
             // retry every ~10 s while writes are enabled but the last
             // attempt has not been verified (rate-limited, bus reconnect,
             // or externally changed hardware).
-            let verified = cs.verified.get(&hs_control::BAT_MAX_POWER) == Some(&reg);
-            let retry = cfg.control.writes_enabled && !verified && ticks_since_send >= 2;
+            let verified = cs.confirmed_w == Some(reg);
+            let retry = control.writes_enabled && !verified && ticks_since_send >= 2;
             if last_sent != Some(reg) || ticks_since_send >= 6 || retry {
                 last_sent = Some(reg);
                 ticks_since_send = 0;
-                self.ctrl.request(hs_control::BAT_MAX_POWER, reg, "policy", &reason);
+                self.act.apply(reg, &reason);
             }
         }
     }
@@ -133,10 +136,10 @@ impl Engine {
 
 /// Run the cost-aware optimizer and return (setpoint W, reason, plan).
 pub fn compute_optimized(
-    cfg: &crate::config::Config,
+    policy: &crate::config::PolicyConfig,
     st: &crate::telemetry::State,
 ) -> (i32, String, crate::optimizer::Plan) {
-    let o = &cfg.policy.optimizer;
+    let o = &policy.optimizer;
     let now = crate::telemetry::now_unix() as i64;
     let prices: Vec<(i64, f64)> = st
         .prices
@@ -178,16 +181,16 @@ pub fn compute_optimized(
         load_w,
         soc: st.battery.soc_percent,
         capacity_wh,
-        reserve_percent: cfg.policy.reserve_percent,
+        reserve_percent: policy.reserve_percent,
         reserve_margin_percent: o.reserve_margin_percent,
         max_soc_percent: o.max_soc_percent,
-        charge_limit_w: if cfg.policy.charge_limit_w > 0 {
-            cfg.policy.charge_limit_w as f64
+        charge_limit_w: if policy.charge_limit_w > 0 {
+            policy.charge_limit_w as f64
         } else {
             3000.0
         },
-        discharge_limit_w: if cfg.policy.discharge_limit_w > 0 {
-            cfg.policy.discharge_limit_w as f64
+        discharge_limit_w: if policy.discharge_limit_w > 0 {
+            policy.discharge_limit_w as f64
         } else {
             3000.0
         },
@@ -199,7 +202,7 @@ pub fn compute_optimized(
     let plan = crate::optimizer::plan(&inputs);
     let mut w = plan.now_power_w;
     // Reserve clamp always wins.
-    if w < 0 && st.battery.soc_percent <= cfg.policy.reserve_percent {
+    if w < 0 && st.battery.soc_percent <= policy.reserve_percent {
         w = 0;
     }
     (w, plan.reason.clone(), plan)
@@ -207,8 +210,7 @@ pub fn compute_optimized(
 
 /// Compute the desired battery power setpoint in watts (+ = charge).
 /// Returns (setpoint, human-readable reason).
-pub fn compute_setpoint(cfg: &crate::config::Config, st: &crate::telemetry::State) -> (i32, String) {
-    let p = &cfg.policy;
+pub fn compute_setpoint(p: &crate::config::PolicyConfig, st: &crate::telemetry::State) -> (i32, String) {
     let soc = st.battery.soc_percent;
 
     // Resolve the effective action: override slot beats the static mode.
@@ -282,15 +284,15 @@ fn local_hour_min() -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::PolicyConfig;
     use crate::telemetry::State;
 
-    fn cfg_with(mode: &str) -> Config {
-        let mut c = Config::default();
-        c.policy.mode = mode.into();
-        c.policy.charge_limit_w = 2000;
-        c.policy.discharge_limit_w = 1500;
-        c.policy.reserve_percent = 20.0;
+    fn cfg_with(mode: &str) -> PolicyConfig {
+        let mut c = PolicyConfig::default();
+        c.mode = mode.into();
+        c.charge_limit_w = 2000;
+        c.discharge_limit_w = 1500;
+        c.reserve_percent = 20.0;
         c
     }
 
@@ -316,24 +318,24 @@ mod tests {
     #[test]
     fn override_slots() {
         let mut c = cfg_with("auto");
-        c.policy.override_slots = vec![0x80; 96];
+        c.override_slots = vec![0x80; 96];
         // force slot 0 by testing the slot logic via a full-day table:
-        c.policy.override_slots[0] = 60; // charge when soc < 60
+        c.override_slots[0] = 60; // charge when soc < 60
         // slot index depends on local time; test all slots instead:
-        c.policy.override_slots = vec![60; 96];
+        c.override_slots = vec![60; 96];
         assert_eq!(compute_setpoint(&c, &state_with_soc(50.0)).0, 2000);
         assert_eq!(compute_setpoint(&c, &state_with_soc(70.0)).0, 0);
-        c.policy.override_slots = vec![(256u16 - 30) as u8; 96]; // discharge when soc > 30
+        c.override_slots = vec![(256u16 - 30) as u8; 96]; // discharge when soc > 30
         assert_eq!(compute_setpoint(&c, &state_with_soc(50.0)).0, -1500);
         assert_eq!(compute_setpoint(&c, &state_with_soc(25.0)).0, 0);
-        c.policy.override_slots = vec![0x00; 96]; // idle
+        c.override_slots = vec![0x00; 96]; // idle
         assert_eq!(compute_setpoint(&c, &state_with_soc(50.0)).0, 0);
     }
 
     #[test]
     fn anti_reflux() {
         let mut c = cfg_with("discharge");
-        c.policy.grid_limit_w = 500;
+        c.grid_limit_w = 500;
         let mut s = state_with_soc(50.0);
         s.grid.export_w = 1200.0;
         // excess 700 reduces discharge 1500 -> 800
@@ -346,7 +348,7 @@ mod tests {
 #[cfg(test)]
 mod opt_tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::PolicyConfig;
     use crate::telemetry::{PriceSlot, State};
 
     fn st_with(soc: f64) -> State {
@@ -366,13 +368,13 @@ mod opt_tests {
         s
     }
 
-    fn cfg_opt() -> Config {
-        let mut c = Config::default();
-        c.policy.enabled = true;
-        c.policy.mode = "optimize".into();
-        c.policy.reserve_percent = 20.0;
-        c.policy.charge_limit_w = 3000;
-        c.policy.discharge_limit_w = 3000;
+    fn cfg_opt() -> PolicyConfig {
+        let mut c = PolicyConfig::default();
+        c.enabled = true;
+        c.mode = "optimize".into();
+        c.reserve_percent = 20.0;
+        c.charge_limit_w = 3000;
+        c.discharge_limit_w = 3000;
         c
     }
 

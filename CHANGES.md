@@ -6,6 +6,114 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# The optimizer runs in the bridge role too (2026-11-26)
+
+Cost-aware control no longer needs the Modbus side of the house. The bridge role
+now fills the shared `telemetry::State` from the module's E2E reports
+(`app/src/bridge/telem.rs`, 5 s merge of `mqtt_pub::state_from_bridge` - skipping
+the merge when the module has gone quiet, so `updated_at` ages and the watchdog
+sees the gap), starts the price and PV feeders against it, and runs the same
+`policy::Engine`.
+
+Actuation went through a seam instead of a register:
+
+- `control::Actuator` / `control::Applied` (`app/src/control.rs`): apply watts,
+  report what was confirmed. `RegisterActuator` is the driver's path - watts
+  divided by `control.power_scale` into `BAT_MAX_POWER`, through all the existing
+  gates (whitelist, range, rate limit, `writes_enabled`, pre-write snapshot).
+- `bridge::actuate::E2eActuator` is the bridge path: the plan becomes the
+  module's own 96-slot quarter-hour table, written with the same `0x1a` command
+  Home Assistant uses (`e2e::write_override`), and mirrored into the relay store
+  so `0x1b` readers see it at once. The table speaks SOC targets, not watts
+  (`1..=100` charge up to, `0x81..=0xFF` discharge down to `256-value`, `0x00`
+  forced idle, `0x80` no override), so the trajectory is walked from live SOC and
+  capacity; slots the plan does not cover keep the module's behaviour, except in
+  the static modes, where the setpoint covers the day (`charge` writes the
+  high-marker target, `discharge` the reserve, `idle` forces idle).
+- `policy::PolicySource` answers the loop's two config sections, so the driver
+  reads them from its TOML and the bridge from `policy` / `control` inside
+  `config.json` - both off-by-default and dry-run until `control.writes_enabled`.
+- `/api/status` gained the `optimizer` block (policy, actuator, prices, solar) so
+  the plan and where it landed sit next to the module's numbers.
+
+Bench evidence (`emaldo/emubench`, app v2.35.3 against the bridge, static
+`charge` mode): actuator `write_count 1`, log `override written (96 slots, high
+72 low 20)`, and the schedule the module reports back reads `charge-high (72%)`
+across the day; 949 state publishes and 11 Home Assistant discovery configs
+arrived at the broker.
+
+Three operational fixes came out of running it:
+
+- **The resolver pin is now kernel-enforced.** The vendor network stack keeps a
+  dhclient alive (`netctl-supervisor` logs `re-own missing dhclient on eth0`
+  every ~18 s) and dhclient rewrites `/etc/resolv.conf`, so re-pinning from
+  userspace every 2 s was a race with 430 log lines behind it. `use_local_resolver`
+  now writes the block and sets `chattr +i` (`resolv_immutable`, default on);
+  if the file is locked with the wrong content inside it is unlocked, rewritten
+  and locked again; `mode vendor` clears the attribute before restoring. The
+  per-pin line moved to Debug and the rate-limited rewrite note counts the
+  rewrites.
+- **`config.json` edits made while the bridge runs are no longer lost in
+  silence.** The bridge writes its in-memory config back on every save, which
+  quietly reverted a hand edit on the bench (the topic prefix went back to the
+  default). The store now compares the file's stamp before saving and the poller
+  logs the mismatch once per 10 minutes; restart to pick a hand edit up.
+- **Restart races stop the process no more.** API, UI and relay binds retry for
+  ~6 s (`bind_retry`): systemd starts the replacement while our own shutdown is
+  still draining the relay, which previously read as `cannot bind ... Address
+  already in use` and a crash loop.
+
+`emaldo-local version` and the startup banner now report one version
+(`CARGO_PKG_VERSION`, 0.2.0) instead of the bridge's stale 0.1.0 next to the
+driver's hardcoded `0.2.0-phase2`.
+
+### Same day, on the live unit
+
+The bridge went from bench to the battery with the same binary, and the
+operator surface grew to make that workable over SSH:
+
+- `config` accepts dotted keys (`policy.enabled=true`, `prices.area=SE4`,
+  `solar.latitude=55.72486`) and types decimals as floats - the first attempt
+  on the battery was rejected with `invalid type: string "55.72486", expected
+  f64`, and a rejected batch writes nothing. Keys are validated against the
+  typed config, so a typo lists the options that exist one level up.
+- Global options before the command word no longer drop the command into the
+  driver role: `emaldo-local --config X config` used to fail with
+  `unknown argument "config"`, which is exactly how `install.sh` calls it.
+- `install.sh` keeps the three binaries it replaces in
+  `backups/emaldo-local-<stamp>`; a rollback is one `cp` plus a restart.
+- The optimizer now leaves the UI: `<prefix>/policy/{mode,setpoint_w,reason,status}`
+  and `<prefix>/control/{writes_enabled,write_count,last_result}` are published,
+  and one Home Assistant discovery sensor (`optimizer`) carries the plan as
+  attributes. On the battery that reads
+  `WOULD-WRITE override (96 slots): optimize: soc=22% floor=28% cap=100%, 116
+  slots, charge 11.54 kWh, discharge -0.00 kWh, bar 0.326 EUR/kWh` with
+  `write_count 0` - the plan exists, nothing was sent, and it is visible without
+  the operator password.
+- Re-pinning `/etc/resolv.conf` no longer stacks copies: the vendor's `networks`
+  binary copies the file through `/etc/resolv.conf.wlan0` and back, so our block
+  and our upstream note came home inside the DHCP version and accumulated. The
+  rewrite now strips every managed block and note and keeps one `nameserver`
+  line per address. The lock is kernel-enforced and survives: `lsattr` reads
+  `----i--------` on the battery.
+- What the module reports about itself is kept: `state/metrics-last.json` (0600)
+  holds the decrypted `submit-v2` / `submit-high-freq-data` body (`data[]` with
+  `ac`, `b`, `bct`, `bh`, `bid`, `brt`, `cl`, `fm`, `is`, `m`, `mm`, `p`, `pm`,
+  `sp`, `t`, `v`, plus `id`, `model`). The three pack barcodes in it are the same
+  three the `0x06` reads return, so the report is a second source for the same
+  packs; the values are not yet mapped into the telemetry model.
+- A rejected E2E reply now says what came back instead of "module did not answer
+  in time" (bytes decrypted and the first 24 in hex, at Debug).
+
+Tests: 129 unit tests, 11 new - plan-to-table encoding (SOC trajectory, reserve
+clamp, no-override beyond the horizon, self-use), static-mode day coverage,
+marker derivation and direction confirmation, `mktime`-based day start,
+`RegisterActuator` scaling and clamping with the write gate closed, the bridge
+config's new sections defaulting safe and round-tripping, and the config
+clobber flag.
+
+---
+
 # Bridge role publishes telemetry; three E2E/MQTT fixes (2026-11-26)
 
 The bridge role now feeds the shared `telemetry::State` and publishes it, so a

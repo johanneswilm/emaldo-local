@@ -253,6 +253,23 @@ impl Handler for Ui {
                     obj.insert("mode_status".into(), crate::bridge::mode::status(&self.bridge));
                     obj.insert("events".into(), json!(self.bridge.events(40)));
                     obj.insert("operator".into(), json!(session.user));
+                    // The policy engine runs against the shared telemetry model
+                    // here too, so the plan it computed and where the setpoint
+                    // landed belong on the same status page as the numbers the
+                    // module reported.
+                    let st = self.bridge.telem.current();
+                    obj.insert(
+                        "optimizer".into(),
+                        json!({
+                            "policy": st.policy,
+                            "actuator": st.control,
+                            "prices": st.prices,
+                            "solar": st.solar,
+                            "soc_percent": st.battery.soc_percent,
+                            "capacity_wh": st.battery.capacity_wh,
+                            "updated_at": st.updated_at,
+                        }),
+                    );
                 }
                 Resp::json(serde_json::to_vec(&snap).unwrap())
             }

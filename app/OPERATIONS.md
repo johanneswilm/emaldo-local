@@ -132,15 +132,26 @@ re-assertion (`/etc/resolv.conf was rewritten: ...`).
 
 ## Troubleshooting
 
-- Logs: `logs/bridge.log` (structured JSON, rotating) and `logs/access.log`
+- Config edits from the shell: `emaldo-local config key=value`, and dotted keys
+  reach the nested sections (`policy.enabled=true`, `control.writes_enabled=true`,
+  `prices.area=SE4`, `solar.latitude=55.72486`). The type follows the value the
+  key already holds: booleans, integers, decimals, comma-separated lists. Edit
+  while the **service is stopped**: the running bridge writes its own in-memory
+  copy back on the next save, and says so once in the log when it notices the
+  mismatch.
+- Logs: `logs/bridge.log` (structured JSON, rotating; `config log_level=debug`
+  and restart for the diagnostic lines - rejected E2E replies, metrics uploads,
+  DNS re-pins) and `logs/access.log`
   (one line per `/bmt` call: method, path, gm, peer, request key names - never
   encrypted material). `journalctl -u emaldo-local` for start/stop.
 - Is the module talking to us? `grep peer=<battery-ip> logs/access.log` for
   `/bmt/login` and `ss -unp | grep -E ':1050|:1051'` for the E2E session; the
   poller logs `module E2E session is live` when telemetry starts.
-- Relay internals: `echo '{"op":"state"}' | nc 127.0.0.1 1052` (also `rx`,
-  `override`, `telemetry` — the last decoded device reports with their age — and
-  `send` with `{"b64":...}`).
+- Relay internals: the battery has no `nc`, so forward the control socket to your
+  own machine — `ssh -L 11052:127.0.0.1:1052 emaldo-battery`, then
+  `printf '{"op":"state"}\n' | nc 127.0.0.1 11052` (also `rx`, `override`,
+  `telemetry` — the last decoded device reports with their age — and `send`
+  with `{"b64":...}`).
 - MQTT/HA shows stale or unavailable entities: `{"op":"telemetry"}` shows how
   old the module's last report is (`age_s`), and `logs/bridge.log` lines tagged
   `mqtt`/`poll` show the publisher and the E2E reads. `sensor.power_core_live_*`
@@ -167,8 +178,18 @@ re-assertion (`/etc/resolv.conf was rewritten: ...`).
 - Restarting the bridge signs every UI session out (sessions are in memory) and
   drops the E2E session for a few seconds; the module re-establishes it from its
   own frames, the poller logs `module E2E session is live` again.
-- Resource budget on the unit: RSS ~2.6 MB, negligible CPU, 2.4 MB binary.
-  `df -h /` had ~908 MB free after install.
+- Resource budget on the unit: RSS ~3.8 MB (`grep VmRSS /proc/$(pidof emaldo-local)/status`),
+  negligible CPU, 4.0 MB binary. `df -h /` had ~908 MB free after install.
+- Updating: `app/deploy/deploy.sh emaldo-battery --install` keeps the three
+  previous binaries in `state/../backups/emaldo-local-<stamp>`; roll back with
+  `cp /root/emaldo-local/backups/emaldo-local-<stamp> /root/emaldo-local/emaldo-local`
+  and `systemctl restart emaldo-local.service`.
+- What the module says about itself: `state/metrics-last.json` (0600) holds the
+  last `submit-v2` / `submit-high-freq-data` upload, decrypted
+  (`data[]` records with `ac`, `b`, `bct`, `bh`, `bid`, `brt`, `cl`, `fm`, `is`,
+  `m`, `mm`, `p`, `pm`, `sp`, `t`, `v`, plus `id` and `model`). It is kept for
+  diagnosis: the pack identity and cell groups there agree with the `0x06`
+  battery reads, but the report is not yet folded into the telemetry model.
 
 ## Home Assistant (the remaining step)
 

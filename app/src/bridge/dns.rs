@@ -275,7 +275,8 @@ pub fn use_local_resolver(bridge: &Bridge, ip: &str) -> Value {
         .into_iter()
         .next()
         .unwrap_or_default();
-    if !current.contains(RESOLV_BEGIN) {
+    let already = current.contains(RESOLV_BEGIN);
+    if !already {
         let _ = write_atomic(
             &bridge.state_dir.join("resolv.conf.bak"),
             current.as_bytes(),
@@ -288,11 +289,32 @@ pub fn use_local_resolver(bridge: &Bridge, ip: &str) -> Value {
     out.push_str(&format!(
         "{RESOLV_BEGIN}\nnameserver 127.0.0.1\n{RESOLV_END}\n"
     ));
-    out.push_str(&strip_block(&current));
+    out.push_str(&dedupe_nameservers(&strip_block(&current)));
     out.push_str(&format!("# upstream kept by emaldo-local: {upstream}\n"));
-    match write_atomic(std::path::Path::new(&cfg.resolv_file), out.as_bytes()) {
-        Ok(_) => steps.push(json!({"file": cfg.resolv_file, "nameserver": "127.0.0.1", "upstream": upstream})),
-        Err(e) => steps.push(json!({"file": cfg.resolv_file, "error": e.to_string()})),
+    let target = std::path::Path::new(&cfg.resolv_file);
+    // An immutable file cannot be replaced by rename either, so when it already
+    // carries our block there is nothing to write - only to report.
+    if already && immutable(target) {
+        steps.push(json!({"file": cfg.resolv_file, "nameserver": "127.0.0.1", "immutable": true}));
+    } else {
+        // Locked with the wrong content inside - the vendor DHCP client rewrote
+        // the file in the moment before the lock, or the lock came from an
+        // older run: clear it, write our block, lock it again.
+        if immutable(target) {
+            let _ = set_immutable(target, false);
+        }
+        match write_atomic(target, out.as_bytes()) {
+            Ok(_) => {
+                steps.push(json!({"file": cfg.resolv_file, "nameserver": "127.0.0.1", "upstream": upstream}));
+                if cfg.resolv_immutable {
+                    match set_immutable(target, true) {
+                        Ok(()) => steps.push(json!({"file": cfg.resolv_file, "locked": true})),
+                        Err(e) => steps.push(json!({"file": cfg.resolv_file, "lock": e})),
+                    }
+                }
+            }
+            Err(e) => steps.push(json!({"file": cfg.resolv_file, "error": e.to_string()})),
+        }
     }
 
     if !cfg.dhclient_conf.is_empty() {
@@ -312,8 +334,11 @@ pub fn use_local_resolver(bridge: &Bridge, ip: &str) -> Value {
     // The running lease already handed out the upstream resolver: point the
     // current file at ourselves without waiting for the next renewal.
     let _ = ip;
+    // Debug, not Warn: the vendor app's netmonitor rewrites /etc/resolv.conf
+    // from the DHCP answer every few seconds, and every re-pin lands here. The
+    // rate-limited line in `poller.rs` is the operator-visible signal.
     bridge.note(
-        Level::Warn,
+        Level::Debug,
         "dns",
         format!("resolver pinned to 127.0.0.1 (upstream {upstream})"),
     );
@@ -339,6 +364,8 @@ pub fn restore_resolver(bridge: &Bridge) -> Value {
     } else {
         stripped
     };
+    // Undo the local-mode lock before handing the file back to dhclient.
+    let _ = set_immutable(std::path::Path::new(&cfg.resolv_file), false);
     match write_atomic(std::path::Path::new(&cfg.resolv_file), content.as_bytes()) {
         Ok(_) => steps.push(json!({"file": cfg.resolv_file, "restored": true})),
         Err(e) => steps.push(json!({"file": cfg.resolv_file, "error": e.to_string()})),
@@ -360,11 +387,49 @@ pub fn resolver_status(bridge: &Bridge) -> Value {
     let current = std::fs::read_to_string(&cfg.resolv_file).unwrap_or_default();
     json!({
         "pinned": current.contains(RESOLV_BEGIN),
+        "immutable": immutable(std::path::Path::new(&cfg.resolv_file)),
         "nameservers": resolv_nameservers(&current),
         "upstream": cfg.dns_upstream,
         "listen": format!("{}:{}", cfg.dns_bind, cfg.dns_port),
         "names": cfg.dns_hosts,
     })
+}
+
+/// Is the file locked in the kernel? Read from `lsattr` rather than by trying
+/// to write it: a probe write would disturb the file we are protecting.
+fn immutable(path: &std::path::Path) -> bool {
+    let out = std::process::Command::new("lsattr")
+        .arg("-d")
+        .arg(path)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    // "----i---------e------- /etc/resolv.conf": attributes come first.
+    out.split_whitespace()
+        .next()
+        .map(|flags| flags.contains('i'))
+        .unwrap_or(false)
+}
+
+/// Set or clear the immutable attribute. Absent `chattr`/`lsattr`, or a
+/// filesystem without the flag, is reported and not fatal: the userspace pin
+/// loop still runs.
+fn set_immutable(path: &std::path::Path, on: bool) -> Result<(), String> {
+    let out = std::process::Command::new("chattr")
+        .arg(if on { "+i" } else { "-i" })
+        .arg(path)
+        .output()
+        .map_err(|e| format!("chattr: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "chattr: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 fn resolv_nameservers(text: &str) -> Vec<String> {
@@ -386,6 +451,12 @@ fn strip_block(text: &str) -> String {
             inside = false;
             continue;
         }
+        // The vendor's `networks` copies /etc/resolv.conf into its per-interface
+        // file and back, so a note we wrote once comes home inside the DHCP
+        // version; leaving it in place would grow the file on every rewrite.
+        if line.trim().starts_with("# upstream kept by emaldo-local") {
+            continue;
+        }
         if !inside {
             out.push_str(line);
             out.push('\n');
@@ -394,8 +465,54 @@ fn strip_block(text: &str) -> String {
     out
 }
 
+/// One `nameserver` line per address, first occurrence wins. The vendor copies
+/// the file through its per-interface state, which duplicates entries; glibc
+/// only consults three of them anyway, and a stale duplicate in front of the
+/// local resolver would outrank it.
+fn dedupe_nameservers(text: &str) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = String::new();
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("nameserver") {
+            let addr = rest.trim().to_string();
+            if addr.is_empty() || seen.contains(&addr) {
+                continue;
+            }
+            seen.push(addr);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The vendor `networks` binary copies `/etc/resolv.conf` into
+    /// `/etc/resolv.conf.wlan0` and back, so our block and our upstream note
+    /// come home inside the DHCP version. Re-pinning must not stack copies.
+    #[test]
+    fn repinning_a_file_the_vendor_round_tripped_stays_flat() {
+        let home = "# >>> emaldo-local (managed) >>>\nnameserver 127.0.0.1\n# <<< emaldo-local (managed) <<<\nnameserver 192.168.50.1\n# upstream kept by emaldo-local: 192.168.50.1\n";
+        let round_tripped = format!("{home}nameserver 192.168.50.1\n{home}");
+        let rebuilt = format!(
+            "{RESOLV_BEGIN}\nnameserver 127.0.0.1\n{RESOLV_END}\n{}# upstream kept by emaldo-local: 192.168.50.1\n",
+            dedupe_nameservers(&strip_block(&round_tripped))
+        );
+        assert_eq!(
+            rebuilt.matches(RESOLV_BEGIN).count(),
+            1,
+            "one managed block, whatever the vendor did: {rebuilt}"
+        );
+        assert_eq!(resolv_nameservers(&rebuilt), vec!["127.0.0.1", "192.168.50.1"]);
+        assert_eq!(
+            rebuilt.matches("# upstream kept by emaldo-local").count(),
+            1,
+            "the note does not accumulate"
+        );
+    }
+
     use super::*;
 
     fn query(name: &str, qtype: u16) -> Vec<u8> {
