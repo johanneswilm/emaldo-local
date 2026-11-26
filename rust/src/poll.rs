@@ -331,6 +331,7 @@ impl Poller {
                 s.grid.import_w = p.grid_w.max(0) as f64;
                 s.grid.export_w = (-p.grid_w).max(0) as f64;
                 s.load.net_w = p.load_w as f64;
+                s.load.derived = false; // direct inverter reading
                 s.mcu
                     .extra
                     .insert("ev_power_w".into(), p.ev_w.to_string());
@@ -638,6 +639,7 @@ fn apply_block(s: &mut crate::telemetry::State, m: &ParsedBlock) {
     s.pv.power_w = m.pv_w;
     s.battery.power_w = m.battery_w;
     s.load.net_w = m.load_w;
+    s.load.derived = false; // direct inverter reading
     if s.inverters.is_empty() {
         s.inverters.push(InverterState {
             index: 0,

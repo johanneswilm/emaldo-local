@@ -18,6 +18,11 @@ pub struct PowerReading {
     pub export_w: f64,
     /// + = importing
     pub net_w: f64,
+    /// True when `net_w` was computed by `derive_load` (energy balance), not
+    /// read directly. Derived values are recomputed on every update; direct
+    /// readings are kept.
+    #[serde(default)]
+    pub derived: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -214,13 +219,14 @@ pub struct Event {
 /// (+charge ⇒ subtract, discharging ⇒ add). Call after battery or grid
 /// updates so both are current.
 pub fn derive_load(st: &mut State) {
-    if st.load.net_w != 0.0 {
-        return; // direct reading wins
+    // Recompute whenever load is not a direct inverter reading. A real
+    // reading (derived=false and non-zero) is kept.
+    if !st.load.derived && st.load.net_w != 0.0 {
+        return;
     }
     let inv = st.pv.power_w + st.grid.net_w - st.battery.power_w;
-    if inv.abs() > 1.0 {
-        st.load.net_w = inv;
-    }
+    st.load.net_w = inv;
+    st.load.derived = true;
 }
 
 pub fn now_unix() -> u64 {
@@ -292,5 +298,45 @@ impl Store {
 
     pub fn events(&self) -> Vec<Event> {
         self.inner.lock().unwrap().events.clone()
+    }
+}
+
+
+#[cfg(test)]
+mod derive_load_tests {
+    use super::*;
+
+    #[test]
+    fn load_accounts_for_battery_disregarding_order() {
+        let mut st = State::default();
+        // Meter/grid updates first, battery not yet known (0).
+        st.grid.net_w = 579.0;
+        derive_load(&mut st);
+        assert_eq!(st.load.net_w, 579.0); // grid only, so far
+        // Battery arrives later (discharging -163.65 W). Derived load must
+        // RECOMPUTE (this was the bug: it stayed 579).
+        st.battery.power_w = -163.65;
+        derive_load(&mut st);
+        assert!((st.load.net_w - (579.0 + 163.65)).abs() < 0.01, "load {}", st.load.net_w);
+    }
+
+    #[test]
+    fn direct_reading_is_kept() {
+        let mut st = State::default();
+        st.load.net_w = 500.0;
+        st.load.derived = false; // direct inverter reading
+        st.grid.net_w = 1000.0;
+        st.battery.power_w = -200.0;
+        derive_load(&mut st);
+        assert_eq!(st.load.net_w, 500.0); // not overwritten
+    }
+
+    #[test]
+    fn charging_battery_is_subtracted() {
+        let mut st = State::default();
+        st.grid.net_w = 1000.0;
+        st.battery.power_w = 400.0; // charging from grid
+        derive_load(&mut st);
+        assert!((st.load.net_w - 600.0).abs() < 0.01, "{}", st.load.net_w);
     }
 }

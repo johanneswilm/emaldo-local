@@ -224,11 +224,12 @@
         <div><div class="mut">Setpoint</div><div class="big" id="c_setpoint">–</div></div>
         <div><div class="mut">Writes</div><div class="big" id="c_wcount">–</div></div>
       </div>
+      <p class="mut" id="c_modehelp"></p>
       <p class="mut" id="c_reason"></p>
       <p class="mut" id="c_last"></p>
-      <div class="planner-wrap">
+      <div class="planner-wrap" id="planner_wrap">
         <div class="planner-head">
-          <span>48-hour plan</span>
+          <span>48-hour cost-optimised plan</span>
           <span class="planner-legend">
             <i style="background:var(--solar)"></i>PV
             <i style="background:var(--grid)"></i>Price
@@ -242,7 +243,7 @@
         <div>
           <label>Mode</label>
           <select id="p_mode" style="width:100%;padding:8px;border-radius:6px;background:#0d1117;color:var(--fg);border:1px solid #30363d">
-            <option value="auto">Auto</option><option value="optimize">Planner</option><option value="idle">Idle</option><option value="charge">Charge</option><option value="discharge">Discharge</option>
+            <option value="auto">Limits &amp; schedule</option><option value="optimize">Cost Optimizer</option><option value="idle">Idle</option><option value="charge">Charge</option><option value="discharge">Discharge</option>
           </select>
         </div>
         <div><label>Charge limit (W)</label><input id="p_charge" type="number" value="0"></div>
@@ -250,10 +251,13 @@
         <div><label>Reserve (%)</label><input id="p_reserve" type="number" value="20"></div>
       </div>
       <button class="ghost" onclick="applyPolicy()">Apply policy</button>
-      <button class="ghost" onclick="doRollback()">Rollback registers</button>
-      <p class="mut">Commands are gated by the controller (writable table, range, rate limits).
-      With writes disabled (default) they are journaled as dry-run only. Rollback restores the
-      pre-write register snapshot.</p>
+      <button class="ghost" onclick="doRollback()">Undo my last change</button>
+      <p class="mut"><b>Apply policy</b> sends the selected mode and limits to the battery.
+      Every change is safety-checked and rate-limited; if writes are disabled (the default)
+      it only records what <i>would</i> happen and changes nothing.
+      <br><b>Undo my last change</b> puts back the inverter settings (charge/discharge limits)
+      that were in place just before the driver first changed them, i.e. it reverts the
+      driver's own writes so the vendor app/your previous limits take over again.</p>
     </section>
 
     <section class="card">
@@ -314,9 +318,9 @@
       <div class="row">
         <div><label>Hardware profile</label><select id="cfg_profile"><option value="powercore2">Power Core 2.0</option></select></div>
         <div><label>Reserve (%)</label><input id="cfg_reserve" type="number" value="20"></div>
-        <div><label>Planner: min spread (EUR/kWh)</label><input id="cfg_opt_spread" type="number" step="0.005" value="0.03"></div>
-        <div><label>Planner: round-trip eff</label><input id="cfg_opt_eta" type="number" step="0.01" value="0.9"></div>
-        <div><label>Planner: max SOC (%)</label><input id="cfg_opt_max" type="number" value="100"></div>
+        <div><label>Cost Optimizer: min price spread (EUR/kWh)</label><input id="cfg_opt_spread" type="number" step="0.005" value="0.03"></div>
+        <div><label>Cost Optimizer: round-trip efficiency</label><input id="cfg_opt_eta" type="number" step="0.01" value="0.9"></div>
+        <div><label>Cost Optimizer: max charge to SOC (%)</label><input id="cfg_opt_max" type="number" value="100"></div>
         <div><label>CAN listen (BMS)</label><select id="cfg_can"><option value="true">on</option><option value="false">off</option></select></div>
         <div><label>CAN active poll (takeover)</label><select id="cfg_can_poll"><option value="false">off</option><option value="true">on</option></select></div>
         <div><label>Grid meter</label><select id="cfg_meter"><option value="true">on</option><option value="false">off</option></select></div>
@@ -468,7 +472,7 @@ function renderHistory() {
   if (!svg) return;
   const d = HIST;
   if (!d.length) { svg.innerHTML=''; if (note) note.textContent='No history yet — samples are recorded every 5 minutes.'; return; }
-  const H=chartHeight(svg,200),padL=8,padB=18,padT=10;
+  const H=chartHeight(svg,200),padL=34,padB=18,padT=10;
   const W = chartWidth(svg, 720);
   setViewBox(svg, W, H);
   const n=d.length, x=i=>padL+(i/Math.max(1,n-1))*(W-2*padL);
@@ -488,6 +492,14 @@ function renderHistory() {
   // hour ticks every 6h
   let lastHour=-1;
   d.forEach((s,i)=>{ const dt=new Date(s.t*1000); const hh=dt.getHours(); if(hh%6===0 && hh!==lastHour){ lastHour=hh; g+='<line x1="'+x(i)+'" y1="'+padT+'" x2="'+x(i)+'" y2="'+zero+'" stroke="#ffffff12"/>'; g+='<text x="'+x(i)+'" y="'+(H-4)+'" fill="var(--mut)" font-size="10" text-anchor="middle">'+String(hh).padStart(2,'0')+':00</text>'; } if(hh!==lastHour && hh%6!==0) {/*track*/} });
+  // Y-axes: power (kW) on the left, SOC (%) on the right.
+  const pktop = Math.ceil(pwmax/1000);
+  const Yaxis = (v,txt,col) => '<text x="6" y="'+yPow(v*1000).toFixed(1)+'" fill="'+col+'" font-size="9">'+(v.toFixed(1))+'</text>';
+  g += Yaxis(pktop,'','var(--load)') + Yaxis(pktop/2,'','var(--load)') + Yaxis(0,'','var(--load)');
+  g += '<text x="6" y="'+(padT-1)+'" fill="var(--mut)" font-size="8">kW</text>';
+  g += '<text x="'+(W-4)+'" y="'+ySoc(100).toFixed(1)+'" fill="var(--battery)" font-size="9" text-anchor="end">100%</text>';
+  g += '<text x="'+(W-4)+'" y="'+ySoc(50).toFixed(1)+'" fill="var(--battery)" font-size="9" text-anchor="end">50%</text>';
+  g += '<text x="'+(W-4)+'" y="'+ySoc(0).toFixed(1)+'" fill="var(--battery)" font-size="9" text-anchor="end">0%</text>';
   svg.innerHTML=g;
   const last=d[d.length-1];
   if(note) note.textContent='SOC '+(last.soc||0).toFixed(0)+'% · '+(d.length*5/60).toFixed(1)+' h of data · grid now '+fmtkW(last.grid)+', PV '+fmtkW(last.pv)+', load '+fmtkW(last.load);
@@ -498,8 +510,8 @@ function renderPlanner(st) {
   if (!svg) return;
   const note = document.getElementById('planner_note');
   const plan = (st.policy && st.policy.plan && st.policy.plan.slots) || [];
-  if (!plan.length) { svg.innerHTML = ''; if (note) note.textContent = 'No plan yet (Planner builds one when prices and PV are available).'; return; }
-  const H = chartHeight(svg, 220), padL = 8, padB = 22, padT = 10;
+  if (!plan.length) { svg.innerHTML = ''; if (note) note.textContent = 'No plan yet — the Cost Optimizer builds one when prices and PV forecast are available (set Policy mode to “Cost Optimizer”).'; return; }
+  const H = chartHeight(svg, 220), padL = 34, padB = 22, padT = 12;
   const W = chartWidth(svg, 720);
   setViewBox(svg, W, H);
   const n = plan.length;
@@ -541,9 +553,14 @@ function renderPlanner(st) {
     }
     if (h !== lastH) lastH = h;
   });
-  // price min/max labels
-  g += '<text x="'+(W-6)+'" y="'+(padT+10)+'" fill="var(--grid)" font-size="10" text-anchor="end">'+pmax.toFixed(2)+'</text>';
-  g += '<text x="'+(W-6)+'" y="'+(H-padB-2)+'" fill="var(--grid)" font-size="10" text-anchor="end">'+pmin.toFixed(2)+'</text>';
+  // Y-axis: price (EUR/kWh) ticks on the left, PV peak on the right.
+  const pmid = (pmin+pmax)/2;
+  const axis = (v) => '<text x="6" y="'+(yP(v)+3).toFixed(1)+'" fill="var(--grid)" font-size="9">'+v.toFixed(2)+'</text>';
+  g += axis(pmax) + axis(pmid) + axis(pmin);
+  g += '<text x="6" y="'+(H-2)+'" fill="var(--mut)" font-size="8">EUR/kWh</text>';
+  g += '<line x1="'+padL+'" y1="'+(padT-2)+'" x2="'+(W-padL)+'" y2="'+(padT-2)+'" stroke="#ffffff10"/>';
+  // PV scale note (right)
+  g += '<text x="'+(W-4)+'" y="'+(yPv(pvmax)+9).toFixed(1)+'" fill="var(--solar)" font-size="9" text-anchor="end">PV '+(pvmax/1000).toFixed(1)+' kW</text>';
   svg.innerHTML = g;
   const pvKwh = (st.solar && st.solar.today_kwh) || 0;
   if (note) note.textContent = 'Price ' + pmin.toFixed(2)+'–'+pmax.toFixed(2)+' EUR/kWh · PV peak '+(pvmax/1000).toFixed(1)+' kW · bars: green = charge, orange = discharge (W)';
@@ -654,13 +671,24 @@ function renderState(st) {
 
   // policy & control
   const pol = st.policy || {}, ctl = st.control || {};
-  $('c_mode').textContent = pol.mode || 'auto';
+  const MODE_NAME = {auto:'Limits & schedule', optimize:'Cost Optimizer', idle:'Idle', charge:'Charge', discharge:'Discharge'};
+  $('c_mode').textContent = MODE_NAME[pol.mode] || pol.mode || 'Limits & schedule';
   $('c_setpoint').textContent = fmtW(pol.setpoint_w);
   $('c_reason').textContent = pol.reason || '';
   $('c_writes').textContent = ctl.writes_enabled ? 'WRITES ENABLED' : 'dry-run';
   $('c_writes').style.background = ctl.writes_enabled ? '#7a2e2e' : '#30363d';
   $('c_wcount').textContent = ctl.write_count ?? 0;
   $('c_last').textContent = ctl.last_result ? ('last: ' + ctl.last_result) : '';
+  const MODE_HELP = {
+    'auto': 'Limits & schedule — applies your charge/discharge limits and reserve, and any 96-slot override schedule. No price or forecast logic.',
+    'optimize': 'Cost Optimizer — plans this hour-by-hour using the day-ahead prices and PV forecast: charges when energy is cheap / PV is abundant, discharges when it is expensive, within your reserve and limits.',
+    'idle': 'Idle — battery held at 0 W (no charge, no discharge).',
+    'charge': 'Charge — charge at the charge limit (up to the max SOC), regardless of price.',
+    'discharge': 'Discharge — discharge at the discharge limit (down to the reserve), regardless of price.',
+  };
+  $('c_modehelp').textContent = MODE_HELP[pol.mode] || '';
+  const _pw = document.getElementById('planner_wrap');
+  if (_pw) _pw.classList.toggle('hidden', pol.mode !== 'optimize');
   renderPlanner(st);
   if (document.activeElement !== $('p_mode')) $('p_mode').value = pol.mode || 'auto';
 }
@@ -834,7 +862,7 @@ function applyPolicy() {
 }
 
 function doRollback() {
-  if (confirm('Restore the pre-write register snapshot?')) cmd('rollback');
+  if (confirm('This restores the inverter settings (charge/discharge limits) that were in place just before the driver first wrote to the battery, undoing any changes it made. Continue?')) cmd('rollback');
 }
 
 // PWA: register the service worker (installable, offline shell).
