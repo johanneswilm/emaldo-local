@@ -281,16 +281,23 @@ fn main() {
         );
         // One-register FC03 is refused (a 7-byte request is framed as 8 by
         // the inverter); the probe reads its block and takes the register.
+        // One-register FC03 is refused (a 7-byte request is framed as 8 by
+        // the inverter), so the probe reads an 8-register-aligned block and
+        // picks the register out of it. Register addresses step by 1, byte
+        // offsets by 2.
         let rb = |p: &mut serial::SerialPort| -> String {
-            // 4 registers from the 8-aligned base containing `reg`.
-            let base = reg & !0x07;
-            let count = ((reg - base) / 2 + 1).max(2);
+            let base = reg & !0x0007u16;              // 8-register aligned
+            let count = (reg - base) + 1;             // include `reg`
             match modbus::read_registers(p, modbus::FC_READ_HOLDING, slave, base, count, to) {
-                Ok(d) if d.len() >= 2 + 2 * ((reg - base) / 2) as usize => {
-                    let o = (((reg - base) / 2) * 2) as usize;
-                    format!("{}", u16::from_be_bytes([d[o], d[o + 1]]) as i16)
+                Ok(d) => {
+                    let idx = (reg - base) as usize;  // register index in block
+                    let o = idx * 2;
+                    if d.len() >= o + 2 {
+                        format!("{}", u16::from_be_bytes([d[o], d[o + 1]]) as i16)
+                    } else {
+                        format!("short:{d:02x?}")
+                    }
                 }
-                Ok(d) => format!("short:{d:02x?}"),
                 Err(e) => format!("err:{e}"),
             }
         };
@@ -329,8 +336,14 @@ fn main() {
         println!("{{\"step\":\"read_after\",\"value\":\"{}\"}}", rb(&mut p));
         std::thread::sleep(std::time::Duration::from_secs(hold));
         println!("{{\"step\":\"read_held\",\"value\":\"{}\"}}", rb(&mut p));
-        // Restore 0 (first), then read.
-        let _ = modbus::write_single_register(&mut p, slave, reg, 0, to);
+        // Restore 0 via FC16 (FC06 on 0x0FD8..0x0FDD is rejected), then read.
+        let base = 0x0FD8u16;
+        let mut blk: Vec<u16> = match modbus::read_registers(&mut p, modbus::FC_READ_HOLDING, slave, base, 6, to) {
+            Ok(d) if d.len() >= 12 => d.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect(),
+            _ => vec![0, 3600, 560, 3600, 0, 0],
+        };
+        blk[(reg - base) as usize] = 0;
+        let _ = modbus::write_multiple_registers(&mut p, slave, base, &blk, to);
         std::thread::sleep(std::time::Duration::from_millis(250));
         println!("{{\"step\":\"restore_zero\",\"read\":\"{}\"}}", rb(&mut p));
         return;
