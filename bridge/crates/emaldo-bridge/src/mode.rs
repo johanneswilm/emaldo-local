@@ -31,6 +31,10 @@ use crate::state::Bridge;
 const HOSTS_BEGIN: &str = "# >>> emaldo-local (managed) >>>";
 const HOSTS_END: &str = "# <<< emaldo-local (managed) <<<";
 
+/// Delimiters of the block this module owns inside the vendor app's config.
+const APPCFG_BEGIN: &str = "# >>> emaldo-local (managed) >>>";
+const APPCFG_END: &str = "# <<< emaldo-local (managed) <<<";
+
 #[derive(Debug)]
 pub struct CmdError(pub String);
 
@@ -119,6 +123,7 @@ pub fn status(bridge: &Bridge) -> Value {
         "lte": lte_status(bridge),
         "egress": egress_status(bridge),
         "resolver": crate::dns::resolver_status(bridge),
+        "app_config": app_config_status(bridge),
         "app_last_seen": bridge.app_seen.load(std::sync::atomic::Ordering::Relaxed),
     }
     )
@@ -378,6 +383,180 @@ fn backup_hosts(bridge: &Bridge) -> Result<(), CmdError> {
     write_atomic(&dst, &src).map_err(|e| CmdError(format!("hosts backup: {e}")))
 }
 
+/// Drop the block this module owns, leaving every other line alone.
+fn without_block(text: &str, begin: &str, end: &str) -> String {
+    match (text.find(begin), text.find(end)) {
+        (Some(b), Some(e)) if e >= b => {
+            let mut out = text[..b].trim_end().to_string();
+            out.push_str(&text[e + end.len()..]);
+            out
+        }
+        _ => text.to_string(),
+    }
+}
+
+/// Remove unmanaged `base_url` / `data_url` assignments: TOML rejects duplicate
+/// keys, so the app would ignore the whole file (and dial the vendor again).
+fn without_app_urls(text: &str) -> String {
+    without_block(text, APPCFG_BEGIN, APPCFG_END)
+        .lines()
+        .filter(|l| !is_app_url(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_app_url(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("base_url") || t.starts_with("data_url")
+}
+
+/// A `base_url` / `data_url` assignment, commented out or not.
+fn is_commented_app_url(line: &str) -> bool {
+    is_app_url(line.trim_start_matches('#').trim_start())
+}
+
+/// The app's own assignments, parked as comments while the pin is in place, so
+/// vendor mode can put them back verbatim.
+fn app_url_comments(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|l| is_commented_app_url(l))
+        .map(|l| format!("# {}", l.trim_start_matches(['#', ' ']).trim_end()))
+        .collect()
+}
+
+/// The URLs the managed block itself assigns (our own pins, not the app's).
+fn block_live_urls(text: &str) -> Vec<String> {
+    let block = match (text.find(APPCFG_BEGIN), text.find(APPCFG_END)) {
+        (Some(b), Some(e)) if e >= b => text[b..e + APPCFG_END.len()].to_string(),
+        _ => return Vec::new(),
+    };
+    block
+        .lines()
+        .filter(|l| is_app_url(l))
+        .filter_map(|l| {
+            l.split_once('=')
+                .map(|(_, v)| v.trim().trim_matches('"').to_string())
+        })
+        .collect()
+}
+
+/// Point the vendor app's own API endpoints at the bridge.
+///
+/// The app resolves its API host itself (plain DNS plus DNS-over-HTTPS to
+/// `1.1.1.1`/`8.8.8.8`), so the `/etc/hosts` pin and the local resolver never
+/// move it: the endpoint is a plain key in `/root/config.toml` (the binary
+/// reads `CONFIG`, default `/root/config.toml`), and writing it is the only
+/// change that survives the app's own resolver.
+pub fn pin_app_config(bridge: &Bridge, ip: &str) -> Result<Value, CmdError> {
+    let path = bridge.cfg.get().app_config_file;
+    if let Ok(cur) = std::fs::read(&path) {
+        let dst = bridge.state_dir.join("appconfig.bak");
+        write_atomic(&dst, &cur).map_err(|e| CmdError(format!("app config backup: {e}")))?;
+    }
+    let cur = std::fs::read_to_string(&path).unwrap_or_default();
+    let url = format!("https://{ip}:443");
+    // Whatever endpoint the app itself was configured with stays in the file as
+    // a comment: a second assignment would break TOML parsing, and vendor mode
+    // has to restore it exactly.
+    let mut parked = app_url_comments(&without_block(&cur, APPCFG_BEGIN, APPCFG_END));
+    parked.extend(app_url_comments(&cur));
+    // Never park a pin's own address: only the app's real settings survive, so a
+    // re-pin to another address cannot resurrect the previous pin.
+    let owned: Vec<String> = block_live_urls(&cur);
+    parked.retain(|l| {
+        !(l.contains(&format!("base_url = \"{url}\""))
+            || l.contains(&format!("data_url = \"{url}\""))
+            || owned.iter().any(|u| l.contains(&format!("= \"{u}\""))))
+    });
+    parked.sort();
+    parked.dedup();
+    let mut block = String::from(APPCFG_BEGIN);
+    block.push_str(&format!("\nbase_url = \"{url}\"\ndata_url = \"{url}\"\n"));
+    for line in &parked {
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.push_str(APPCFG_END);
+    block.push('\n');
+    let rest = without_app_urls(&cur);
+    let out = if rest.trim().is_empty() {
+        block
+    } else {
+        format!("{}\n{block}", rest.trim_end())
+    };
+    write_atomic(Path::new(&path), out.as_bytes()).map_err(|e| CmdError(format!("app config: {e}")))?;
+    bridge.note(
+        Level::Warn,
+        "mode",
+        format!("vendor app base_url/data_url pinned to {url}"),
+    );
+    Ok(json!({"file": path, "base_url": url, "parked_app_urls": parked.len()}))
+}
+
+/// Take the endpoint pin away again so the app falls back to the vendor cloud.
+pub fn unpin_app_config(bridge: &Bridge) -> Result<Value, CmdError> {
+    let path = bridge.cfg.get().app_config_file;
+    let cur = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Ok(json!({"file": path, "pinned": false})),
+    };
+    let dst = bridge.state_dir.join("appconfig.bak");
+    write_atomic(&dst, cur.as_bytes()).map_err(|e| CmdError(format!("app config backup: {e}")))?;
+    let block = match (cur.find(APPCFG_BEGIN), cur.find(APPCFG_END)) {
+        (Some(b), Some(e)) if e >= b => cur[b..e + APPCFG_END.len()].to_string(),
+        _ => String::new(),
+    };
+    // The app's own assignments come back uncommented; everything else in the
+    // file is left exactly as it was.
+    let restored: Vec<String> = block
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#') && is_commented_app_url(l))
+        .map(|l| l.trim_start_matches(['#', ' ']).to_string())
+        .collect();
+    let rest = without_block(&cur, APPCFG_BEGIN, APPCFG_END);
+    let out = if restored.is_empty() {
+        rest
+    } else {
+        format!("{}\n{}\n", rest.trim_end(), restored.join("\n"))
+    };
+    if out.trim().is_empty() {
+        // The file held nothing but our keys: the app had no config file before,
+        // so it goes back to its compiled-in defaults.
+        std::fs::remove_file(&path).map_err(|e| CmdError(format!("app config: {e}")))?;
+        bridge.note(
+            Level::Warn,
+            "mode",
+            "vendor app config file removed; the app is back on its defaults",
+        );
+        return Ok(json!({"file": path, "pinned": false, "removed": true}));
+    }
+    write_atomic(Path::new(&path), out.as_bytes()).map_err(|e| CmdError(format!("app config: {e}")))?;
+    bridge.note(
+        Level::Warn,
+        "mode",
+        format!("vendor app endpoint pin removed ({} app url(s) restored)", restored.len()),
+    );
+    Ok(json!({"file": path, "pinned": false, "removed": false, "restored_app_urls": restored.len()}))
+}
+
+/// Whether the app's own config still points at this bridge.
+pub fn app_config_status(bridge: &Bridge) -> Value {
+    let path = bridge.cfg.get().app_config_file;
+    let cur = std::fs::read_to_string(&path).unwrap_or_default();
+    let pinned = cur.contains(APPCFG_BEGIN);
+    let base_url = cur
+        .lines()
+        .find(|l| l.trim_start().starts_with("base_url"))
+        .and_then(|l| l.split_once('='))
+        .map(|(_, v)| v.trim().trim_matches('"').to_string());
+    json!({
+        "file": path,
+        "exists": std::fs::metadata(&path).is_ok(),
+        "pinned": pinned,
+        "base_url": base_url,
+    })
+}
+
 /// Switch to local mode: pin hosts, restart the vendor app so it re-resolves,
 /// leave the cloud leg policy in the config.
 pub fn set_local(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
@@ -391,6 +570,13 @@ pub fn set_local(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
     }
     backup_vendor_db(bridge)?;
     let out = pin_hosts(bridge, &ip)?;
+    // The hosts pin only moves the system resolver. The app queries DNS (and
+    // DoH) itself, so its own endpoint key has to say the same thing.
+    let app_config = if bridge.cfg.get().pin_app_url {
+        pin_app_config(bridge, &ip)?
+    } else {
+        json!({"skipped": "pin_app_url=false"})
+    };
     bridge.cfg.update(|c| {
         if c.mode == CloudMode::Passthrough {
             c.mode = CloudMode::Off;
@@ -413,7 +599,7 @@ pub fn set_local(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
     // the SoC) so it picks up the pin immediately.
     let restarted = restart_vendor_app(bridge);
     bridge.note(Level::Warn, "mode", "switched to local mode");
-    Ok(json!({"hosts": out, "lte": lte, "egress": egress, "resolver": resolver, "app_restarted": restarted}))
+    Ok(json!({"hosts": out, "app_config": app_config, "lte": lte, "egress": egress, "resolver": resolver, "app_restarted": restarted}))
 }
 
 /// Switch to vendor mode: drop the pins, stop the bridge's cloud leg, restart
@@ -421,6 +607,7 @@ pub fn set_local(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
 pub fn set_vendor(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
     backup_vendor_db(bridge)?;
     let out = unpin_hosts(bridge)?;
+    let app_config = unpin_app_config(bridge)?;
     bridge.cfg.update(|c| c.mode = CloudMode::Passthrough).ok();
     // Vendor mode is the rollback path: the app must get its original cloud
     // reachability back, cellular included.
@@ -434,7 +621,7 @@ pub fn set_vendor(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
         "switched to vendor mode: the app is back on its original cloud path; \
          the bridge stays up only to serve Home Assistant",
     );
-    Ok(json!({"hosts": out, "lte": lte, "egress": egress, "resolver": resolver, "app_restarted": restarted}))
+    Ok(json!({"hosts": out, "app_config": app_config, "lte": lte, "egress": egress, "resolver": resolver, "app_restarted": restarted}))
 }
 
 /// Restart the vendor app through its supervisor (controlled window; no SoC

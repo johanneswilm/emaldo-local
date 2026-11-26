@@ -313,6 +313,17 @@ impl Ui {
         crate::relay::relay_of(&self.bridge)
     }
 
+    /// Switch field: the web UI sends `0`/`1`, API clients send `true`/`false`.
+    /// Reading only `as_u64` would silently write "off" for a JSON `true`, so
+    /// both spellings are accepted.
+    pub(crate) fn flag(body: &Value, key: &str) -> bool {
+        match body.get(key) {
+            Some(Value::Bool(b)) => *b,
+            Some(v) => v.as_u64().map(|n| n != 0).unwrap_or(false),
+            None => false,
+        }
+    }
+
     fn reply<T: serde::Serialize>(r: Result<T, crate::e2e::Error>) -> Resp {
         match r {
             Ok(v) => Resp::json(serde_json::to_vec(&json!({"ok": true, "result": v})).unwrap()),
@@ -435,7 +446,7 @@ impl Ui {
         let Some(relay) = self.relay() else {
             return Resp::json(json!({"ok": false, "error": "relay not running"}).to_string().into_bytes());
         };
-        let on = body.get("on").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
+        let on = Ui::flag(body, "on");
         let kwh = body.get("threshold_kwh").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let payload = cmds::encode_selling_protection(on, kwh);
         Self::reply(crate::e2e::write_setting(
@@ -451,7 +462,7 @@ impl Ui {
         let Some(relay) = self.relay() else {
             return Resp::json(json!({"ok": false, "error": "relay not running"}).to_string().into_bytes());
         };
-        let on = body.get("on").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
+        let on = Ui::flag(body, "on");
         let kwh = body.get("target_kwh").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let expand = body.get("expand").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
         let payload = cmds::encode_manual_selling(on, kwh, expand);
@@ -468,7 +479,7 @@ impl Ui {
         let Some(relay) = self.relay() else {
             return Resp::json(json!({"ok": false, "error": "relay not running"}).to_string().into_bytes());
         };
-        let on = body.get("on").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
+        let on = Ui::flag(body, "on");
         let start = body.get("start").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let end = body.get("end").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let payload = cmds::encode_emergency_charge(on, start, end);
@@ -485,7 +496,7 @@ impl Ui {
         let Some(relay) = self.relay() else {
             return Resp::json(json!({"ok": false, "error": "relay not running"}).to_string().into_bytes());
         };
-        let on = body.get("on").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
+        let on = Ui::flag(body, "on");
         Self::reply(crate::e2e::write_setting(
             &self.bridge,
             &relay,

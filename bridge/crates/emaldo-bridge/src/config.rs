@@ -152,6 +152,11 @@ pub struct Config {
     pub backup_dir: String,
     /// Hosts file managed by the mode switch.
     pub hosts_file: String,
+    /// The vendor app's own config file. The app resolves its API host itself
+    /// (DNS plus DNS-over-HTTPS), so local mode also writes the endpoint keys
+    /// here; `/etc/hosts` alone never moves it.
+    pub app_config_file: String,
+    pub pin_app_url: bool,
     /// systemd units used by the mode switch.
     pub bridge_unit: String,
     pub monitor_units: Vec<String>,
@@ -234,6 +239,8 @@ impl Default for Config {
             vendor_db_dir: "/root/db".into(),
             backup_dir: "/root/emaldo-local/backups".into(),
             hosts_file: "/etc/hosts".into(),
+            app_config_file: "/root/config.toml".into(),
+            pin_app_url: true,
             bridge_unit: "emaldo-local.service".into(),
             monitor_units: vec!["monitor.service".into(), "monitor-dog.service".into()],
         }

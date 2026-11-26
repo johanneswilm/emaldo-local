@@ -30,6 +30,7 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
     let mut next_settings = Instant::now();
     let mut next_health = Instant::now();
     let mut next_resolv = Instant::now();
+    let mut next_appcfg = Instant::now();
     let mut device_seen = false;
     let mut last_error: Option<String> = None;
     let mut errors = 0u32;
@@ -81,6 +82,30 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
                     "/etc/resolv.conf was rewritten: putting the local resolver back in front",
                 );
                 mode::resolver_down(&bridge);
+            }
+        }
+
+        // The vendor app's own config is the only thing that moves its API
+        // endpoint (it resolves and dials on its own). Something that rewrites
+        // that file — a vendor OTA config push, an operator edit — puts the
+        // module straight back on the vendor cloud, so local mode re-asserts it.
+        if cfg.pin_app_url && now >= next_appcfg {
+            next_appcfg = now + Duration::from_secs(30);
+            if !mode::app_config_status(&bridge)["pinned"]
+                .as_bool()
+                .unwrap_or(true)
+            {
+                bridge.note(
+                    Level::Warn,
+                    "mode",
+                    "the vendor app config lost its endpoint pin: putting it back",
+                );
+                let (host, _) = bridge.relay_hosts();
+                let ip = host.split(':').next().unwrap_or("").to_string();
+                if !ip.is_empty() && ip != "0.0.0.0" {
+                    let _ = mode::pin_app_config(&bridge, &ip);
+                    mode::restart_vendor_app(&bridge);
+                }
             }
         }
 

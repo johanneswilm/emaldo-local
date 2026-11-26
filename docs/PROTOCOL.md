@@ -323,6 +323,37 @@ v2.35.3 and v2.35.5 with **no firmware change or OTA**; see
 
 ---
 
+## 5c. How the module picks its cloud endpoint
+
+The module does not honour `/etc/hosts` for its API client. `strace` of
+`/root/bin/app` (v2.35.3) shows it resolving on its own - `connect()` to
+`1.1.1.1:53` and `8.8.8.8:53` (plain DNS) plus `1.1.1.1:443` (DNS-over-HTTPS),
+alongside NTP to `162.159.200.123`/`216.239.35.4`. So a takeover box cannot move
+the module by DNS tricks alone: block the old address and the client simply
+stops dialing rather than falling back to a local answer.
+
+What does move it is the app's own config file. The binary carries
+`env:"CONFIG,file" envDefault:"/root/config.toml"`, and the keys it reads include
+`base_url`, `data_url`, `app_id`, `app_secret`, `cloud_token`, `home_id`,
+`reg_token`, `enable_log_modules`. Pointing the endpoint keys at the takeover box
+
+```toml
+base_url = "https://192.168.50.185:443"
+data_url = "https://192.168.50.185:443"
+```
+
+puts the whole REST leg there (verified on the bench: 361 `/bmt/*` requests from
+the stock v2.35.3 app, and on the live unit), and the app must be restarted to
+re-read the file. TLS then has to validate for the host string in the URL: the
+served leaf needs a SAN for it (IP SAN for a literal address).
+
+A live unit ships **without** `/root/config.toml` (defaults compiled in); the
+first write creates it, and removing it returns the app to the vendor endpoint.
+`mode local` / `mode vendor` in the bridge manage that block, parking any
+endpoint the app itself carried.
+
+---
+
 ## 6. Known Commands
 
 | Type | Mode | Direction | Payload | Response |

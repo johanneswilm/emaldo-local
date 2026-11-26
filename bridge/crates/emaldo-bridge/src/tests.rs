@@ -59,6 +59,7 @@ fn fixture(tag: &str) -> (PathBuf, Arc<Bridge>) {
     cfg.control_port = 0;
     cfg.relay_advertise_host = Some("203.0.113.10".into());
     cfg.hosts_file = dir.join("hosts").to_string_lossy().into_owned();
+    cfg.app_config_file = dir.join("config.toml").to_string_lossy().into_owned();
     cfg.backup_dir = dir.join("backups").to_string_lossy().into_owned();
     cfg.vendor_db_dir = dir.join("fakedb").to_string_lossy().into_owned();
     std::fs::write(&cfg_path, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
@@ -670,6 +671,86 @@ fn mode_switch_rewrites_only_the_managed_hosts_block() {
 }
 
 #[test]
+fn mode_switch_moves_the_vendor_app_endpoint_key() {
+    let (dir, bridge) = fixture("appcfg");
+    let appcfg = dir.join("config.toml");
+    std::fs::write(
+        &appcfg,
+        "home_id = \"6ac8a4b4c4eee0acceaf7f77\"\nbase_url = \"https://api.emaldo.com:443\"\ndata_url = \"https://api.emaldo.com:443\"\n",
+    )
+    .unwrap();
+
+    mode::pin_app_config(&bridge, "192.168.50.185").unwrap();
+    let text = std::fs::read_to_string(&appcfg).unwrap();
+    let live_urls = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("base_url") || l.trim_start().starts_with("data_url"))
+        .count();
+    // A duplicate key would make the app ignore the whole file and dial the
+    // vendor again, so only the pinned pair may be live assignments.
+    assert_eq!(live_urls, 2, "duplicate endpoint keys: {text}");
+    assert!(text.contains("https://192.168.50.185:443"), "not pinned: {text}");
+    assert!(
+        text.contains("home_id = \"6ac8a4b4c4eee0acceaf7f77\""),
+        "vendor keys were lost"
+    );
+    assert_eq!(mode::app_config_status(&bridge)["pinned"], json!(true));
+    assert_eq!(
+        mode::app_config_status(&bridge)["base_url"],
+        json!("https://192.168.50.185:443")
+    );
+
+    mode::pin_app_config(&bridge, "192.168.50.186").unwrap();
+    let text = std::fs::read_to_string(&appcfg).unwrap();
+    assert_eq!(
+        text.matches("emaldo-local (managed)").count() / 2,
+        1,
+        "block duplicated: {text}"
+    );
+    assert!(text.contains("192.168.50.186"));
+    // Re-pinning must not park the previous pin: vendor mode has to restore the
+    // app's own endpoint, not an address we made up earlier.
+    assert!(
+        !text.contains(r#"# base_url = "https://192.168.50.185:443""#),
+        "old pin parked: {text}"
+    );
+    assert!(
+        text.contains(r#"# base_url = "https://api.emaldo.com:443""#),
+        "the app's own endpoint was dropped: {text}"
+    );
+
+    // Vendor mode: only our block goes; the app's own endpoint comes back.
+    mode::unpin_app_config(&bridge).unwrap();
+    let back = std::fs::read_to_string(&appcfg).unwrap();
+    assert!(!back.contains("emaldo-local (managed)"), "block not removed: {back}");
+    assert!(back.contains("home_id"), "lost the vendor's own keys");
+    assert!(
+        back.contains("https://api.emaldo.com:443"),
+        "the app's own endpoint must return: {back}"
+    );
+    assert_eq!(mode::app_config_status(&bridge)["pinned"], json!(false));
+}
+
+#[test]
+fn vendor_mode_deletes_an_app_config_that_only_held_our_keys() {
+    let (_dir, bridge) = fixture("appcfg_absent");
+    let appcfg = PathBuf::from(bridge.cfg.get().app_config_file);
+    assert!(!appcfg.exists(), "the vendor app ships no config file");
+
+    mode::pin_app_config(&bridge, "192.168.50.185").unwrap();
+    assert!(appcfg.exists());
+    assert_eq!(
+        std::fs::metadata(&appcfg).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "app config mode"
+    );
+
+    mode::unpin_app_config(&bridge).unwrap();
+    assert!(!appcfg.exists(), "the file must go back to absent");
+    assert_eq!(mode::app_config_status(&bridge)["pinned"], json!(false));
+}
+
+#[test]
 fn backup_names_are_validated_before_any_file_is_touched() {
     let (_dir, bridge) = fixture("backup");
     bridge.cfg.update(|c| {
@@ -680,4 +761,23 @@ fn backup_names_are_validated_before_any_file_is_touched() {
         let e = mode::restore_backup(&bridge, bad).expect_err("restore accepted a hostile name");
         assert!(e.to_string().contains("backup name") || e.to_string().contains("no such backup"), "{bad}: {e}");
     }
+}
+
+#[test]
+fn ui_flag_accepts_bools_and_numbers() {
+    // A JSON `true` must not read as "off": these flags gate hardware writes.
+    let cases: [(&str, bool); 6] = [
+        (r#"{"on":true}"#, true),
+        (r#"{"on":false}"#, false),
+        (r#"{"on":1}"#, true),
+        (r#"{"on":0}"#, false),
+        (r#"{"on":"1"}"#, false),
+        (r#"{}"#, false),
+    ];
+    for (body, want) in cases {
+        let v: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(crate::ui::Ui::flag(&v, "on"), want, "{body}");
+    }
+    let v = json!({"on": true});
+    assert!(!crate::ui::Ui::flag(&v, "expand"), "missing key must be false");
 }

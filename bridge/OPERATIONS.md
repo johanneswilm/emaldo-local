@@ -67,15 +67,49 @@ $E --config /root/emaldo-local/config.json mode vendor
 
 `mode local` - in this order, each step reported in the returned JSON:
 snapshots the vendor state DB (`/root/db` -> `backups/db-<unix>.tar.gz`), pins
-the vendor names in `/etc/hosts` (managed block), closes the cellular path
-(unbinds the USB modem, stops pppd, brings `ppp0` down), adds `prohibit` routes
-for the vendor addresses and public DNS resolvers, installs the local resolver
-(`/etc/resolv.conf` managed block plus `prepend domain-name-servers 127.0.0.1;`
-in `/etc/dhcp/dhclient.conf`), and restarts the vendor app so it re-resolves.
+the vendor names in `/etc/hosts` (managed block), writes the endpoint pin in the
+vendor app's own config (`/root/config.toml`, see below), closes the cellular
+path (unbinds the USB modem, stops pppd, brings `ppp0` down), adds `prohibit`
+routes for the vendor addresses and public DNS resolvers, installs the local
+resolver (`/etc/resolv.conf` managed block plus `prepend domain-name-servers
+127.0.0.1;` in `/etc/dhcp/dhclient.conf`), and restarts the vendor app so it
+re-reads its config.
 
-`mode vendor` undoes all of it: removes the pins and routes, rebinds the modem,
-restores `/etc/resolv.conf` from `state/resolv.conf.bak`, restarts the app. It
-reopens the path to the vendor cloud - only run it deliberately.
+`mode vendor` undoes all of it: removes the pins and routes, puts the app's own
+endpoint keys back, rebinds the modem, restores `/etc/resolv.conf` from
+`state/resolv.conf.bak`, restarts the app. It reopens the path to the vendor
+cloud - only run it deliberately.
+
+### The endpoint pin (`/root/config.toml`)
+
+`/etc/hosts` and the local resolver never move the vendor app: it resolves its
+API host itself (plain DNS **and** DNS-over-HTTPS to `1.1.1.1`/`8.8.8.8`, seen
+in `strace` as `connect()` to :53 and :443), and its endpoint is a plain key in
+its own config file - the binary reads `CONFIG`, default `/root/config.toml`
+(`env:"CONFIG,file" envDefault:"/root/config.toml"`). So local mode writes it:
+
+```toml
+# >>> emaldo-local (managed) >>>
+base_url = "https://192.168.50.185:443"
+data_url = "https://192.168.50.185:443"
+# <<< emaldo-local (managed) <<<
+```
+
+- Any `base_url`/`data_url` the app itself carried is parked as a comment inside
+  the block while the pin is active (TOML rejects duplicate keys, and a duplicate
+  would make the app ignore the whole file) and is restored verbatim by
+  `mode vendor`. The file's other keys are never touched.
+- If the file held nothing but the managed block, `mode vendor` deletes it: the
+  app had no config file before and goes back to its compiled-in defaults.
+- Before the first write the previous file is copied to `state/appconfig.bak`.
+- Settings: `app_config_file` (default `/root/config.toml`) and `pin_app_url`
+  (default `true`). With `pin_app_url` on, the poller re-asserts the pin every
+  30 s if something (a vendor config push, an operator edit) removed it, and
+  restarts the app so it picks the pin up.
+- `mode status` reports it under `app_config` (`pinned`, `base_url`, `file`).
+- Proof on the bench: with the pin at `10.0.2.15:443`, the stock app (v2.35.3)
+  sent 361 `/bmt/*` requests to the bridge; with the pin removed it went back to
+  the sandbox endpoint at `:1443`.
 
 `/etc/resolv.conf` needs attention: the vendor app's own `netmonitor` rewrites
 it from the DHCP answer roughly every ten seconds, so the bridge re-asserts its
@@ -110,35 +144,54 @@ re-assertion (`/etc/resolv.conf was rewritten: ...`).
   answer must be an **empty 204**: `curl -k https://<battery-ip>/generate_204`
   should return `status=204 size=0`. A body reads as a captive portal and the
   app then sits out its login retries.
-- The app's API client is the hard case: it keeps dialing the address the home
-  router's DNS override hands out for `api.emaldo.com`, and ignores `/etc/hosts`
-  and `/etc/resolv.conf` for that client. Blocking that address makes the app
-  stop attempting connections entirely; giving the bridge that address as a
-  local `/32` does not attract it either. Measured and explained in
-  the private `emaldo-capture/STATE.md` (2026-11-25 evening). Until the router override or
-  port-forward points at the bridge - or the previous hosted stack forwards TCP
-  443 to it - the module's REST leg keeps using the old path.
-- Resource budget on the unit: RSS ~1.0 MB, 9 threads, negligible CPU, 5.3 MB
-  on disk including logs. `df -h /` had 908 MB free after install.
+- The app's API client is the hard case: it resolves and dials its API host
+  itself, so `/etc/hosts`, the local resolver and the vendor-address blocks never
+  move it. What moves it is the `base_url`/`data_url` key in its own config file,
+  written by `mode local` (see "The endpoint pin" above). If the module is not
+  talking to the bridge, check that pin first:
+  `grep -A4 "emaldo-local (managed)" /root/config.toml`. A file the app (or a
+  vendor push) rewrote is repaired by the poller within 30 s; restarting the
+  bridge by hand does not restart the app.
+- Setting writes are accepted at the bridge but the module decides what it
+  stores: `0x5E` (export limit / selling protection) accepted a threshold change
+  (`0` -> `1` -> `0` round-trip through `0x5F`), but sending `on=1` came back as
+  `on=0`. Treat "enable" on that setting as unverified; the read-back after every
+  write is the authority. UI/API switch fields accept `true`/`false` and `0`/`1`.
+- Restarting the bridge signs every UI session out (sessions are in memory) and
+  drops the E2E session for a few seconds; the module re-establishes it from its
+  own frames, the poller logs `module E2E session is live` again.
+- Resource budget on the unit: RSS ~2.6 MB, negligible CPU, 2.4 MB binary.
+  `df -h /` had ~908 MB free after install.
 
-## Home Assistant (deferred on this installation)
+## Home Assistant (the remaining step)
 
-The stock Emaldo integration is repointed by the `emaldo_local` cutover
-component, which patches the loaded client's `API_HOST`/`DP_HOST` module
-globals; nothing in the integration itself changes. Steps:
+The module and the app-side session are on the bridge; HA still points at the
+hosted stack. What is left is one host change plus a trust decision, because HA's
+client verifies certificates with the default (certifi) bundle:
 
-1. Put `custom_components/emaldo_local` in the HA config directory and restart.
-2. Settings -> Devices & Services -> Add Integration -> "Emaldo local cutover",
-   and enter the bridge address as the API host.
-3. Make HA trust the bridge CA: download `https://<battery-ip>:4443/ca.pem` and
-   install it in HA's trust store (on HAOS the managed way is
-   `ha ssl certificates upload --certificate-file ca.pem`; a CA for an
-   IP-address host needs the leaf to carry that IP as a SAN, which `certs`
-   regenerates from the configured advertise address).
-4. Check: entities update, prices/solar arrive, a schedule write reaches the
-   module, and the optimizer's `set_override` lands - `logs/access.log` shows
-   the app-side calls, `{"op":"state"}` on the control socket shows the stored
-   override.
+1. Point the integration at the bridge. Either install the `emaldo_local`
+   cutover component (patches the loaded client's `API_HOST`/`DP_HOST` module
+   globals, nothing in the integration itself changes) or patch
+   `custom_components/emaldo/emaldo_lib/const.py` the way the hosted cutover
+   already did (`inject_patch.py` into a HAOS backup).
+2. Make TLS work for the new host string. Two ways:
+   - **Bridge CA.** `api_host = 192.168.50.185`. The bridge leaf already carries
+     that IP as a SAN; download `https://<battery-ip>:4443/ca.pem` and make the
+     client use it - `self._http.verify = "/config/emaldo_local_ca.pem"` in
+     `emaldo_lib/client.py` (requests ignores the system store, so a plain CA
+     upload does not help). No expiry problem, no internet dependency.
+   - **Public name.** Keep a publicly trusted name (today
+     `emaldo.lund.fiduswriter.org`, LE cert held by the NAS) and make it resolve
+     to `192.168.50.185` on HA's resolver - which means the bridge's DNS answers
+     for it on HA's side. HA then needs the NAS's leaf and key copied to the
+     bridge, and re-copying every 90 days; the bridge has no ACME client.
+3. Check after the change: entities update, prices/solar arrive, a schedule write
+   reaches the module, and the optimizer's `set_override` lands -
+   `logs/access.log` shows the app-side calls (`/bmt/e2e-user-login`,
+   `/home/e2e-login`), `{"op":"state"}` on the control socket shows the stored
+   override, and HA's `ha_last_seen` stops being 0 in `/api/status`.
 
-These steps have not been run against this installation yet; HA still points at
-the hosted stack.
+The bridge-side half of this is measured: `/api/status` already reports the
+device session and telemetry, and settings writes round-trip to the module. The
+HA-side half has not been run against this installation yet.
+
