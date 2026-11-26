@@ -31,6 +31,8 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
     let mut next_health = Instant::now();
     let mut next_resolv = Instant::now();
     let mut next_appcfg = Instant::now();
+    let mut last_dns_note: Option<Instant> = None;
+    let mut last_appcfg_note: Option<Instant> = None;
     let mut device_seen = false;
     let mut last_error: Option<String> = None;
     let mut errors = 0u32;
@@ -76,10 +78,15 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
                 .as_bool()
                 .unwrap_or(false);
             if !pinned {
-                bridge.log.write(
-                    Level::Warn,
+                // netmonitor does this every few seconds: the action repeats,
+                // the log line does not (8k lines a day would be pure noise).
+                note_limited(
+                    &bridge,
                     "dns",
-                    "/etc/resolv.conf was rewritten: putting the local resolver back in front",
+                    "/etc/resolv.conf was rewritten: putting the local resolver \
+                     back in front (logged at most once per 10 minutes)",
+                    &mut last_dns_note,
+                    now,
                 );
                 mode::resolver_down(&bridge);
             }
@@ -95,10 +102,13 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
                 .as_bool()
                 .unwrap_or(true)
             {
-                bridge.note(
-                    Level::Warn,
+                note_limited(
+                    &bridge,
                     "mode",
-                    "the vendor app config lost its endpoint pin: putting it back",
+                    "the vendor app config lost its endpoint pin: putting it back \
+                     (logged at most once per 10 minutes)",
+                    &mut last_appcfg_note,
+                    now,
                 );
                 let (host, _) = bridge.relay_hosts();
                 let ip = host.split(':').next().unwrap_or("").to_string();
@@ -172,5 +182,25 @@ fn note_recovery(bridge: &Bridge, last: &mut Option<String>, count: &mut u32) {
             .log
             .write(Level::Info, "poll", format!("recovered after: {prev}"));
         *count = 0;
+    }
+}
+
+/// Log something that repeats on a fixed cycle at most once per ten minutes.
+/// The action itself still runs every cycle; only the log line is throttled, so
+/// a device that rewrites a file every few seconds cannot fill the eMMC.
+fn note_limited(
+    bridge: &Arc<Bridge>,
+    tag: &str,
+    msg: &str,
+    last: &mut Option<Instant>,
+    now: Instant,
+) {
+    const EVERY: Duration = Duration::from_secs(600);
+    match last {
+        Some(t) if now.duration_since(*t) < EVERY => {}
+        _ => {
+            bridge.log.write(Level::Warn, tag, msg);
+            *last = Some(now);
+        }
     }
 }
