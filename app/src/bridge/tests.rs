@@ -626,6 +626,17 @@ fn ui_schedule_write_maps_to_the_module_command() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn egress_status_reads_the_prohibit_table() {
+    // `ip -o route show type prohibit` output as produced on the module.
+    let out = "prohibit 1.1.1.1 scope link \nprohibit 8.8.8.8 scope link \nprohibit 34.53.168.64 \n";
+    assert_eq!(
+        crate::bridge::mode::parse_prohibit_routes(out),
+        vec!["1.1.1.1", "8.8.8.8", "34.53.168.64"]
+    );
+    assert!(crate::bridge::mode::parse_prohibit_routes("").is_empty());
+}
+
+#[test]
 fn mode_switch_rewrites_only_the_managed_hosts_block() {
     let (dir, bridge) = fixture("mode");
     let hosts = dir.join("hosts");

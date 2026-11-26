@@ -313,42 +313,57 @@ pub fn egress_down(bridge: &Bridge) -> Value {
 /// Remove the blackhole routes (vendor mode: the app must reach its cloud).
 pub fn egress_up(bridge: &Bridge) -> Value {
     let cfg = bridge.cfg.get();
-    let mut removed = Vec::new();
     for addr in &cfg.vendor_block_addrs {
-        let gone = run("ip", &["route", "del", "prohibit", addr.as_str()])
-            .is_ok()
-            || !route_present(addr);
-        removed.push(json!({"addr": addr, "gone": gone}));
+        let _ = run("ip", &["route", "del", "prohibit", addr.as_str()]);
     }
+    let left = prohibit_routes();
+    let removed = cfg
+        .vendor_block_addrs
+        .iter()
+        .map(|a| json!({"addr": a, "gone": !left.iter().any(|b| b == a)}))
+        .collect::<Vec<_>>();
     bridge.note(Level::Warn, "egress", "vendor blackhole routes removed");
     json!({"routes": removed})
 }
 
 pub fn egress_status(bridge: &Bridge) -> Value {
     let cfg = bridge.cfg.get();
+    let blocked_now = prohibit_routes();
     json!({
         "requested": cfg.block_vendor_egress,
         "blocked": cfg
             .vendor_block_addrs
             .iter()
-            .filter(|a| route_present(a))
+            .filter(|a| blocked_now.iter().any(|b| b == *a))
             .cloned()
             .collect::<Vec<String>>(),
         "missing": cfg
             .vendor_block_addrs
             .iter()
-            .filter(|a| !route_present(a))
+            .filter(|a| !blocked_now.iter().any(|b| b == *a))
             .cloned()
             .collect::<Vec<String>>(),
     })
 }
 
-fn route_present(addr: &str) -> bool {
+/// Addresses currently covered by a `prohibit` route — what [`egress_down`]
+/// installs. `ip route show prohibit <addr>` is not valid iproute2 syntax (it
+/// reads the address as a prefix), so the whole table is listed once and
+/// parsed.
+fn prohibit_routes() -> Vec<String> {
     Command::new("ip")
-        .args(["-o", "route", "show", "prohibit", addr])
+        .args(["-o", "route", "show", "type", "prohibit"])
         .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_prohibit_routes(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_prohibit_routes(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
+        .collect()
 }
 
 /// Pin the vendor domains to `ip` in the hosts file (local mode).

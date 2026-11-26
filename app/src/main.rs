@@ -87,7 +87,7 @@ enum Role {
     Driver,
 }
 
-const BRIDGE_COMMANDS: [&str; 7] = [
+const BRIDGE_COMMANDS: [&str; 8] = [
     "bridge",
     "run",
     "mode",
@@ -95,6 +95,7 @@ const BRIDGE_COMMANDS: [&str; 7] = [
     "hash-password",
     "config",
     "lte",
+    "version",
 ];
 
 fn role_of(argv: &[String]) -> Role {
