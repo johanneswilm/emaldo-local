@@ -7,6 +7,11 @@ and `docs/API.md` for the REST API.
 
 ## Confirmed
 
+> REST envelope: the **app SDK** (`gm=1`) and the **module** (`gm=2`) differ.
+> The app (`docs/API.md`) encrypts the `json`/`token` form fields with **RC4**
+> keyed by `APP_SECRET`; the module's `gm=2` path uses **AES-256-CBC** keyed by
+> `APP_SECRET` with the IV from the `iv` form field (below).
+
 1. **Module HTTP API (gm2)** — the module speaks the same API as the app but
    with `gm=2`: `json`/`token` form fields are **AES-256-CBC** with key
    `APP_SECRET` (the global app secret, see `emaldo_re/const.py`), IV = the
@@ -39,24 +44,25 @@ and `docs/API.md` for the REST API.
    `get_version` over BLE = `v2.35.3` = exactly what the OTA endpoint
    lists, so the OTA endpoint works for *any* user account.
 
-3. **E2E (UDP/MSCT :1050) roster gate** — this is the open problem.
+3. **E2E (UDP/MSCT :1050) roster gate.**
    * The app's `e2e_user_login` **rotates** `end_id`+`end_secret` (device and
      app-side records) on every call but `chat_secret`+`group_id` stay.
    * The module, at its own `e2e-bmt-login`, is handed the credentials that
      were in the DB at that moment (incl. presumably the app/home end ids).
      It then **accepts app commands only from the sender ends it learned**,
      and replies are encrypted with keys we do not hold if the sender end was
-     forged. In captures from 07:02 the real relay forwarded app commands and
-     the module answered with e3-envelope frames; for commands from rotated
-     (stale) ends the module produced plaintext error frames containing
-     **`cmd not allowed`**, and another frame `index out of bounds, index: 1,
-     end index: 1` — these leak as ASCII into the frame. This is very likely
-     also why the official HA integration's data goes stale after restarts.
+     forged. In captures the real relay forwarded app commands and the module
+     answered with e3-envelope frames; for commands from rotated (stale) ends
+     the module produced plaintext error frames containing **`cmd not
+     allowed`**, and another frame `index out of bounds, index: 1, end index:
+     1` — these leak as ASCII into the frame. This is very likely also why the
+     official HA integration's data goes stale after restarts.
    * Forcing a module re-login (kill its UDP session; it re-logs in to
      `api.emaldo.com` via HTTPS within ~2–10 min) makes the module adopt the
      current DB pair — but the module re-logs in **by itself**, so any
      app-side credentials we rotate first get overwritten unless *we* are the
-     login server.
+     login server. Running our own login server + relay is what the takeover
+     bridge (`bridge/`) does.
 
 4. **Working relay emulator** (`scripts/e2e_relay.py`) — blind UDP relay with
    byte-accurate session behaviour: real alive-ACK (158B template, echo
@@ -70,16 +76,16 @@ and `docs/API.md` for the REST API.
    The subscribe payload of the real app is `01` (`0x06` + mode `0xA0`,
    NOT request-mode `0x10` which the module ignores).
 
-5. **Takeover path under test** — BLE `set_http_host` to a host we control
-   (valid TLS cert required, no pinning detected), our `fake_api.py` answers
+5. **Takeover path** — BLE `set_http_host` to a host we control (valid TLS
+   cert required, no pinning detected), our REST front answers
    `e2e-bmt-login` with **our** `chat_secret`/`end_id`s and **our** relay
    `host` — the module then dials our relay and everything decrypts. The
-   module re-logs in within seconds of `set_http_host` (no reboot needed),
-   retries `e2e-bmt-login` every ~5 s until the response format/fields are
-   right; response encoding is still being searched (RC4-hex, AES-b64 with
-   zero/random IV, plaintext, snappy, gm2 envelope — cycling variants).
-   `set_data_host` works, `restart_network`/`reboot`/`update_config` via BLE
-   return status 0 (unsupported on this fw; not needed anyway).
+   module re-logs in within seconds of `set_http_host` (no reboot needed)
+   and retries `e2e-bmt-login` until the response format/fields are right.
+   `set_data_host` works; `restart_network`/`reboot`/`update_config` via BLE
+   return status 0 (unsupported on this fw; not needed anyway). This is the
+   protocol the takeover bridge (`bridge/`) implements; the bridge does not
+   currently work end to end (bug under active investigation).
 
 ## Practical notes
 
@@ -102,9 +108,12 @@ and `docs/API.md` for the REST API.
 * `metrics` upload body contains the module's own rich telemetry (brt/fm/m/mm/ac
   arrays) — a local fake API can log this as a data source.
 
-## Attack surface for the remaining problem (roster/keys)
+## Attack surface / how the e2e path was opened up
 
-1. Finish `e2e-bmt-login` response acceptance on `fake_api.py` (in progress).
+1. `e2e-bmt-login` response acceptance is implemented in the takeover REST
+   front (`bridge/crates/emaldo-bridge`): running our own login server + relay
+   means the module adopts *our* credentials instead of rotating away from
+   them. (An earlier `fake_api.py` was the scratch bench for this.)
 2. ~~Decompile `msct/e2e.userClientConnFilter` / `userServerConnFilter` /
    `CheckIsProxyMsg` ...~~ **Done (2026-11-25).** The connfork selects the
    logical conn **per message**, independent of the login/sender:

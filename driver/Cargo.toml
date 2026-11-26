@@ -1,5 +1,5 @@
-# Own workspace root: the repository root has a separate Cargo workspace
-# (the bridge workstream); this driver is deliberately not a member.
+# Own workspace root: bridge/ is a separate Cargo workspace (Approach B);
+# this driver (Approach A) is deliberately not a member of it.
 [workspace]
 
 [package]

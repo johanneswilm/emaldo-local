@@ -1,7 +1,7 @@
 #!/bin/sh
 # Cross-build and push the bridge to a target box.
 #
-#   deploy/deploy.sh [ssh-target] [--install] [--identity]
+#   bridge/deploy/deploy.sh [ssh-target] [--install] [--identity]
 #
 #   ssh-target  default: emaldo-battery (also works against the emulator:
 #               ssh -p 10022 root@127.0.0.1 does not use a host key alias, so

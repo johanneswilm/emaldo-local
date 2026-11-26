@@ -1,8 +1,17 @@
-# The state-machine gate: why the official app stays `Unconfigured`
+# The state-machine gate: how the official app reaches `Configured`
 
-The emulator runs the official app end to end (reboot gates closed, fake BMS
-registered, BLE adapter `UP RUNNING`), but the app never reaches its cloud login.
-This document records what has been measured, so nobody re-derives it.
+**Current answer (summary).** The app leaves `Unconfigured` when it has a
+config identity: `appdata.IsConfigured` is true iff `app_id`, `app_secret`,
+`base_url`, `cloud_token`, `home_id` are all non-empty in `/root/config.toml`
+(plus `data_url`, `model`). The link is marked online by `internetOK`, which
+needs the DoH gate (via the `1.1.1.1`/`8.8.8.8` fronts) or an HTTP-204 probe —
+and the firmware's HTTP client binds to `eth0` (`SO_BINDTODEVICE`), so every
+listener it must reach lives on an eth0 address. Once configured, the app
+opens `/dev/ttymxc2` (the MCU UART); the emulator provides a pty stub. The
+`baseinfo_v1` record is the app's own store and is not a gate.
+
+The rest of this file is the measured trail behind that answer, kept so
+nobody re-derives it.
 
 ## RESOLVED (2026-11-24 ~19:00): the gate is config identity, not baseinfo
 
@@ -103,7 +112,8 @@ Result: the DoH gate completes. `dnshijack.log` shows `relay ... ->
 ('10.0.2.3',443)` pairs every ~2 min from the app plus one pair per boot, and
 `dns_queries.log` shows its connectivity probes answered `A 10.0.2.3`. The
 appwizard still parks in `Unconfigured` (`appwizard.go:101`) and the app still
-issues **zero** API requests, so the baseinfo gate below is the remaining one.
+issues **zero** API requests — at this point the state gate was still being
+attributed to baseinfo (disproved in "Gate 1" below; it is config identity).
 pprof is reachable from the **host** at `127.0.0.1:16062` (guest 16061 answers
 nothing over loopback for a curl inside the guest in this build).
 
@@ -162,9 +172,10 @@ dump, no cloud/HTTP goroutine, and the `ss` sampler still showing only
 `SYN-SENT` sockets to `1.1.1.1` / `8.8.8.8` / `127.0.0.1` - none to `10.0.2.3`.
 The request lines that did appear in `SB_LOG` were our own probe client (proved
 later by a `probe-self` line at 15:44:16 with nothing else writing). So the
-blocker was the bind/interface problem in Gate 0, not the DNS answer - and even
-after Gate 0 was fixed the app still sends nothing, which is why the baseinfo
-gate is the remaining one.
+blocker was the bind/interface problem in Gate 0, not the DNS answer. After
+Gate 0 was fixed the app still sent nothing until the config identity was set;
+that was later shown to be the real gate (see the summary at the top), not
+baseinfo.
 
 ## Static RE: what does and does not work
 

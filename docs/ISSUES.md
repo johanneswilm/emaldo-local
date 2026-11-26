@@ -1,11 +1,12 @@
-# Known issues (driver takeover / soak, 2026-11-25)
+# Known issues (driver, 2026-11-25)
 
-Living list of problems found while running our driver as the master (vendor
-app retired). Each has the symptom, the evidence, and the current status.
+Living list of problems in the replacement driver (`driver/`) found while
+running it read-only and in controlled write windows. Each has the symptom,
+the evidence, and the current status.
 
-## 1. Battery e-ink display turns off when the vendor app is not running
-- **Symptom:** after a takeover (vendor `app` → `app.backup`), the physical
-  e-ink panel on the battery goes blank/off.
+## 1. Battery e-ink display turns off when only our renderer drives it
+- **Symptom:** when the driver owns `/dev/fb0` (vendor app not redrawing it),
+  the physical e-ink panel on the battery goes blank/off.
 - **Likely cause:** on the live unit `/dev/fb0` is a real **char device**
   (e-ink controller). The vendor app draws the 15001-byte 1bpp framebuffer
   *and* performs the panel refresh via its own path; our `display.rs` renderer
@@ -25,7 +26,7 @@ app retired). Each has the symptom, the evidence, and the current status.
   the mapping**, which on the char device reaches the kernel fb driver's
   `fb_ops` fsync hook (which schedules the deferred screen copy). Our old
   `FBIOPUT_VSCREENINFO` "flush" was a no-op guess.
-- **Fix:** `rust/src/display.rs` now `msync(MS_SYNC)`s the dirty mapping
+- **Fix:** `driver/src/display.rs` now `msync(MS_SYNC)`s the dirty mapping
   after each diff write when FBIOGET_* succeed (char device); on the
   emulator regular file it is a no-op (mode logged as `refresh=file`).
 - **Status:** FIXED IN CODE, NEEDS LIVE CHECK. If the panel still stays
@@ -89,11 +90,13 @@ app retired). Each has the symptom, the evidence, and the current status.
 
 ## 3. PV power reads 0 / not parsed from inverter (daytime load understated)
 - The provisional inverter register map is off by default (`map_unvalidated`),
-  so PV, and any direct load, come from the inverter block only when enabled.
-  Grid comes from the b-sensor, battery from CAN, so overnight the derived
-  load (`PV + grid − battery_charge`) is accurate; **during PV production the
+  so live PV power comes from the inverter block only when enabled. Grid comes
+  from the b-sensor, battery from CAN, so overnight the derived load
+  (`PV + grid − battery_charge`) is accurate; **during PV production the
   derived load understates** until PV is parsed from the inverter blocks
   (0x0FA0×43). See `REGISTERS.md`.
+- The Open-Meteo forecast (`driver/src/solar.rs`) is planner input only, not a
+  live power reading, so it does not close this gap.
 - **Status:** OPEN (mapping validation pending).
 
 ## Notes

@@ -41,8 +41,8 @@ and protocol experiments.
 > regular file (`/sandbox/fb0.raw`) - never register a real fbdev, fbcon
 > takeover oopses in `sys_imageblit`. Read the file back (MSB-first, 1=black)
 > and the official UI appears: Solar/Grid/Battery, Vehicle/KeepOn/Addition,
-> status icons, centre box; all values are 0 kW because `/dev/ttymxc2` is the
-> Modbus inverter/BMS bus and the stub does not answer its 4 s polls.
+> status icons, centre box; all values are 0 kW because the stub on
+> `/dev/ttymxc2` (the MCU UART) does not answer its 4 s polls.
 > `/bmt/e2e-bmt-login` every 10 s is the module's *rejection retry* (see
 > `docs/PROTOCOL.md`), not live behaviour; replaying a captured real response
 > (`/sandbox/e2e_login_real.json`, never commit) stopped the loop and the relay

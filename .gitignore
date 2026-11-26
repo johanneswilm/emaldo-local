@@ -1,5 +1,8 @@
 bin/
 *.tmp
 *.pyc
-rust/target/
+# per-approach build output (driver/ is its own workspace; bridge/ is the
+# workspace root that used to be the repo root)
+driver/target/
+bridge/target/
 /target/

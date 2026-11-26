@@ -15,7 +15,7 @@
 - **RC4** symmetric cipher (key = `app_secret` from credentials)
 - Responses are **RC4 decrypted → Snappy decompressed**
 - Request fields sent as `encrypt_field(json_string)` → RC4 → hex string
-- See `emaldo/crypto.py`
+- See `emaldo_re/crypto.py`
 
 ### 2.2 E2E UDP
 

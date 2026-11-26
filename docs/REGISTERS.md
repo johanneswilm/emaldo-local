@@ -1,51 +1,37 @@
 # Serial/register map — recovered from the vendor binary
 
-**Status 2026-11-25 (evening): the register map below was recovered by
-static analysis of the vendor binary** (emaldo_iot_fw v2.35.x, go1.24.1
-ARM; Ghidra + pclntab tooling from `scripts/`). It replaces the earlier
-string-table guesses.
+The register map below was recovered by static analysis of the vendor
+binary (emaldo_iot_fw v2.35.x, go1.24.1 ARM; Ghidra + pclntab tooling in
+`scripts/`).
 
-> **CRITICAL BUS-ARCHITECTURE FINDING (live window 2026-11-25):** on the
-> production Power Core 2.0 there is **no directly accessible Modbus
-> inverter bus**. With the vendor app stopped, its open files show it
-> talks to the inverter(s) exclusively through the housekeeping MCU
-> (`/dev/mcu1`, kernel driver on UART 21e8000 = ttymxc2) and to the three
-> battery modules through the CAN cabinet bridge (`/root/bin/cabinet`,
-> FIFOs `/run/cabinet/1/{1,2,3}/{in,out}`). `/dev/ttyUSB0..2` (internal
-> USB hub) are accessory ports (EV gun / b-sensor), idle in the fd dump.
-> A Modbus sweep (ttyUSB0..2 + ttymxc2, 9600/19200, slave walk 1..10 +
-> 240..250, fc 0x04 @ 0x0FA0) got **zero responses** on every port.
->
-> Consequences:
-> - The HiSolar Modbus map below describes the inverter's own bus, which
->   sits **behind the MCU**. On this hardware it is reached with the MCU
->   Bmtp protocol (`/dev/mcu1`) command 0x1012, not with Modbus RTU; see
->   "MCU protocol" below. An external RS485 tap on the inverter bus would
->   be the alternative.
-> - Battery data/control goes via the CAN cabinet bus (wire format
->   already reverse-engineered — emulator README "DIN CAN wire format",
->   `fake_bms.py`, `firmware/CANAPP_RE.md`).
-> - The driver's Modbus poll path remains correct for the emulator bench
->   and for Emaldo models with a direct Modbus port; on this unit Phase-1
->   telemetry stays on the MCU sysfs (already working).
+## Bus architecture on the live Power Core 2.0
 
-## Correcting the earlier version of this doc
+The inverter is reached over **Modbus RTU**, not through the housekeeping
+MCU. The vendor app holds these ports on the live unit:
 
-- `/dev/ttymxc2` — UART 21e8000 on the module SoC. On the **live** unit
-  the vendor `mcu_driver.ko` owns this UART and exposes it as the
-  message-oriented char device `/dev/mcu1` plus `/sys/class/mcu/mcu1/*`;
-  the vendor app (`/root/bin/app`) uses `/dev/mcu1`, not the tty.
-  On the **emulator** the UART is replaced by a pty exposed as
-  `/dev/ttymxc2` (the vendor app's serial transport writes the same
-  frames). Single-master in both cases.
-- `/dev/mcu1` — housekeeping-MCU char device (`mcu_driver.ko`). Writes are
-  wrapped by the driver in a DIN frame (`Din_data_packing(0xF0, ...)`);
-  RX is parsed by `Din_data_analysis` and queued for `read()`.
-  `/sys/class/mcu/mcu1/*` is the separate status/IO interface.
-- `/dev/serial/by-path/...usb...` — USB-serial accessories (EV gun /
-  b-sensor), idle on this unit.
-- `can0` (500 kbit) — cabinet↔BMS DIN bus, bridged by `/root/bin/cabinet`
-  into `/run/cabinet/1/{1,2,3}/{in,out}` FIFOs. Read-only listener path.
+- **Inverters (A/B/C)** — `/dev/ttyCH9344USB3` / `ttyCH9344USB0` /
+  `ttyCH9344USB2`, 9600 8N1, Modbus RTU **slave 1** on each (one UART per
+  inverter). Confirmed live: the vendor app holds those ports.
+- **b-sensor / grid meter** — `/dev/ttyCH9344USB1`, 9600, slave 1.
+- **EV gun** — `/dev/ttyCH9344USB4`.
+- **Batteries** — the three packs sit behind the **CAN cabinet bus**
+  (`can0`, 500 kbit), bridged by `/root/bin/cabinet` into the FIFOs
+  `/run/cabinet/1/{1,2,3}/{in,out}`. Wire format: BAK TLV in DIN type-7
+  pages (see "Battery BMS" below and `emulator/README.md`).
+- **Housekeeping MCU** — `/dev/ttymxc2` is UART `21e8000`; on the live
+  unit the vendor `mcu_driver.ko` owns it and exposes it as the
+  message-oriented char device `/dev/mcu1` plus `/sys/class/mcu/mcu1/*`.
+  This link carries MCU version/status/IO (Bmtp protocol below). It is
+  **not** the inverter data path; on this unit its inverter telemetry is
+  silent even for the vendor app (Solar 0 / Grid 0 on its own display).
+  On the emulator the UART is a pty exposed as `/dev/ttymxc2`.
+
+The driver's live read path uses the CAN/BMS bus (passive listener) and
+the MCU sysfs; its Modbus RTU poll path targets the CH9344 inverter ports
+on the bench and in a controlled write window. The `/dev/ttymxc2` /
+`/dev/mcu1` links are single-master: stop the vendor app
+(`systemctl stop monitor-dog.service monitor.service; pkill -x app`)
+before opening them.
 
 ## Inverter drivers: there are TWO families
 
@@ -153,7 +139,7 @@ hardware:
   3262–3272 mV cells, 52.27–52.29 V, −6.4/−7.3/−7.9 A, SOC
   56/75/67 % (mean 66 %; vendor display showed 70 % usable), cycles
   317/349/365, health 98–100 %, 15–27 °C. This is now decoded by
-  `rust/src/can.rs` and shown in the driver UI.
+  `driver/src/can.rs` and shown in the driver UI.
 
 ## MCU sysfs (validated live 2026-11-25)
 
@@ -177,12 +163,14 @@ poll cycle; values are raw — semantics of the flags still vendor-specific):
 
 ## MCU protocol: Bmtp over the vendor "tower" serial codec (recovered 2026-11-25)
 
-The inverter is **not** reached with Modbus RTU on this unit. The app talks
-to the housekeeping MCU with the Bmtp message protocol; the MCU is a
-register bridge/IO controller. Evidence: `internal/mcuclient`,
-`bmtp/codec`, `bmtp/xorsum`, `sockets/devfile` in the vendor binary, the
-live `mcu_driver.ko`, and the emulator capture. The 0x0FA0/0x0FDx HiSolar
-map is still usable, but **through command 0x1012**, not as Modbus frames.
+The housekeeping MCU speaks the Bmtp message protocol over `/dev/mcu1`
+(live) / `/dev/ttymxc2` (emulator); the MCU is a register bridge/IO
+controller. Evidence: `internal/mcuclient`, `bmtp/codec`, `bmtp/xorsum`,
+`sockets/devfile` in the vendor binary, the live `mcu_driver.ko`, and the
+emulator capture. On this unit the MCU link does not carry inverter
+telemetry (the live inverter path is Modbus RTU on the CH9344 ports), but
+the HiSolar 0x0FA0/0x0FDx map is also readable **through command 0x1012**
+over the MCU.
 
 ### Wire frame (little-endian)
 
@@ -199,11 +187,10 @@ dd...                 Data (Length-6 bytes)
 xx                    XOR of frame[3 .. len-1)
 ```
 
-Length = 6 + data; total = Length + 6. `00 00 01` is **not** a preamble:
-it is ProtocolVersion/Type/Platform of a request. The previous bench note
-that called byte 3 `type 06|07` was misreading the low byte of the
-little-endian Length field. The codec is `bmtp/codec` + `bmtp/xorsum`;
-`bmtp/encoding` writes fields sequentially (no Go struct padding).
+Length = 6 + data; total = Length + 6. The leading `00 00 01` is
+ProtocolVersion/Type/Platform of a request, not a preamble. The codec is
+`bmtp/codec` + `bmtp/xorsum`; `bmtp/encoding` writes fields sequentially
+(no Go struct padding).
 
 ### Commands (read-only set; observed poll order)
 
@@ -241,17 +228,19 @@ combined "ReadPowers" command on the MCU: 0x1000 is global errors.
 
 A 0x1012 request with `index=0, len=43, addr=0x0FA0` returns the same
 86 bytes the HiSolar Modbus block would contain, in Modbus register order
-(big-endian u16). `len` is a u8 (max 255 registers). The MCU owns the
-inverter bus and the slave address/CRC; the driver never speaks Modbus
-RTU. This is the correct way to apply the 0x0FA0/0x0FAF map on this
-hardware.
+(big-endian u16). `len` is a u8 (max 255 registers). On this unit the
+inverter's Modbus registers are also reachable directly over Modbus RTU on
+the CH9344 ports (slave 1); 0x1012 over the MCU link is the equivalent
+register bridge if you are talking to the MCU. The driver's live read path
+uses the CAN/BMS bus, and its Modbus RTU poll targets the CH9344 inverter
+ports.
 
-### Live result (controlled window, 2026-11-25)
+### Live result on the MCU link (controlled window, 2026-11-25)
 
 - `/dev/mcu1` has the write quirk: `write()` returns the driver's packet
   size (20) for a 12-byte Bmtp frame; `std::io::Write::write_all` panics.
-  The driver now uses a single-write loop that tolerates this (fixed in
-  `rust/src/serial.rs`).
+  The driver uses a single-write loop that tolerates this (fixed in
+  `driver/src/serial.rs`).
 - With the vendor app stopped (`systemctl stop monitor-dog.service
   monitor.service; pkill -x app`), the driver sent the read set and read
   continuously. **No bytes arrived** — not even for the driver's own
@@ -259,12 +248,12 @@ hardware.
   recovery path) and a 3 s boot wait did not change that. The MCU sysfs
   stayed `1 1 1`; `mcu_mode=release_app`.
 - The vendor app's own display at the same time showed **Solar 0 / Grid 0 /
-  Battery 2.6 kW / SOC 70 %**: the battery path works, the inverter/MCU
-  telemetry path does not on this unit. So the missing inverter data is
-  not a driver bug; the vendor app does not have it either.
+  Battery 2.6 kW / SOC 70 %**. The housekeeping MCU link does not carry
+  inverter telemetry on this unit; the inverter is reached over Modbus RTU
+  on the CH9344 ports instead.
 - Consequence: the MCU read set is implemented and bench-validated, but
-  `hardware.mcu_protocol` stays **false** on live. The working live
-  telemetry is the CAN/BMS path below.
+  `hardware.mcu_protocol` stays **false** on live. The live read paths are
+  the CAN/BMS bus and the b-sensor/meter.
 
 ### Emulator validation of the MCU path
 
@@ -277,15 +266,15 @@ they are fed by the master/cloud state, while SOC/battery data is local.
 The app version on the emulator is v2.35.3; live is v2.35.5 (same code
 layout/pclntab).
 
-| earlier assumption | what the firmware actually does |
+| fact | what the firmware does |
 |---|---|
-| `row data(0x3600 --0x3660)LE` means little-endian | **Wrong.** Go packs string literals back to back. The string is `逆变器row data(0x3600 --0x3660)` (31 bytes, used in `invt/plugins/uploadinvertererror`). The `LE` is the start of the next string, `LE Create Connection (0x08|0x000D)`, which is a BLE HCI command name. |
-| Byte order LE | **Big-endian**, standard Modbus: `reg = b[2i]<<8 \| b[2i+1]`. 32-bit values put the **high word at the lower address** (the register names say `_S32高16位` = "S32 high 16 bits"). |
-| Input registers (FC04) | The RTU client (`socket/modbus.rtuClient`) only implements **FC03 ReadHoldingRegisters**, FC06 and FC16. Nothing uses FC04. |
-| `/dev/ttymxc2` is the Modbus bus to inverter and BMS | `/dev/ttymxc2` is the **`--mcu`** link to the housekeeping MCU ("sidecar"). The inverters are on a CH9344 USB-to-8×UART bridge (see Buses). |
-| 0x3018 = SOC, /10 | **Wrong.** 0x3018 is the INVT **power on/off command/status** register. SOC comes from the battery BMS (see Battery). |
-| Inverter slave 1, BMS slave 247 | INVT inverter slave = **1** (each inverter has its own UART). Emaldo battery slave = **2**. 247 does not appear anywhere. |
-| 0x3600 block is generic "inverter telemetry" | It belongs to the **INVT** inverter driver only (`invt.(*adaptation).RegisterStartAddress` = `0x3600`, `RegisterDataMaxLength` = `0x61`). HiSolar / HiSolar-40 start at **4000 (0xFA0)**, which is where `invS.GetData 4090/4062` comes from. BST starts at `0xFE06`. |
+| `row data(0x3600 --0x3660)LE` | Go packs string literals back to back. The string is `逆变器row data(0x3600 --0x3660)` (31 bytes, used in `invt/plugins/uploadinvertererror`). The `LE` is the start of the next string, `LE Create Connection (0x08\|0x000D)`, a BLE HCI command name — not a byte-order hint. |
+| Byte order | **Big-endian**, standard Modbus: `reg = b[2i]<<8 \| b[2i+1]`. 32-bit values put the **high word at the lower address** (the register names say `_S32高16位` = "S32 high 16 bits"). |
+| Read function | The RTU client (`socket/modbus.rtuClient`) only implements **FC03 ReadHoldingRegisters**, FC06 and FC16. Nothing uses FC04. |
+| `/dev/ttymxc2` | The **`--mcu`** link to the housekeeping MCU ("sidecar"). The inverters are on the CH9344 USB-to-8×UART bridge (see Buses). |
+| SOC register | Not 0x3018 (that is the INVT **power on/off command/status** register). SOC comes from the battery BMS (see Battery) over CAN, or battery `emd` Modbus `0x102E`. |
+| Slave ids | INVT inverter slave = **1** (each inverter has its own UART). Emaldo `emd` battery slave = **2** (Modbus); our live packs are BAK on CAN. 247 does not appear anywhere. |
+| 0x3600 block | Belongs to the **INVT** inverter driver only (`invt.(*adaptation).RegisterStartAddress` = `0x3600`, `RegisterDataMaxLength` = `0x61`). HiSolar / HiSolar-40 start at **4000 (0xFA0)**, which is where `invS.GetData 4090/4062` comes from. BST starts at `0xFE06`. |
 
 ## Buses (CLI flag defaults from `configs/confparser.init`)
 
@@ -310,24 +299,22 @@ layout/pclntab).
       provisional mapping on the bench).
 - [x] MCU protocol: Bmtp framing, command set and response structs
       recovered; register bridge 0x1012 documented above; bench-validated
-      with `emulator/fake_mcu.py`. NOTE: `/dev/mcu1` is housekeeping only
-      (version/status/IO), so Bmtp-over-mcu1 was never the inverter path.
-      The inverter is Modbus RTU slave 1 on `/dev/ttyCH9344USB0/2/3`
-      (per PR #2, live-confirmed: the vendor app holds those ports). The
-      app's ttymxc2 Bmtp client was silent because the app is not using
-      it for inverter data on this unit.
+      with `emulator/fake_mcu.py`. `/dev/mcu1` is housekeeping only
+      (version/status/IO): the inverter is Modbus RTU slave 1 on
+      `/dev/ttyCH9344USB3/0/2`, not on the MCU link.
 - [~] SOC register: candidate byte 0x36 in the 0x0FA0 block, scale /10 —
-      still unconfirmed (live 0x1012 read unavailable). BMS SOC is now
-      available from CAN type 3; see below.
+      unconfirmed on live (the driver's live SOC comes from the BMS over
+      CAN type 3; see below).
 - [~] Slave ids: walk tooling done (`POST /api/v1/walk`, verified on the
-      bench). Live walk pending a working inverter transport.
+      bench). Inverter slave = 1, b-sensor slave = 1.
 - [x] BMS frame format: our packs are **BAK** (CAN type-7 TLV), decoded
       and live-validated; BST ASCII remains for other hardware.
 - [ ] RS485 vs plain UART on the service port (the dongle decides).
       Driver does `TIOCSRS485` best-effort with plain-UART fallback.
 - [x] CAN listener: passive SocketCAN + DIN page reassembly + BAK TLV
-      decode; `rust --can-probe` live-validated (3 packs, SOC/voltage/
-      current/temps).
+      decode; `emaldo-driver --can-probe` live-validated (3 packs,
+      SOC/voltage/current/temps), and the driver's active CAN BMS poller
+      (`hardware.can_poll`) reads SOC live.
 
 Serial settings: **9600 baud** for inverters, B-sensor and EV
 (`inverters.(*inverter).createSerial`, `ProvideHermes.func1`: `0x2580`),
@@ -335,10 +322,11 @@ with a 2 s read timeout. Several inverter types are supported, and the
 model is detected by reading INVT `0x3021` (`inverterutils.GetINVTHardwareVersion`,
 model strings `INVT10_1_0` / `INVT15_1_0`).
 
-### CAN (second control bus — not documented before)
+### CAN cabinet/BMS bus
 
-Besides Modbus RTU, the vendor firmware also drives a **CAN interface**. Static
-evidence from the same binary:
+Besides Modbus RTU the vendor firmware also drives a **CAN interface**
+(`can0`, 500 kbit): it is the battery cabinet↔BMS bus and the faster power
+setpoint/FCR path. Static evidence from the binary:
 
 | evidence | where |
 | --- | --- |
@@ -346,13 +334,11 @@ evidence from the same binary:
 | `socket.CanSetBaudRateSocket` (capability flag on the socket abstraction) | `hermes` socket layer |
 | config keys `can_restart_ms`, `can_check_interval` | `configs/confparser` struct tags |
 
-Interpretation (not yet verified on hardware): Modbus RTU carries the polled
-registers above, while CAN is used for the faster control paths — the
-FCR/mFRR balancing loop and battery power setpoints are the plausible users,
-since those strings sit next to `can0` handling in the binary.
-
-Not established: frame format, bitrate, node ids. That needs either a CAN
-capture from a live unit or disassembly of the `can0` call sites.
+Frame format is established: DIN pages carrying type-7 messages whose body
+is the BAK record stream (see "Battery BMS" and `emulator/README.md` "DIN CAN
+wire format"). The driver's passive listener (`--can-probe`,
+`hardware.can_listen`) and its active BMS poller (`hardware.can_poll`)
+decode this live. Modbus RTU carries the polled inverter registers above.
 
 ## INVT inverter — holding registers 0x3600–0x366B (FC03, slave 1)
 

@@ -1,163 +1,170 @@
-# emaldo-local — community firmware for the Emaldo Power Core IoT module
+# emaldo-local — community local operation for the Emaldo Power Core
 
-> **⚠ UNTESTED — DO NOT FLASH WHILE THE VENDOR IS ALIVE**
+The Emaldo **Power Core** is a home battery (i.MX6 ULL IoT module, Debian 11,
+vendor app v2.35.x, ~236 MiB RAM) whose IoT module normally depends on
+Emaldo's cloud for everything: telemetry, schedules, price optimisation, OTA.
+When the vendor cloud goes away (the company's bankruptcy is the working
+assumption), a stock unit becomes an unmanaged battery.
+
+This repository is a community effort to keep Power Core batteries **fully
+local**. It contains **two independent approaches** plus shared
+reverse-engineering and test bench tooling. They differ in what they keep and
+what they give up, and in how ready they are.
+
+> ## ⚠ Safety: do not flash while the vendor is alive
 >
-> This firmware is an early, **largely untested** skeleton. It has never
-> run on real hardware. Flashing it replaces the vendor's module app,
-> which is what keeps your battery registered with Emaldo's cloud —
-> including **grid-rewards programs that pay you** — so installing this
-> while Emaldo's servers still exist can cost you money and brick remote
-> manageability. It is built for the **post-bankruptcy world**: when the
-> vendor cloud is gone (or you have decided you no longer need it), this
-> is a path to a fully local battery. Until then, use the
-> [ha-emaldo-local](https://github.com/johanneswilm/ha-emaldo-local)
-> takeover stack, which keeps the stock firmware and the vendor's view of
-> your battery intact. Rollback to the vendor binary is possible via the
-> update channel (see `docs/OTA.md` in the takeover repo), but only if
-> the update path still works — treat every flash as potentially
-> unrecoverable without hardware access (UART console).
+> Neither approach *requires* flashing the vendor firmware, but both change
+> how the module reaches its cloud. While Emaldo's servers still exist, the
+> vendor app keeps your battery registered — including **grid-rewards / FCR
+> programmes that may pay you** — and keeps OTA working. Changing its
+> endpoints can cost you that and can brick remote manageability.
+>
+> - Approach **A (driver)** runs *alongside* the vendor app in read-only mode
+>   (no bus writes, passive CAN). That is safe to run today.
+> - Approach **B (bridge)** deliberately redirects the vendor app's cloud; it
+>   is reversible (`mode vendor`) but currently **does not work** (see below).
+>
+> Treat any change to the vendor app's environment as potentially
+> unrecoverable without hardware access (UART console). The original vendor
+> IoT firmware (`6102ea751f963eea.bin`, md5 `94d351b8f1857c79cd710f2f95347cf2`,
+> ~31 MB, *not* in this repo) is your rollback image — back it up offline.
+> License: GPL-3.0-only (see `LICENSE`).
 
-License: GPL-3.0-only (see LICENSE) - chosen specifically for its anti-tivoization clause: anyone shipping device firmware derived from this code must provide the Installation Information needed to run modified firmware on the device. This project exists to keep Emaldo batteries open, not to enable locking them down further.
+## Credits
 
-A free replacement for the vendor cloud binary on the Emaldo "Power Core"
-home battery's IoT module: fully local operation, a web UI to configure
-your own MQTT broker (URL + credentials) and other essentials, live data
-view, REST API, and Home Assistant MQTT discovery. No vendor servers
-required for anything.
+This project builds on the community's Home Assistant work — notably
+[pylenius/ha-emaldo](https://github.com/pylenius/ha-emaldo) and
+[wertigpar/ha-battery-optimizer](https://github.com/wertigpar/ha-battery-optimizer).
+See [CREDITS.md](CREDITS.md).
 
-Design goals and reverse-engineering background:
-[ha-emaldo-local docs](https://github.com/johanneswilm/ha-emaldo-local)
-(`docs/OTA.md`, `docs/PROTOCOL.md`, `docs/APP_COMMANDS.md`,
-`docs/CUSTOM_FIRMWARE.md`). This repo is the firmware half of that
-project.
+## Access & isolation
 
-* [`docs/IMPLEMENTATION_MAP.md`](docs/IMPLEMENTATION_MAP.md) —
-  subsystem-by-subsystem walkthrough of the official firmware: what we
-  port, what we replace, what we deliberately skip, and in which phase.
+How to get **SSH access** to a Power Core module, **persist** it, and **shut
+the vendor out** (cloud + its remote-access tunnel) — plus the safety and
+reversal steps — is in [`docs/ACCESS.md`](docs/ACCESS.md). Read it before
+changing anything on a live box.
 
-## Status: FW-1 (read-only telemetry skeleton)
+## The two approaches
 
-- [x] Config store (`/root/config.toml`, atomic writes + backup)
-- [x] Web UI + REST API: first-boot setup wizard, settings, live state
-      (SSE), command endpoint (validated whitelist), event log
-- [x] Minimal dependency-free MQTT 3.1.1 client (TLS/plain, QoS 0/1,
-      auto-reconnect) + HA discovery publisher
-- [x] Modbus RTU polling skeleton for the inverter register block
-      (see `docs/REGISTERS.md` — offsets need hardware validation)
-- [x] Signed self-update checker skeleton (ed25519 manifests)
-- [x] E-ink status display (direct /dev/fb0, shadow-buffer diffing,
-      battery-glyph SOC, 15 s cadence; polarity/flush tuning on-device)
-- [x] Simulated-battery mode (`hardware.simulate`, PV curve + SOC drift)
-      for demos/development without hardware
-- [x] OTA manifest signing tool (`cmd/manifest-tool`, ed25519)
-- [ ] BLE provisioning channel (FW-1.1)
-- [ ] Control: charge limits, modes, schedules (FW-2)
-- [ ] LCD/sound, cluster, FCR hooks (FW-3)
+### A. Replacement driver — [`driver/`](driver/README.md)
 
-## Build
+A standalone Rust binary (`emaldo-driver`) that becomes the hardware
+controller itself: it talks the inverter over Modbus, the batteries over CAN,
+the b-sensor grid meter, reads Nordpool prices + an Open-Meteo PV forecast,
+runs an on-box planner/optimizer, and serves a PWA web UI + MQTT/HA
+discovery. No vendor cloud, and the vendor app is left untouched (in
+read-only mode it runs next to it).
 
-Pure Go, stdlib only (no cgo, no modules beyond `go.mod`):
+**Status (2026-11-25):** builds as a static ARMv7 binary; 71 unit tests; runs
+on the live unit **read-only** (bus disabled, writes dry-run, passive/active
+CAN), serving the PWA UI on `:8443`. Live-validated: active CAN BMS polling
+(SOC), b-sensor grid meter + derived load, Nordpool prices, Open-Meteo PV
+forecast, on-box planner (mode `optimize`), MQTT/HA discovery (code; broker
+off by default), gated FC16 setpoint writes (bench + one-off live write
+proven — **the service-path write currently times out: open bug**). A 30-min
+live soak completed and auto-reverted. E-ink refresh fix (`fb msync`) landed
+this session, needs a live check. See [`docs/ISSUES.md`](docs/ISSUES.md).
 
-```sh
-./scripts/build.sh          # builds bin/emaldo-local-linux-arm (the module)
-```
+### B. Bridge / takeover stack — [`bridge/`](bridge/README.md)
 
-Requires Go 1.24+. The ARM EABI5 static binary drops into the same OTA
-mechanism as the stock firmware (see the takeover docs: serve a manifest
-with a version bump and the new md5).
+A Rust workspace that keeps the **stock vendor app running** but intercepts
+its cloud: a managed `/etc/hosts` block, egress `prohibit` routes, a local
+relay on `:443`/`:1050`/`:1051`, and a control socket on `:1052`. The app
+keeps thinking it is online; the box runs locally and cellular can be
+closed.
 
-## Run (development)
+**Status (2026-11-25): does NOT currently work — a bug is under active
+investigation.** The protocol is understood and the stack installs and runs,
+but it is not usable on a live battery yet. See
+[`bridge/OPERATIONS.md`](bridge/OPERATIONS.md).
 
-```sh
-go run ./cmd/emaldo-local -config ./dev-config.toml
-# open http://localhost:8080 (set listen_addr in dev-config.toml first)
-```
+### Comparison
 
-On first boot the wizard asks for an admin password and your MQTT broker
-(`mqtt://host:1883` or `mqtts://host:8883` + credentials). Everything is
-reconfigurable in the Settings card. The API needs the bearer token from
-`POST /api/v1/login` (or the session cookie).
+| | **A. Replacement driver** (`driver/`) | **B. Bridge / takeover** (`bridge/`) |
+|---|---|---|
+| What runs | our Rust binary controls the buses | the **stock vendor app** stays alive; we redirect its cloud |
+| Works today | read-only + planner; **writes = open bug** | **no — bug under investigation** |
+| Vendor cloud reachability | not needed | redirected to the box (reversible with `mode vendor`) |
+| Grid-rewards / FCR | not implemented (planner is price/cost oriented) | keeps the vendor app's own FCR/rewards path intact |
+| E-ink display | we render `/dev/fb0` (fix landed, live check pending) | vendor app drives it unchanged |
+| EV / accessories | not yet (slave-walk tooling only) | vendor app handles them unchanged |
+| OTA of the app | N/A (we own the binary) | vendor OTA path preserved (manifest can be repointed) |
+| Depends on vendor app | no | **yes** — if the app stops, the bridge has nothing to relay |
+| MQTT / Home Assistant | built-in publisher + HA discovery | no publisher; HA is repointed via the bridge CA |
+| Config surface | `emaldo-driver.toml`, web UI | `config.json`, operator UI on `:4443` |
+| Risk to the vendor setup | low in read-only mode | higher (rewrites hosts/routes/resolver; reversible) |
+| Maturity | read-only validated live, writes in progress | protocol understood, end-to-end not working |
 
-## Original vendor firmware
+### Which to pick
 
-**Not included in this repository** (it is the vendor's copyrighted
-binary, ~31 MB). While Emaldo's file server is still up, the v2.35.3 IoT
-artifact can be downloaded from the vendor CDN:
+- **Want a local dashboard / telemetry / planner today, without disturbing
+  the vendor setup:** use **A** in read-only mode (`bus_enabled = false`).
+- **Want the vendor app's own behaviour (grid rewards, EV, e-ink, OTA)
+  preserved after the cloud is gone:** **B** is the design for that, but it
+  is currently broken — wait for the fix, or help debug it.
+- The two are **independent**; they are not designed to run against the same
+  bus at the same time (Modbus and the MCU link are single-master). The
+  driver's read-only mode coexists with the vendor app; a full driver
+  takeover and the bridge are mutually exclusive.
 
-    https://files.oms.emaldo.com/new_firmware/iot/6102ea751f963eea.bin
-
-Verify its integrity (md5 must be `94d351b8f1857c79cd710f2f95347cf2`).
-Keep a copy — it is your rollback image and the baseline for building
-modified stock images (see `docs/OTA.md` in the takeover repo). Once the
-vendor's servers go dark, copies held by the community are the only
-source, so back it up offline.
-
-## Install on the device (summary)
-
-1. Redirect the module's API traffic once using the stock firmware's BLE
-   commands (`set_http_host` / `set_data_host` — documented in the
-   protocol docs; the fixed BLE key is published there).
-2. Host an update manifest offering `emaldo-local` with a version above
-   the running one (the md5 must differ from stock bytes or the module
-   skips the update — it compares against its own binary).
-3. Keep a stock-binary manifest on standby for rollback.
-
-## Layout
+## Repository layout
 
 ```
-cmd/emaldo-local    entry point, service wiring
-internal/config     TOML-subset config, atomic save, secret masking
-internal/web        REST API + embedded single-page UI (go:embed)
-internal/mqtt       minimal MQTT client + HA discovery
-internal/hermes     Modbus RTU serial reader + register map (FW-1)
-internal/telemetry  state store, event ring, SSE fan-out
-internal/bled       BLE provisioning (placeholder, FW-1.1)
-internal/ota        signed self-update checker (skeleton)
-docs/REGISTERS.md   serial findings + validation checklist
-scripts/build.sh    cross-compile for linux/arm
+README.md            this file
+driver/              Approach A: replacement driver (own Cargo workspace)
+  README.md  src/  static/  Cargo.toml  build.rs
+bridge/              Approach B: takeover bridge (Cargo workspace root)
+  README.md  OPERATIONS.md  crates/  deploy/  Cargo.toml  .cargo/
+docs/                shared docs: registers/protocol, RE notes, emulator bench ref
+  REGISTERS.md  PROTOCOL.md  API.md  FINDINGS.md  EMULATOR_BENCH.md
+  EMALDO_STATE_GATE.md  BLE-GATT.md  VENDOR-CONFIG.md  ISSUES.md
+emulator/            shared QEMU bench (runs the stock firmware + fake cloud)
+scripts/             shared RE + bench helpers (pclntab, ghidra, e2e relay, …)
+emaldo_re/           shared Python E2E/RE library
+mitm/  learn/        shared MITM/learning helpers
+internal/  cmd/  go.mod  scripts/build.sh
+                     Go legacy skeleton (FW-1 replacement firmware) — superseded
+CHANGES.md           dated changelog
+LICENSE              GPL-3.0-only
 ```
 
-## Security notes
+## Shared tooling
 
-- Admin password: salted SHA-256 (upgrade to argon2id before FW-1 GA).
-- Secrets are masked in the API (all-stars round-trips "keep existing").
-- MQTT TLS: set `mqtts://` — certificate validation uses the system roots
-  on the module (Debian rootfs).
-- Setup endpoint only exists until a password is set; nothing else is
-  open without auth once configured.
+- **Emulator bench** — [`emulator/README.md`](emulator/README.md) +
+  [`docs/EMULATOR_BENCH.md`](docs/EMULATOR_BENCH.md): a QEMU ARM VM that boots
+  the stock firmware against a fake cloud (DNS/DoH/API/E2E relay/BLE), used by
+  both approaches to test protocol work without hardware.
+- **Reverse-engineering notes** — `docs/REGISTERS.md` (Modbus/CAN/MCU register
+  and frame maps), `docs/PROTOCOL.md` (E2E/MSCT wire format),
+  `docs/API.md` (vendor REST), `docs/FINDINGS.md` (RE findings),
+  `docs/BLE-GATT.md`, `docs/VENDOR-CONFIG.md`, `docs/EMALDO_STATE_GATE.md`.
+- **Tooling** — `scripts/` (pclntab/Ghidra/callgraph, e2e relay, ARP relay),
+  `emaldo_re/` (Python E2E client + crypto), `mitm/`, `learn/`.
+- Firmware RE artifacts live **outside** this repo at
+  `~/src/homeassistant/emaldo-capture/firmware`.
 
-## Contributing
+## Go legacy skeleton (repo root `internal/`, `cmd/`, `go.mod`)
 
-The highest-value contributions right now: (1) validate the register map
-against real hardware (`docs/REGISTERS.md` checklist), (2) the BLE
-provisioning channel, (3) FW-2 control paths. Open issues/PRs against
-[this repo](https://github.com/johanneswilm/emaldo-local).
+The repo root still carries the original **FW-1** Go skeleton: a
+replacement module app (`cmd/emaldo-local` + `internal/{config,web,mqtt,
+hermes,telemetry,bled,ota}`) with a `manifest-tool`. It is **superseded** by
+the Rust driver (`driver/`) for the read/control path and by the bridge for
+the takeover path. It is kept because it is the readable reference for the
+MQTT/HA payload layout and the signed-OTA manifest tooling; `scripts/build.sh`
+still cross-compiles it (`go build ./cmd/emaldo-local`). It is not the
+recommended path.
 
-## What may live in this repository
+## What belongs in this repository
 
-Product-wide protocol constants belong here. The vendor's DinSafer `AppID` and
-`AppSecret` used by the REST envelope are identical in every install: the pair
-ships inside the vendor's own app (`com.hps.emaldo.apk` ->
-`DinSaferApplication.java`, `withAppID(...).withAppSecret(...)`), and every
-codec and decoder in this tree needs them. They are protocol facts, not secrets
-of anyone's battery.
+Product-wide protocol constants (e.g. the vendor's public `AppID`/`AppSecret`
+used by the REST envelope — identical in every install) are fine. Anything
+specific to one installation — the E2E identity (`end_id`, `end_secret`,
+`chat_secret`, `group_id`), `device_id`/`home_id`, LAN/BLE MACs, home
+addresses — does **not** belong in git. On a battery they live in
+`/root/emaldo-local/state/` (0600); on a workstation under
+`~/.config/emaldo-local/` (`EMALDO_LEARN_CREDS`). Test fixtures use
+documentation address ranges only.
 
-Material that belongs to a single installation does not belong in git:
-
-- the vendor-issued E2E identity (`end_id`, `end_secret`, `chat_secret`,
-  `group_id`) and the registration token;
-- this unit's `device_id` / `home_id`, its LAN and BLE MAC addresses;
-- the home's LAN and public addresses.
-
-Those live where they are used: on the battery, 0600 files under
-`/root/emaldo-local/state/` plus installation-specific lists in
-`/root/emaldo-local/config.json`; on a workstation, `~/.config/emaldo-local/`
-(`EMALDO_LEARN_CREDS` points the capture tools at another path), which is also
-where `learn/learn_server.py` reads the ids for its fake answers. Test fixtures
-use documentation address ranges, not the addresses of a real site.
-
-Before pushing this history anywhere: commits before the 2026-11-25 cleanup
-contain ids of one real installation (`learn/learn_server.py`,
-`scripts/README.md`, `scripts/arp_relay.py`, `scripts/run_stack.sh`), and the
-GitHub remote is public. The rewrite has to happen before that history is
-published; nothing new has been pushed since.
+Commit history before the 2026-11-25 cleanup contained ids of one real
+installation (`learn/learn_server.py`, `scripts/`, `emaldo_re/`); a history
+rewrite is required before publishing that history to the public remote.
