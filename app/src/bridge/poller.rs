@@ -12,12 +12,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::CloudMode;
-use crate::e2e;
-use crate::log::Level;
-use crate::mode;
-use crate::relay::Relay;
-use crate::state::Bridge;
+use crate::bridge::config::CloudMode;
+use crate::bridge::e2e;
+use crate::bridge::log::Level;
+use crate::bridge::mode;
+use crate::bridge::relay::Relay;
+use crate::bridge::state::Bridge;
 
 const TICK: Duration = Duration::from_secs(5);
 
@@ -74,7 +74,7 @@ fn run(bridge: Arc<Bridge>, relay: Arc<Relay>) {
             // the DHCP answer on its own cycle; the pin has to be back before
             // the app's next login attempt, so this is checked often.
             next_resolv = now + Duration::from_secs(2);
-            let pinned = crate::dns::resolver_status(&bridge)["pinned"]
+            let pinned = crate::bridge::dns::resolver_status(&bridge)["pinned"]
                 .as_bool()
                 .unwrap_or(false);
             if !pinned {

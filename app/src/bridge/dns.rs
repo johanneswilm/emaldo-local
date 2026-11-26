@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::config::write_atomic;
-use crate::config::Config;
-use crate::log::Level;
-use crate::state::Bridge;
+use crate::bridge::config::write_atomic;
+use crate::bridge::config::Config;
+use crate::bridge::log::Level;
+use crate::bridge::state::Bridge;
 
 const HEADER: usize = 12;
 

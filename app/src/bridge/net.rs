@@ -101,7 +101,7 @@ pub fn serve_tls(
     port: u16,
     cfg: Arc<ServerConfig>,
     handler: Arc<dyn Handler>,
-    log: Arc<crate::log::Log>,
+    log: Arc<crate::bridge::log::Log>,
 ) -> std::io::Result<u16> {
     let listener = TcpListener::bind((bind, port))?;
     let bound = listener.local_addr()?.port();
@@ -114,11 +114,11 @@ pub fn serve_tls(
                     let log = log.clone();
                     thread::spawn(move || {
                         if let Err(e) = serve_conn(s, cfg, handler) {
-                            log.write(crate::log::Level::Debug, "http", format!("conn: {e}"));
+                            log.write(crate::bridge::log::Level::Debug, "http", format!("conn: {e}"));
                         }
                     });
                 }
-                Err(e) => log.write(crate::log::Level::Warn, "http", format!("accept: {e}")),
+                Err(e) => log.write(crate::bridge::log::Level::Warn, "http", format!("accept: {e}")),
             }
         }
     });
@@ -397,11 +397,11 @@ mod tests {
         }
     }
 
-    fn test_certs() -> crate::tls::Certs {
+    fn test_certs() -> crate::bridge::tls::Certs {
         let dir = std::env::temp_dir().join(format!("el-http-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let cfg = crate::config::Config::default();
-        crate::tls::ensure(
+        let cfg = crate::bridge::config::Config::default();
+        crate::bridge::tls::ensure(
             &cfg,
             &dir,
             &["localhost".to_string()],
@@ -414,11 +414,11 @@ mod tests {
     fn serves_http_over_tls_with_keepalive() {
         rustls_rustcrypto::provider().install_default().ok();
         let certs = test_certs();
-        let sc = crate::tls::server_config(&certs).unwrap();
-        let log = Arc::new(crate::log::Log::new(
+        let sc = crate::bridge::tls::server_config(&certs).unwrap();
+        let log = Arc::new(crate::bridge::log::Log::new(
             "/tmp",
             "httptest",
-            crate::log::Level::Error,
+            crate::bridge::log::Level::Error,
             64 * 1024,
             2,
         ));

@@ -18,12 +18,12 @@ use emaldo_proto::cmds;
 use emaldo_proto::envelope;
 use emaldo_proto::msct::{self, Creds, Frame};
 
-use crate::api::Api;
-use crate::config::{Config, Identity, Store};
-use crate::mode;
-use crate::net::{Handler, Req, Resp};
-use crate::state::Bridge;
-use crate::ui::Ui;
+use crate::bridge::api::Api;
+use crate::bridge::config::{Config, Identity, Store};
+use crate::bridge::mode;
+use crate::bridge::net::{Handler, Req, Resp};
+use crate::bridge::state::Bridge;
+use crate::bridge::ui::Ui;
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -154,7 +154,7 @@ fn body_json(v: &Value) -> Vec<u8> {
 #[test]
 fn relay_stores_the_module_schedule_and_answers_reads() {
     let (_dir, bridge) = fixture("override");
-    let relay = crate::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+    let relay = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
     let id = bridge.ident.get();
     let target: SocketAddr = format!("127.0.0.1:{}", relay.port).parse().unwrap();
 
@@ -217,7 +217,7 @@ fn relay_stores_the_module_schedule_and_answers_reads() {
 #[test]
 fn relay_routes_a_command_to_the_module_and_the_answer_back() {
     let (_dir, bridge) = fixture("route");
-    let relay = crate::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+    let relay = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
     let id = bridge.ident.get();
     let target: SocketAddr = format!("127.0.0.1:{}", relay.port).parse().unwrap();
 
@@ -275,7 +275,7 @@ fn relay_routes_a_command_to_the_module_and_the_answer_back() {
         })
     };
 
-    let got = crate::e2e::command(&bridge, &relay, cmds::C_BATTERY_INFO, &[0x00])
+    let got = crate::bridge::e2e::command(&bridge, &relay, cmds::C_BATTERY_INFO, &[0x00])
         .expect("command round trip failed");
     assert_eq!(got, payload, "payload came back altered");
     responder.join().expect("module responder failed its assertions");
@@ -295,7 +295,7 @@ fn relay_routes_a_command_to_the_module_and_the_answer_back() {
 #[test]
 fn relay_answers_an_app_command_with_no_module_online() {
     let (_dir, bridge) = fixture("noapp");
-    let relay = crate::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+    let relay = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
     let id = bridge.ident.get();
     let target: SocketAddr = format!("127.0.0.1:{}", relay.port).parse().unwrap();
 
@@ -324,11 +324,11 @@ fn relay_answers_an_app_command_with_no_module_online() {
 #[test]
 fn relay_persists_the_override_across_restart() {
     let (dir, bridge) = fixture("persist");
-    let relay = crate::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+    let relay = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
     let id = bridge.ident.get();
     let dh = cmds::slot_action("discharge-high", 30, 80).unwrap();
     let c100 = cmds::slot_action("charge-100", 30, 80).unwrap();
-    let mut ov = crate::relay::Override {
+    let mut ov = crate::bridge::relay::Override {
         high: 80,
         low: 30,
         enable: 1,
@@ -340,7 +340,7 @@ fn relay_persists_the_override_across_restart() {
     relay.put_override(&id.group_id, ov);
     relay.stop();
 
-    let relay2 = crate::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+    let relay2 = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
     let back = relay2
         .override_for_group(&id.group_id)
         .expect("override lost across restart");
@@ -563,13 +563,13 @@ fn session_cookie(r: &Resp) -> Option<String> {
 #[test]
 fn ui_schedule_write_maps_to_the_module_command() {
     let (_dir, bridge) = fixture("schedule");
-    let relay = crate::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+    let relay = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
     let ui = Ui::new(bridge.clone());
     let lan: SocketAddr = "127.0.0.1:40003".parse().unwrap();
 
     // Sign in through the config-installed user (no setup round trip needed).
-    let users: BTreeMap<String, crate::config::User> =
-        [("op".to_string(), crate::config::new_user("correct battery horse"))]
+    let users: BTreeMap<String, crate::bridge::config::User> =
+        [("op".to_string(), crate::bridge::config::new_user("correct battery horse"))]
             .into_iter()
             .collect();
     bridge.cfg.update(|c| c.users = users).unwrap();
@@ -776,8 +776,8 @@ fn ui_flag_accepts_bools_and_numbers() {
     ];
     for (body, want) in cases {
         let v: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(crate::ui::Ui::flag(&v, "on"), want, "{body}");
+        assert_eq!(crate::bridge::ui::Ui::flag(&v, "on"), want, "{body}");
     }
     let v = json!({"on": true});
-    assert!(!crate::ui::Ui::flag(&v, "expand"), "missing key must be false");
+    assert!(!crate::bridge::ui::Ui::flag(&v, "expand"), "missing key must be false");
 }

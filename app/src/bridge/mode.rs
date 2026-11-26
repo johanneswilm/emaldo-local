@@ -23,9 +23,9 @@ use serde_json::{json, Value};
 use emaldo_proto::codec::unix_s;
 use emaldo_proto::params::VENDOR_API_HOSTS;
 
-use crate::config::{write_atomic, CloudMode};
-use crate::log::Level;
-use crate::state::Bridge;
+use crate::bridge::config::{write_atomic, CloudMode};
+use crate::bridge::log::Level;
+use crate::bridge::state::Bridge;
 
 /// Delimiters of the block this module owns inside `/etc/hosts`.
 const HOSTS_BEGIN: &str = "# >>> emaldo-local (managed) >>>";
@@ -122,7 +122,7 @@ pub fn status(bridge: &Bridge) -> Value {
         "bridge_cloud_mode": cfg.mode,
         "lte": lte_status(bridge),
         "egress": egress_status(bridge),
-        "resolver": crate::dns::resolver_status(bridge),
+        "resolver": crate::bridge::dns::resolver_status(bridge),
         "app_config": app_config_status(bridge),
         "app_last_seen": bridge.app_seen.load(std::sync::atomic::Ordering::Relaxed),
     }
@@ -259,13 +259,13 @@ pub fn resolver_down(bridge: &Arc<Bridge>) -> Value {
     }
     let (host, _) = bridge.relay_hosts();
     let ip = host.split(':').next().unwrap_or("").to_string();
-    let front = match crate::dns::start(bridge.clone(), crate::dns::pinned(&cfg, &ip)) {
+    let front = match crate::bridge::dns::start(bridge.clone(), crate::bridge::dns::pinned(&cfg, &ip)) {
         Ok(addr) => json!({"listening": addr.to_string()}),
         Err(e) => {
             // Bind refused: either the front from an earlier start owns the
             // port, or something else does. Only pin when the port answers for
             // a vendor name, otherwise the box would be left without DNS.
-            match crate::dns::probe(&cfg, cfg.dns_hosts.first().map(|s| s.as_str()).unwrap_or("")) {
+            match crate::bridge::dns::probe(&cfg, cfg.dns_hosts.first().map(|s| s.as_str()).unwrap_or("")) {
                 Some(true) => json!({"listening": "already running"}),
                 Some(false) => {
                     bridge.note(Level::Warn, "dns", format!("resolver port busy and not answering ({e}): resolver left as is"));
@@ -275,13 +275,13 @@ pub fn resolver_down(bridge: &Arc<Bridge>) -> Value {
             }
         }
     };
-    let file = crate::dns::use_local_resolver(bridge, &ip);
+    let file = crate::bridge::dns::use_local_resolver(bridge, &ip);
     json!({"front": front, "resolv": file})
 }
 
 /// Put the box back on its original resolver.
 pub fn resolver_up(bridge: &Bridge) -> Value {
-    crate::dns::restore_resolver(bridge)
+    crate::bridge::dns::restore_resolver(bridge)
 }
 
 // ---------------------------------------------------------------------------

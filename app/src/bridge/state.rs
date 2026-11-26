@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use emaldo_proto::cmds::PowerFlow;
 use emaldo_proto::codec::unix_s;
 
-use crate::config::{CloudMode, Config, Identity, Store};
-use crate::log::{Level, Log};
+use crate::bridge::config::{CloudMode, Config, Identity, Store};
+use crate::bridge::log::{Level, Log};
 
 /// One cached telemetry value with the time it was last seen.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -126,7 +126,7 @@ pub struct Bridge {
     pub day: Mutex<Day>,
     /// Relay handle, installed by `relay::start` so the REST/UI side can send
     /// commands through the relay. Weak: the relay owns an Arc to this bridge.
-    pub relay: RwLock<Option<std::sync::Weak<crate::relay::Relay>>>,
+    pub relay: RwLock<Option<std::sync::Weak<crate::bridge::relay::Relay>>>,
     /// Certificate identity for the UI (subject + SHA-256 of the leaf).
     pub cert_info: RwLock<Value>,
     /// Login/session bookkeeping for HA-style API sessions.
@@ -180,7 +180,7 @@ impl Bridge {
             .relay_advertise_host
             .clone()
             .filter(|h| !h.is_empty())
-            .or_else(|| crate::tls::primary_ip().map(|ip| ip.to_string()))
+            .or_else(|| crate::bridge::tls::primary_ip().map(|ip| ip.to_string()))
             .unwrap_or_else(|| c.api_bind.clone());
         (format!("{host}:{}", c.relay_port), format!("{host}:{}", c.util_port))
     }
@@ -350,7 +350,7 @@ impl Bridge {
 
     /// Live relay diagnostics for the UI (`null` before the relay starts).
     pub fn relay_status(&self) -> Value {
-        match crate::relay::relay_of(self) {
+        match crate::bridge::relay::relay_of(self) {
             Some(r) => r.state(),
             None => Value::Null,
         }

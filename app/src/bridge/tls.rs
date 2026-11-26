@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::config::Config;
+use crate::bridge::config::Config;
 
 pub struct Certs {
     pub ca_pem: String,
@@ -170,9 +170,9 @@ pub fn ensure(
         (leaf_pem_path.clone(), certs.cert_pem.clone()),
         (leaf_key_path.clone(), certs.key_pem.clone()),
     ] {
-        crate::config::write_atomic(&p, c.as_bytes()).map_err(|e| e.to_string())?;
+        crate::bridge::config::write_atomic(&p, c.as_bytes()).map_err(|e| e.to_string())?;
     }
-    crate::config::write_atomic(
+    crate::bridge::config::write_atomic(
         &names_sidecar(state_dir),
         serde_json::to_vec(&Issued {
             names: want,

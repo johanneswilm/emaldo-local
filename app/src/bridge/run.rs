@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Johannes Wilm
-//! `emaldo-local` — the on-battery bridge. See `lib.rs` for the module map.
+//! `emaldo-local bridge` — the on-battery bridge. See `bridge/mod.rs` for the
+//! module map.
 //!
 //! Startup order (the systemd unit orders this service *before*
 //! `monitor.service`, so the front is listening before the vendor app dials):
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use emaldo_bridge::{api, config, log, mode, net, poller, relay, state, tls, ui};
+use crate::bridge::{api, config, log, mode, net, poller, relay, state, tls, ui};
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -55,8 +56,8 @@ options:
   --help              this text
 ";
 
-fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub fn cli(argv: &[String]) -> std::process::ExitCode {
+    let args: Vec<String> = argv.to_vec();
     let mut config_path = std::env::var("EMALDO_LOCAL_CONFIG")
         .unwrap_or_else(|_| "/root/emaldo-local/config.json".to_string());
     let mut state_override: Option<String> = None;
@@ -383,7 +384,7 @@ fn run(config_path: &Path, state_override: Option<&str>) -> std::process::ExitCo
         "ca": boot.state_dir.join("ca.pem").display().to_string(),
         "identity_device": id.device_id,
     });
-    let _ = emaldo_bridge::config::write_atomic(
+    let _ = crate::bridge::config::write_atomic(
         &boot.state_dir.join("running.json"),
         serde_json::to_vec_pretty(&summary).unwrap_or_default().as_slice(),
     );

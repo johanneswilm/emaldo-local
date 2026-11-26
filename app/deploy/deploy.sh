@@ -1,7 +1,7 @@
 #!/bin/sh
-# Cross-build and push the bridge to a target box.
+# Cross-build and push `emaldo-local` to a target box.
 #
-#   bridge/deploy/deploy.sh [ssh-target] [--install] [--identity]
+#   app/deploy/deploy.sh [ssh-target] [--install] [--identity]
 #
 #   ssh-target  default: emaldo-battery (also works against the emulator:
 #               ssh -p 10022 root@127.0.0.1 does not use a host key alias, so
@@ -26,7 +26,7 @@ TARGET=${TARGET:-emaldo-battery}
 
 cd "$(dirname "$0")/.."
 cargo build --release --target armv7-unknown-linux-gnueabihf
-BIN=target/armv7-unknown-linux-gnueabihf/release/emaldo-bridge
+BIN=target/armv7-unknown-linux-gnueabihf/release/emaldo-local
 
 ssh "$TARGET" 'mkdir -p /root/emaldo-local/state /root/emaldo-local/logs /root/emaldo-local/backups'
 scp -q "$BIN" "$TARGET:/root/emaldo-local/emaldo-local.new"

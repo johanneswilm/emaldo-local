@@ -13,6 +13,7 @@
 
 #[allow(dead_code)] // exercised once the BMS frame layout is captured (docs/REGISTERS.md)
 mod bms;
+mod bridge;
 mod bus;
 mod can;
 mod can_poll;
@@ -78,7 +79,46 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Which role the argv selects. The bridge keeps its own command words (they
+/// are what the existing systemd unit and the operator docs already use), so
+/// the unified binary recognises them and hands the whole command line over.
+enum Role {
+    Bridge,
+    Driver,
+}
+
+const BRIDGE_COMMANDS: [&str; 7] = [
+    "bridge",
+    "run",
+    "mode",
+    "certs",
+    "hash-password",
+    "config",
+    "lte",
+];
+
+fn role_of(argv: &[String]) -> Role {
+    match argv.first().map(String::as_str) {
+        Some("driver") => Role::Driver,
+        Some(w) if BRIDGE_COMMANDS.contains(&w) => Role::Bridge,
+        _ => Role::Driver,
+    }
+}
+
 fn main() {
+    // Dispatch before any TLS provider is installed: each role installs the
+    // crypto provider it is built and tested with.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Role::Bridge = role_of(&argv) {
+        let rest = if argv.first().map(String::as_str) == Some("bridge") {
+            &argv[1..]
+        } else {
+            &argv[..]
+        };
+        let code = bridge::run::cli(rest);
+        std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
+    }
+
     tls::init();
 
     // One config file for both roles; the driver-era path is still honoured so
@@ -112,7 +152,8 @@ fn main() {
     let mut write_probe: Option<i32> = None;
     let mut switches_probe = false;
     let args: Vec<String> = std::env::args().collect();
-    let mut i = 1;
+    // `emaldo-local driver …` is equivalent to the bare driver invocation.
+    let mut i = if args.get(1).map(String::as_str) == Some("driver") { 2 } else { 1 };
     while i < args.len() {
         match args[i].as_str() {
             "--config" => {

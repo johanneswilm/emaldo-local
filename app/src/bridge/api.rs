@@ -28,10 +28,10 @@ use emaldo_proto::codec::{rand_alnum, rand_hex, unix_ms, unix_s};
 use emaldo_proto::envelope;
 use emaldo_proto::params::*;
 
-use crate::config::CloudMode;
-use crate::log::Level;
-use crate::net::{Handler, Req, Resp};
-use crate::state::Bridge;
+use crate::bridge::config::CloudMode;
+use crate::bridge::log::Level;
+use crate::bridge::net::{Handler, Req, Resp};
+use crate::bridge::state::Bridge;
 
 pub struct Api {
     pub bridge: Arc<Bridge>,
@@ -87,7 +87,7 @@ impl Handler for Api {
 
         // Passthrough: hand the caller exactly what the vendor would say.
         if self.bridge.mode() == CloudMode::Passthrough {
-            if let Some(raw) = crate::vendor::passthrough(&self.bridge, &path, &req.body) {
+            if let Some(raw) = crate::bridge::vendor::passthrough(&self.bridge, &path, &req.body) {
                 return Resp::bytes("application/json", raw);
             }
             self.bridge.log.write(
@@ -150,7 +150,7 @@ impl Api {
         }
         if p.contains("iot-online") {
             // Keep the beacon so bridge mode can replay it to the vendor.
-            crate::vendor::save_beacon(&self.bridge, path, body);
+            crate::bridge::vendor::save_beacon(&self.bridge, path, body);
             return Answer::Result(json!({"gmtime": gmtime_ns()}));
         }
         if p.contains("ver-url") || p.contains("get-version") || p.contains("ota") {
@@ -303,7 +303,7 @@ pub fn rotate_chat(bridge: &Arc<Bridge>) -> (String, bool) {
         } else {
             (id.chat_secret.clone(), false)
         };
-        if let Some(relay) = crate::relay::relay_of(bridge) {
+        if let Some(relay) = crate::bridge::relay::relay_of(bridge) {
             let id = bridge.ident.get();
             relay.register_chat(&id.group_id, &chat);
             relay.register_chat(&id.home_group_id, &chat);

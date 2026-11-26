@@ -10,15 +10,20 @@ license = "GPL-3.0-only"
 description = "Lean Rust driver for the Emaldo Power Core 2.0 module. Phase 1: read-only telemetry, display, web UI, MQTT/HA."
 
 [dependencies]
+emaldo-proto = { path = "../bridge/crates/emaldo-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
+rustls-rustcrypto = "0.1.0-pre.0"
 rcgen = "0.13"
 webpki-roots = "0.26"
 ring = "0.17"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+time = { version = "0.3", features = ["local-offset", "formatting", "parsing"] }
 
 [profile.release]
 opt-level = "z"

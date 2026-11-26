@@ -37,9 +37,9 @@ use emaldo_proto::codec::{aes_cbc_decrypt, unix_s};
 use emaldo_proto::cmds;
 use emaldo_proto::msct::{self, AckStyle, Frame};
 
-use crate::config::write_atomic;
-use crate::log::Level;
-use crate::state::Bridge;
+use crate::bridge::config::write_atomic;
+use crate::bridge::log::Level;
+use crate::bridge::state::Bridge;
 
 const SESSION_TTL: u64 = 45;
 /// How long a msgid stays routable for the reply.
@@ -273,7 +273,7 @@ impl Relay {
             .map(|(g, o)| (g.clone(), hex(&o.blob())))
             .collect();
         if let Ok(b) = serde_json::to_vec_pretty(&map) {
-            if let Err(e) = write_atomic(&crate::state::override_path(&self.bridge.state_dir), &b) {
+            if let Err(e) = write_atomic(&crate::bridge::state::override_path(&self.bridge.state_dir), &b) {
                 self.bridge
                     .log
                     .write(Level::Warn, "relay", format!("override store: {e}"));
@@ -936,7 +936,7 @@ fn hex(b: &[u8]) -> String {
 
 fn load_overrides(dir: &std::path::Path) -> HashMap<String, Override> {
     let mut out = HashMap::new();
-    if let Ok(s) = std::fs::read_to_string(crate::state::override_path(dir)) {
+    if let Ok(s) = std::fs::read_to_string(crate::bridge::state::override_path(dir)) {
         if let Ok(map) = serde_json::from_str::<BTreeMap<String, String>>(&s) {
             for (g, h) in map {
                 if let Some(b) = emaldo_proto::codec::hex_decode(&h) {

@@ -27,10 +27,10 @@ use serde_json::{json, Value};
 use emaldo_proto::codec::rand_hex;
 use emaldo_proto::cmds;
 
-use crate::config::{new_user, verify_user, CloudMode};
-use crate::log::Level;
-use crate::net::{Handler, Req, Resp};
-use crate::state::Bridge;
+use crate::bridge::config::{new_user, verify_user, CloudMode};
+use crate::bridge::log::Level;
+use crate::bridge::net::{Handler, Req, Resp};
+use crate::bridge::state::Bridge;
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -75,7 +75,7 @@ impl Ui {
         if !cfg.lan_only {
             return true;
         }
-        crate::config::lan_allowed(&cfg.lan_cidrs, req.peer.ip())
+        crate::bridge::config::lan_allowed(&cfg.lan_cidrs, req.peer.ip())
     }
 
     fn cookie(&self, req: &Req) -> Option<(String, SessionView)> {
@@ -250,7 +250,7 @@ impl Handler for Ui {
             ("GET", "/api/status") => {
                 let mut snap = self.bridge.snapshot();
                 if let Some(obj) = snap.as_object_mut() {
-                    obj.insert("mode_status".into(), crate::mode::status(&self.bridge));
+                    obj.insert("mode_status".into(), crate::bridge::mode::status(&self.bridge));
                     obj.insert("events".into(), json!(self.bridge.events(40)));
                     obj.insert("operator".into(), json!(session.user));
                 }
@@ -287,10 +287,10 @@ impl Handler for Ui {
             ("GET", "/api/relay") => Resp::json(serde_json::to_vec(&self.bridge.relay_status()).unwrap()),
             ("GET", "/api/config") => Resp::json(serde_json::to_vec(&config_view(&cfg)).unwrap()),
             ("POST", "/api/config") => self.api_config(&Ui::body_json(req)),
-            ("GET", "/api/mode") => Resp::json(serde_json::to_vec(&crate::mode::status(&self.bridge)).unwrap()),
+            ("GET", "/api/mode") => Resp::json(serde_json::to_vec(&crate::bridge::mode::status(&self.bridge)).unwrap()),
             ("POST", "/api/mode") => self.api_mode(&Ui::body_json(req)),
             ("POST", "/api/lte") => self.api_lte(&Ui::body_json(req)),
-            ("GET", "/api/backups") => Resp::json(serde_json::to_vec(&crate::mode::list_backups(&self.bridge)).unwrap()),
+            ("GET", "/api/backups") => Resp::json(serde_json::to_vec(&crate::bridge::mode::list_backups(&self.bridge)).unwrap()),
             ("POST", "/api/backups") => self.api_backup(&Ui::body_json(req)),
             ("POST", "/api/restart") => self.api_restart(&Ui::body_json(req)),
             ("POST", "/api/password") => self.api_password(&Ui::body_json(req)),
@@ -309,8 +309,8 @@ impl Handler for Ui {
 // ---------------------------------------------------------------------------
 
 impl Ui {
-    fn relay(&self) -> Option<Arc<crate::relay::Relay>> {
-        crate::relay::relay_of(&self.bridge)
+    fn relay(&self) -> Option<Arc<crate::bridge::relay::Relay>> {
+        crate::bridge::relay::relay_of(&self.bridge)
     }
 
     /// Switch field: the web UI sends `0`/`1`, API clients send `true`/`false`.
@@ -324,7 +324,7 @@ impl Ui {
         }
     }
 
-    fn reply<T: serde::Serialize>(r: Result<T, crate::e2e::Error>) -> Resp {
+    fn reply<T: serde::Serialize>(r: Result<T, crate::bridge::e2e::Error>) -> Resp {
         match r {
             Ok(v) => Resp::json(serde_json::to_vec(&json!({"ok": true, "result": v})).unwrap()),
             Err(e) => Resp::json(serde_json::to_vec(&json!({"ok": false, "error": e.to_string()})).unwrap()),
@@ -384,7 +384,7 @@ impl Ui {
         let Some(relay) = self.relay() else {
             return Resp::json(json!({"ok": false, "error": "relay not running"}).to_string().into_bytes());
         };
-        match crate::e2e::write_override(&self.bridge, &relay, high, low, enable != 0, &slots) {
+        match crate::bridge::e2e::write_override(&self.bridge, &relay, high, low, enable != 0, &slots) {
             Ok(()) => Resp::json(json!({"ok": true, "slots": slots.len()}).to_string().into_bytes()),
             Err(e) => Self::reply::<()>(Err(e)),
         }
@@ -418,7 +418,7 @@ impl Ui {
             sync,
             enable,
         );
-        Self::reply(crate::e2e::write_setting(
+        Self::reply(crate::bridge::e2e::write_setting(
             &self.bridge,
             &relay,
             cmds::C_SET_RESERVE_MODE,
@@ -449,7 +449,7 @@ impl Ui {
         let on = Ui::flag(body, "on");
         let kwh = body.get("threshold_kwh").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let payload = cmds::encode_selling_protection(on, kwh);
-        Self::reply(crate::e2e::write_setting(
+        Self::reply(crate::bridge::e2e::write_setting(
             &self.bridge,
             &relay,
             cmds::C_SELLING_PROTECTION_SET,
@@ -466,7 +466,7 @@ impl Ui {
         let kwh = body.get("target_kwh").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let expand = body.get("expand").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
         let payload = cmds::encode_manual_selling(on, kwh, expand);
-        Self::reply(crate::e2e::write_setting(
+        Self::reply(crate::bridge::e2e::write_setting(
             &self.bridge,
             &relay,
             cmds::C_MANUAL_SELLING_SET,
@@ -483,7 +483,7 @@ impl Ui {
         let start = body.get("start").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let end = body.get("end").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let payload = cmds::encode_emergency_charge(on, start, end);
-        Self::reply(crate::e2e::write_setting(
+        Self::reply(crate::bridge::e2e::write_setting(
             &self.bridge,
             &relay,
             cmds::C_EMERGENCY_CHARGE,
@@ -497,7 +497,7 @@ impl Ui {
             return Resp::json(json!({"ok": false, "error": "relay not running"}).to_string().into_bytes());
         };
         let on = Ui::flag(body, "on");
-        Self::reply(crate::e2e::write_setting(
+        Self::reply(crate::bridge::e2e::write_setting(
             &self.bridge,
             &relay,
             cmds::C_THIRD_PARTY_PV,
@@ -516,26 +516,26 @@ impl Ui {
             .unwrap_or("all")
             .to_string();
         let out = match what.as_str() {
-            "power" => crate::e2e::read_power_flow(&self.bridge, &relay).map(|v| json!({"power_flow": v})),
-            "settings" => crate::e2e::read_settings(&self.bridge, &relay).map(|v| json!({"settings": v})),
-            "batteries" => crate::e2e::read_batteries(&self.bridge, &relay, &[0, 1, 2]).map(|v| json!({"battery": v})),
-            "accessories" => crate::e2e::read_accessories(&self.bridge, &relay).map(|v| json!({"accessories": v})),
+            "power" => crate::bridge::e2e::read_power_flow(&self.bridge, &relay).map(|v| json!({"power_flow": v})),
+            "settings" => crate::bridge::e2e::read_settings(&self.bridge, &relay).map(|v| json!({"settings": v})),
+            "batteries" => crate::bridge::e2e::read_batteries(&self.bridge, &relay, &[0, 1, 2]).map(|v| json!({"battery": v})),
+            "accessories" => crate::bridge::e2e::read_accessories(&self.bridge, &relay).map(|v| json!({"accessories": v})),
             _ => {
                 let mut out = serde_json::Map::new();
                 let mut errors: Vec<String> = Vec::new();
-                match crate::e2e::read_power_flow(&self.bridge, &relay) {
+                match crate::bridge::e2e::read_power_flow(&self.bridge, &relay) {
                     Ok(v) => {
                         out.insert("power_flow".into(), v);
                     }
                     Err(e) => errors.push(format!("power: {e}")),
                 }
-                match crate::e2e::read_batteries(&self.bridge, &relay, &[0, 1, 2]) {
+                match crate::bridge::e2e::read_batteries(&self.bridge, &relay, &[0, 1, 2]) {
                     Ok(v) => {
                         out.insert("battery".into(), v);
                     }
                     Err(e) => errors.push(format!("battery: {e}")),
                 }
-                match crate::e2e::read_settings(&self.bridge, &relay) {
+                match crate::bridge::e2e::read_settings(&self.bridge, &relay) {
                     Ok(v) => {
                         out.insert("settings".into(), v);
                     }
@@ -581,7 +581,7 @@ impl Ui {
                     Err(_) => return false,
                 };
                 cur[*k] = v.clone();
-                match serde_json::from_value::<crate::config::Config>(cur) {
+                match serde_json::from_value::<crate::bridge::config::Config>(cur) {
                     Ok(updated) => {
                         *c = updated;
                         true
@@ -605,11 +605,11 @@ impl Ui {
     fn api_mode(&self, body: &Value) -> Resp {
         let m = body.get("mode").and_then(|v| v.as_str()).unwrap_or("");
         let r = match m {
-            "local" => crate::mode::set_local(&self.bridge),
-            "vendor" => crate::mode::set_vendor(&self.bridge),
-            "bridge" => self.bridge.cfg.update(|c| c.mode = CloudMode::Bridge).map(|_| json!({"cloud_leg": "bridge"})).map_err(|e| crate::mode::CmdError(e.to_string())),
-            "off" => self.bridge.cfg.update(|c| c.mode = CloudMode::Off).map(|_| json!({"cloud_leg": "off"})).map_err(|e| crate::mode::CmdError(e.to_string())),
-            _ => Err(crate::mode::CmdError("mode must be local, vendor, bridge or off".into())),
+            "local" => crate::bridge::mode::set_local(&self.bridge),
+            "vendor" => crate::bridge::mode::set_vendor(&self.bridge),
+            "bridge" => self.bridge.cfg.update(|c| c.mode = CloudMode::Bridge).map(|_| json!({"cloud_leg": "bridge"})).map_err(|e| crate::bridge::mode::CmdError(e.to_string())),
+            "off" => self.bridge.cfg.update(|c| c.mode = CloudMode::Off).map(|_| json!({"cloud_leg": "off"})).map_err(|e| crate::bridge::mode::CmdError(e.to_string())),
+            _ => Err(crate::bridge::mode::CmdError("mode must be local, vendor, bridge or off".into())),
         };
         match r {
             Ok(v) => Resp::json(json!({"ok": true, "result": v}).to_string().into_bytes()),
@@ -627,9 +627,9 @@ impl Ui {
             None => false,
         };
         let v = if on {
-            crate::mode::lte_up(&self.bridge)
+            crate::bridge::mode::lte_up(&self.bridge)
         } else {
-            crate::mode::lte_down(&self.bridge)
+            crate::bridge::mode::lte_down(&self.bridge)
         };
         Resp::json(json!({"ok": true, "result": v}).to_string().into_bytes())
     }
@@ -637,12 +637,12 @@ impl Ui {
     fn api_backup(&self, body: &Value) -> Resp {
         let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("create");
         let r = match action {
-            "create" => crate::mode::backup_vendor_db(&self.bridge),
+            "create" => crate::bridge::mode::backup_vendor_db(&self.bridge),
             "restore" => {
                 let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                crate::mode::restore_backup(&self.bridge, name)
+                crate::bridge::mode::restore_backup(&self.bridge, name)
             }
-            other => Err(crate::mode::CmdError(format!("unknown action {other}"))),
+            other => Err(crate::bridge::mode::CmdError(format!("unknown action {other}"))),
         };
         match r {
             Ok(v) => Resp::json(json!({"ok": true, "result": v}).to_string().into_bytes()),
@@ -654,7 +654,7 @@ impl Ui {
         let target = body.get("target").and_then(|v| v.as_str()).unwrap_or("bridge");
         match target {
             "app" => Resp::json(
-                json!({"ok": true, "result": crate::mode::restart_vendor_app(&self.bridge)})
+                json!({"ok": true, "result": crate::bridge::mode::restart_vendor_app(&self.bridge)})
                     .to_string()
                     .into_bytes(),
             ),
@@ -733,7 +733,7 @@ fn schema() -> Value {
 }
 
 /// Config as the UI may see it: paths and booleans, no credential material.
-fn config_view(c: &crate::config::Config) -> Value {
+fn config_view(c: &crate::bridge::config::Config) -> Value {
     json!({
         "mode": c.mode,
         "api_port": c.api_port,

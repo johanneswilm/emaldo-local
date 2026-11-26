@@ -21,9 +21,9 @@ use emaldo_proto::codec::{aes_cbc_decrypt, aes_cbc_decrypt_raw, aes_cbc_encrypt,
 use emaldo_proto::cmds;
 use emaldo_proto::msct::{self, Frame};
 
-use crate::log::Level;
-use crate::relay::Relay;
-use crate::state::Bridge;
+use crate::bridge::log::Level;
+use crate::bridge::relay::Relay;
+use crate::bridge::state::Bridge;
 
 /// Round-trip budget for one command: an installed module answers in tens of
 /// milliseconds, so a short timeout fails fast when it is busy or offline.
@@ -445,7 +445,7 @@ pub fn write_override(
     // see it immediately, exactly as the vendor relay does.
     relay.put_override(
         &id.group_id,
-        crate::relay::Override {
+        crate::bridge::relay::Override {
             high,
             low,
             enable: if enable { 1 } else { 0 },
