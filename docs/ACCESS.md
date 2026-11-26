@@ -1,8 +1,9 @@
 # Access & isolation runbook
 
-How to (1) get SSH access to a Power Core module, (2) make that access survive
-reboots, and (3) shut the Emaldo vendor out of the box — cut its cloud **and**
-its remote-access tunnel. Shared by both approaches ([driver](../driver/) and
+How to (1) get the **first** shell on a stock module (section 1 — the `dc_act`
+bootstrap, no OTA needed), (2) get and keep normal SSH access, and (3) shut the
+Emaldo vendor out of the box — cut its cloud **and** its remote-access tunnel.
+Shared by both approaches ([driver](../driver/) and
 [bridge](../bridge/)); each needs shell access to the module, and both change
 what the module can reach.
 
@@ -12,32 +13,72 @@ adapt them to yours.
 
 > ## ⚠ Read this before changing anything
 >
-> - **Add your own key first.** Everything in section 5 can cut *your* access
+> - **Add your own key first.** Everything in section 6 can cut *your* access
 >   along with the vendor's. Put your public key in `/root/.ssh/authorized_keys`
->   (section 3) and prove it works in a **new** session before you disable
+>   (section 4) and prove it works in a **new** session before you disable
 >   anything.
-> - **Know the revert before you start** (section 6). Keep it in your notes
+> - **Know the revert before you start** (section 7). Keep it in your notes
 >   and keep a second route onto the box (LAN cable + the direct LAN address).
 > - If you lock yourself out you need physical reach (UART console). The
 >   vendor IoT firmware image is the last-resort recovery (see the top
 >   [`README.md`](../README.md) safety box).
-> - Never copy someone else's private key. Generate your own (section 2).
+> - Never copy someone else's private key. Generate your own (section 3).
 
 ---
 
-## 1. The box
+## 1. How the first shell was obtained — the `dc_act` bootstrap
+
+On a fresh, stock module there is **no LAN SSH yet**: `sshd` is not running and
+no key you own is installed. The vendor's own support mechanism is the way in,
+and it works **without OTA or any firmware change**. It is the firmware's
+`internal/diagchan`: an on-demand **reverse SSH tunnel** triggered by a cloud
+command called **`dc_act`** (diag activate). Sending `dc_act` makes the module:
+
+1. create a fresh local account (`lu`, uid ≥ 1000, GECOS `diagchan_managed`),
+2. append the SSH key you supply (`lk`, a full `ssh-ed25519 AAAA...` line) to
+   that account's `authorized_keys`,
+3. start `sshd` and dial **out** to a jump SSH host you control (`h`/`p`/`u`),
+   binding `rp` there back to the module's diag sshd (`lp=0` → `59282`).
+
+Result: `ssh -J <u>@<h>:<p> -p <rp> <lu>@127.0.0.1` drops you into a root-capable
+shell on the module. The reply `DcActRsp` gives you the exact `cmd` to run and
+the child key `pk` you must authorize on your jump host first.
+
+This was verified end-to-end on **v2.35.3 (emulator) and v2.35.5 (live)** with
+no OTA. The full protocol and the exact frame are in
+[`EMULATOR_BENCH.md`](EMULATOR_BENCH.md) ("Diagchan reachable on the app/users
+e2e channel") and [`PROTOCOL.md` §5b.1](PROTOCOL.md); in short:
+
+- **You need a jump host you control** (any SSH server you can authorize keys
+  on) and the device's live e2e session (your own credentials for the module's
+  e2e channel, or the captured session, handled by `emaldo_re/e2e.py` and the
+  bridge's `emaldo-proto` builder — `bridge/crates/emaldo-proto/src/msct.rs`).
+- Build the `dc_act` command frame and **append a duplicate `A0="SERVER"`
+  option** (and omit `F1`): that routes the frame to the `cloudr` handler that
+  owns `diagchan.Activate` instead of the user router (which refuses it).
+- Request body (`cloudr.DcActReq`, JSON): `h,p,u` (your jump host/port/user),
+  `rp` (port to bind on the jump host), **`lp=0`** (defaults to the module's
+  diag sshd `59282`), `lu` (fresh account name), `lk` (full `ssh-ed25519 ...`
+  line), `t` (hours to keep it up).
+- From the `DcActRsp`, authorize `pk` on the jump host; then run the returned
+  `ssh -J ...` command to get the shell.
+
+Once you have that shell, **do section 4 first** (install your own
+`authorized_keys` entry) before anything else, so you never depend on the
+`dc_act` route or the vendor's tunnel again.
+
+## 2. The box
 
 | item | value |
 |---|---|
 | Module LAN address | `192.168.50.185` |
 | sshd port | `59282` (set by `Port 59282` in `sshd_config`) |
 | Login user | `root`, **key auth only** (`PermitRootLogin yes`, `PubkeyAuthentication yes`) |
-| NAS (vendor reverse-tunnel endpoint) | `192.168.50.106`, tunnel port `2210` |
 
 The module is an i.MX6 ULL, Debian 11. It runs a stock Debian `openssh-server`;
 the non-standard port is the only unusual part.
 
-## 2. Getting SSH access
+## 3. Getting SSH access
 
 You need a keypair (do not reuse the maintainer's):
 
@@ -56,24 +97,11 @@ Host emaldo-battery
     IdentityFile ~/.ssh/emaldo_battery
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
-
-Host emaldo-battery-nas
-    HostName 192.168.50.106
-    Port 2210
-    User root
-    IdentityFile ~/.ssh/emaldo_battery
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
 ```
-
-`emaldo-battery` is the direct LAN path. `emaldo-battery-nas` reaches the box
-through the vendor's reverse tunnel on the maintainer's NAS (section 4) — it
-exists only as a convenience alias and depends on the tunnel staying up. On a
-fresh box the direct path is the one that works.
 
 Install your public key. Until you have key access there is no password login,
 so the first key goes in through whatever existing route you have (vendor
-provisioning, the NAS, or the console). Once you are in, both aliases land on
+provisioning, or the console — see section 1). Once you are in, the alias lands on
 the same `/root/.ssh/authorized_keys`:
 
 ```sh
@@ -92,7 +120,7 @@ ssh emaldo-battery uname -a
 # Linux <hostname> 5.10... armv7l GNU/Linux   (Debian 11, i.MX6 ULL)
 ```
 
-## 3. Persisting access
+## 4. Persisting access
 
 `authorized_keys` survives reboot — that alone is enough for LAN access to
 persist. Two things to know:
@@ -102,35 +130,27 @@ persist. Two things to know:
 Nothing else is needed for the LAN path: `/root/.ssh/authorized_keys` is on
 persistent storage and `sshd` reads it every connection. Do this first.
 
-### b. Optional: run your *own* reverse tunnel
+### b. Out-of-LAN access (optional)
 
-If the box sits behind NAT (or you want access from outside), the vendor runs
-a small systemd unit that keeps a reverse SSH tunnel open to its NAS. You can
-copy that mechanism and point it at **your** server instead of the vendor's:
+If the box sits behind NAT and you want a path onto it from outside, run your
+**own** reverse SSH tunnel to a server you control (do **not** rely on the
+vendor's `emaldo-access.service`, which points at the vendor):
 
 ```sh
-systemctl cat emaldo-access.service          # see exactly what the vendor runs
-
-# on your own server: create a restricted user, e.g. 'tunnel', whose
-# authorized_keys entry restricts it and whose key is the battery's FORWARD key.
+# on your server: a restricted account 'tunnel' whose authorized_keys entry is
+# the battery's FORWARD key, limited to one listen port:
+#   restrict,permitlisten="<port>" ssh-ed25519 AAAA... battery-tunnel
 ```
 
-The vendor unit establishes `ssh -N -R 2210:127.0.0.1:59282 root@192.168.50.106`
-with `Restart=always`, so `192.168.50.106:2210` lands on the box's sshd. Your
-copy does the same towards your server:
+On the battery: generate a dedicated key (`ssh-keygen -t ed25519 -f
+/root/.ssh/tunnel_key`, no passphrase), install its public half on the server
+as above, and run `ssh -N -R <port>:127.0.0.1:59282 tunnel@<your-server>` under
+a small `Restart=always` systemd unit. Persistence for plain LAN access is just
+the `authorized_keys` entry; this is only for remote reach.
 
-1. Generate a **forward-only** keypair on the battery
-   (`ssh-keygen -t ed25519 -f /root/.ssh/tunnel_key`, no passphrase) and put
-   its public half in the `tunnel` user's `authorized_keys` **on your server**,
-   with `restrict,permitlisten="2210"` style options.
-2. Copy the unit to `/etc/systemd/system/emaldo-tunnel.service`, change the
-   `ExecStart` to your server and port, and keep `Restart=always`.
-3. `systemctl daemon-reload && systemctl enable --now emaldo-tunnel`.
-4. Keep `emaldo-access.service` **disabled** at this point (section 5).
 
-This is optional; persistence for LAN access is the `authorized_keys` entry.
 
-## 4. What vendor access exists today
+## 5. What vendor access exists today
 
 To "shut the vendor out" you have to cut all three legs the box uses to reach
 the vendor — and only the third is inbound access to you:
@@ -145,10 +165,10 @@ the vendor — and only the third is inbound access to you:
    `1e0e:9011`, `ttyUSB0/1/2`, `ppp0`) lets the app reach the cloud even if
    the LAN is blocked. Leave it up and any DNS/route block is only half done.
 3. **`emaldo-access.service` is the vendor's remote SSH *in*.** A systemd unit
-   running a reverse tunnel `ssh -N -R 2210:127.0.0.1:59282 root@192.168.50.106`
-   with `Restart=always`. That is why `emaldo-battery-nas` (port `2210` on the
-   NAS) reaches the box. This is the inbound path — it is what lets *someone*
-   log in as root without being on the LAN.
+   that runs a reverse SSH tunnel (`ssh -N -R <port>:127.0.0.1:59282
+   root@<vendor-host>`, `Restart=always`), so the vendor can log in as root
+   without being on the LAN. This is the inbound path — read its `ExecStart`
+   to see the destination:
 
 Inspect it:
 
@@ -157,7 +177,7 @@ systemctl cat emaldo-access.service
 systemctl is-active emaldo-access.service
 ```
 
-## 5. Shutting the vendor out
+## 6. Shutting the vendor out
 
 ### a. Via the bridge — `mode local` (the reproducible way)
 
@@ -182,7 +202,7 @@ $E --config /root/emaldo-local/config.json mode local
 $E --config /root/emaldo-local/config.json mode status
 ```
 
-`mode vendor` reverses all of it (section 6).
+`mode vendor` reverses all of it (section 7).
 
 The relevant `config.json` keys (defaults shown; this is the whole cut):
 
@@ -202,7 +222,7 @@ The relevant `config.json` keys (defaults shown; this is the whole cut):
 | `relay_advertise_host` | detected | address handed to the module |
 
 The bridge does **not** remove the vendor's inbound `emaldo-access.service` —
-disable it yourself (section 5b step 2) if you do not want the vendor able to
+disable it yourself (section 6b step 2) if you do not want the vendor able to
 log in.
 
 ### b. Standalone — the same OS-level primitives, by hand
@@ -212,7 +232,7 @@ bridge installed. The bridge's `mode local` remains the reproducible
 implementation; the manual path uses the same primitives.
 
 ```sh
-# 0. FIRST: confirm your key works in a fresh session (section 3).
+# 0. FIRST: confirm your key works in a fresh session (section 4).
 #    Keep this shell open until you are done.
 
 # 1. stop the vendor app stack
@@ -228,7 +248,7 @@ systemctl stop pppd 2>/dev/null || true
 ip link set ppp0 down 2>/dev/null || true
 
 # 4. pin the vendor names to a blackhole, inside the managed markers so the
-#    edit is reversible (see section 6)
+#    edit is reversible (see section 7)
 HOSTS=/etc/hosts
 sed -i '/# >>> emaldo-local (managed) >>>/,/# <<< emaldo-local (managed) <<</d' "$HOSTS"
 printf '%s\n%s\n%s\n' \
@@ -264,9 +284,10 @@ ls /sys/bus/usb/devices/1-1.3 2>/dev/null      # modem bound?
 ```
 
 Verify from *inside* the box. From outside, check that `api.emaldo.com` no
-longer reaches a vendor IP and that `192.168.50.106:2210` no longer answers.
+longer reaches a vendor IP and that the vendor's reverse-tunnel endpoint no
+longer answers.
 
-## 6. Reversal / restore vendor
+## 7. Reversal / restore vendor
 
 ### Bridge — `mode vendor`
 
@@ -302,10 +323,10 @@ the backup, otherwise remove the managed block and reset the resolver.
 > the `# >>> emaldo-local (managed) >>>` / `# <<< emaldo-local (managed) <<<`
 > markers so it can be removed cleanly. Do not edit the vendor app's own files.
 
-## 7. Security notes
+## 8. Security notes
 
 - **Your own key, your own copy.** Generate a keypair on your workstation;
-  never copy a private key from the maintainer or a NAS. Public halves go in
+  never copy a private key from someone else. Public halves go in
   `authorized_keys`; private halves never leave your machine.
 - **Permissions:** `~/.ssh` `0700`, `~/.ssh/authorized_keys` `0600`, private
   key `0600`. `sshd` refuses key auth if these are wrong.
@@ -321,4 +342,4 @@ the backup, otherwise remove the managed block and reset the resolver.
   `/root/emaldo-local/config.json` hold credential material — never commit
   them, and keep them `0600` on the box.
 - **Recovery plan.** Any cut can lock you out; have the console/UART steps and
-  the vendor firmware image ready, and know section 6 by heart.
+  the vendor firmware image ready, and know section 7 by heart.
