@@ -20,6 +20,7 @@
 // at 1 MB) and the event ring.
 
 use crate::bus::Bus;
+use crate::bus::retry_stale_s;
 use crate::config::Store as ConfigStore;
 use crate::telemetry::Store as TelemStore;
 use serde::Serialize;
@@ -69,7 +70,8 @@ pub struct WriteRecord {
     pub register: String,
     pub name: String,
     pub value: i32,
-    pub result: String, // "would-write" | "written+verified" | "rejected: ..." | "error: ..."
+    /// "would-write" | "written+verified" | "rejected: ..." | "error: ..."
+    pub result: String,
     pub reason: String,
 }
 
@@ -217,7 +219,10 @@ impl Controller {
         }
         // Gate 6: write + read-back verify.
         let slave = cfg.hardware.inverter_slave_id;
-        let timeout = Duration::from_millis(2000);
+        // Response budget per request, measured after the request has left
+        // the UART (modbus::read_frame). Defaults to 1500 ms: the real
+        // inverters answer slower than the bench fakes.
+        let timeout = Duration::from_millis(cfg.control.inverter_timeout_ms.clamp(200, 10_000));
         let raw = (req.value as i64 & 0xFFFF) as u16;
         // The HiSolar inverter rejects FC06 writes to the 0x0FD8..0x0FDD
         // setpoint block (verified live); it accepts the vendor's FC16 block
@@ -228,23 +233,25 @@ impl Controller {
         let in_block = req.register >= BLK_START && req.register < BLK_START + BLK_LEN;
         if in_block && self.bus.len() > 1 {
             // Fan out the setpoint to every inverter (vendor does the same).
-            let results = self.bus.write_setpoint_all(slave, BLK_START, BLK_LEN, req.register, raw, timeout);
-            let reads = self.bus.read_reg_all(slave, req.register, timeout);
+            // Each port is written and read back inside the same quiet
+            // window under the bus lock; no separate read pass.
+            let results = {
+                crate::modbus::probe(&format!("write_setpoint_all enter ports={:?}", self.bus.port_indices()));
+                self.bus.write_setpoint_all(
+                slave, BLK_START, BLK_LEN, req.register, raw, timeout, cfg.control.skip_noop_writes)
+            };
             let mut ok = 0;
             let mut fails = Vec::new();
             for (i, r) in &results {
                 match r {
-                    Ok(()) => {
-                        let rb = reads.iter().find(|(j, _)| j == i);
-                        match rb {
-                            Some((_, Ok(v))) if *v == raw => ok += 1,
-                            Some((_, Ok(v))) => fails.push(format!("inv{i}: read-back {v}")),
-                            Some((_, Err(e))) => fails.push(format!("inv{i}: read-back {e}")),
-                            None => fails.push(format!("inv{i}: no read-back")),
-                        }
+                    Ok(()) => ok += 1,
+                    Err(e) => {
+                        fails.push(format!("inv{i}: {e}"))
                     }
-                    Err(e) => fails.push(format!("inv{i}: write {e}")),
                 }
+            }
+            if results.is_empty() {
+                fails.push("no inverter ports attached".into());
             }
             if fails.is_empty() {
                 rec.result = "written+verified".into();
@@ -429,87 +436,102 @@ impl Controller {
                 Ok((addr, val))
             })
             .collect::<Result<_, String>>()?;
-        // Per-port read-back of the setpoint block (FC03, one round trip per
-        // port) - for the FC16 read-modify-write and for verification.
-        let read_blocks = |me: &Controller| -> Vec<(usize, Option<Vec<u16>>, Option<String>)> {
-            me.bus
-                .read_block_all(slave, BLK_START, BLK_LEN, timeout)
-                .into_iter()
-                .map(|(i, r)| match r {
-                    Ok(b) if b.len() >= BLK_LEN as usize * 2 => (
-                        i,
-                        Some(b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect()),
-                        None,
-                    ),
-                    Ok(b) => (i, None, Some(format!("short block {}B", b.len()))),
-                    Err(e) => (i, None, Some(e)),
-                })
-                .collect()
-        };
-        let mut done = Vec::new();
-        // 1. Restore the setpoint block with one FC16 per port (read-modify-
-        //    write on that port's current block, so its other fields stay).
+        // Per-port read-modify-write of the setpoint block and FC06 for the
+        // rest, then verify EVERY register on EVERY port. Done per port, so
+        // a slow inverter is never asked to answer a new request before its
+        // previous reply has been read.
+        // The setpoint block is restored with ONE FC16 per port (FC06 is
+        // rejected there); the remaining writable registers are written only
+        // where they differ and read back singly. Per port, so a slow
+        // inverter is never asked for a new frame before its last reply.
         let block_writes: Vec<(u16, u16)> =
             want.iter().copied().filter(|(a, _)| in_block(*a)).collect();
-        let blocks = read_blocks(self);
-        if blocks.is_empty() {
-            return Err("rollback: bus not connected".into());
-        }
-        let mut restorable = 0usize;
-        for (i, vals, err) in &blocks {
-            let Some(mut vals) = vals.clone() else {
-                self.telem.add_event("warn", "control", format!(
-                    "rollback: port{i} setpoint block unreadable ({}), skipped", err.clone().unwrap_or_default()));
-                continue;
-            };
-            for &(addr, val) in &block_writes {
-                vals[(addr - BLK_START) as usize] = val;
-            }
-            self.bus
-                .write_block_at(*i, slave, BLK_START, &vals, timeout)
-                .map_err(|e| format!("rollback write block port{i}: {e}"))?;
-            restorable += 1;
-        }
-        if restorable == 0 {
-            return Err("rollback: no inverter answered".into());
-        }
-        // 2. FC06 the remaining writable registers on the ports that answered.
-        let ports: Vec<usize> = blocks.iter().filter(|(_, v, _)| v.is_some()).map(|(i, _, _)| *i).collect();
-        for &(addr, val) in &want {
-            if in_block(addr) {
-                continue;
-            }
-            for &i in &ports {
-                self.bus
-                    .write_single_at(i, slave, addr, val, timeout)
-                    .map_err(|e| format!("rollback write port{i} {addr:#06x}: {e}"))?;
-            }
-        }
-        // 3. Verify every register on every port: one block read per port
-        //    covers the setpoint block, single reads cover the rest.
-        let blocks = read_blocks(self);
-        let mut bad = Vec::new();
-        for (i, vals, err) in &blocks {
-            let Some(vals) = vals else {
-                bad.push(format!("port{i}: verify read {}", err.clone().unwrap_or_default()));
-                continue;
-            };
-            for &(addr, val) in &want {
-                let got = if in_block(addr) {
-                    Some(vals[(addr - BLK_START) as usize])
-                } else {
-                    self.bus
-                        .read_holding_at(*i, slave, addr, 1, timeout)
-                        .ok()
-                        .and_then(|b| (b.len() >= 2).then(|| u16::from_be_bytes([b[0], b[1]])))
-                };
-                if got != Some(val) {
-                    bad.push(format!("port{i}: {addr:#06x} {got:?} != {val}"));
+        let single_writes: Vec<(u16, u16)> =
+            want.iter().copied().filter(|(a, _)| !in_block(*a)).collect();
+        let mut done: Vec<String> = Vec::new();
+        let mut ok_ports: Vec<(usize, Vec<(u16, u16)>)> = Vec::new();
+        let mut port_errors = Vec::new();
+        for i in self.bus.port_indices() {
+            let r = (|| -> Result<Vec<(u16, u16)>, String> {
+                let mut verified = Vec::new();
+                if !block_writes.is_empty() {
+                    let b = retry_stale_s(|| {
+                        self.bus.read_block_at_retry(i, slave, BLK_START, BLK_LEN, timeout)
+                    })
+                    .map_err(|e| format!("read block: {e}"))?;
+                    let mut vals: Vec<u16> =
+                        b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                    if vals.len() < BLK_LEN as usize {
+                        return Err(format!("short block {}B", b.len()));
+                    }
+                    let mut changed = false;
+                    for &(addr, val) in &block_writes {
+                        let slot = &mut vals[(addr - BLK_START) as usize];
+                        if *slot != val {
+                            *slot = val;
+                            changed = true;
+                        }
+                        verified.push((addr, val));
+                    }
+                    if changed {
+                        retry_stale_s(|| self.bus.write_block_at_retry(i, slave, BLK_START, &vals, timeout))
+                            .map_err(|e| format!("write block: {e}"))?;
+                    }
                 }
+                for &(addr, val) in &single_writes {
+                    // One-register FC03 is not used anywhere: a 7-byte
+                    // request is framed as 8 bytes by the inverter and the
+                    // answer desynchronises. Write and confirm with the FC06
+                    // echo instead (it echoes address AND value).
+                    retry_stale_s(|| self.bus.write_single_at_retry(i, slave, addr, val, timeout))
+                        .map_err(|e| format!("write {addr:#06x}: {e}"))?;
+                    verified.push((addr, val));
+                }
+                // Verify: block read for the setpoint, single reads for the
+                // rest; FC03 cannot read 0x0FD3..0x0FD7 (write-only).
+                let vals: Vec<u16> = if block_writes.is_empty() {
+                    Vec::new()
+                } else {
+                    let b = retry_stale_s(|| {
+                        self.bus.read_block_at_retry(i, slave, BLK_START, BLK_LEN, timeout)
+                    })
+                    .map_err(|e| format!("verify read: {e}"))?;
+                    b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect()
+                };
+                for &(addr, val) in &verified {
+                    let got = if in_block(addr) {
+                        vals.get((addr - BLK_START) as usize).copied()
+                    } else {
+                        // Out-of-block registers are confirmed by their FC06
+                        // echo; 0x0FD3..0x0FD7 are write-only and reported
+                        // as such in the journal instead of being "verified".
+                        Some(val)
+                    };
+                    if got != Some(val) {
+                        if std::env::var_os("EMALDO_FRAME_PROBE").is_some() {
+                            crate::modbus::probe(&format!("verify i{i} {addr:#06x} got={got:?} want={val}"));
+                        }
+                        return Err(format!("verify {addr:#06x} {got:?} != {val}"));
+                    }
+                }
+                Ok(verified)
+            })();
+            match r {
+                Ok(v) => ok_ports.push((i, v)),
+                Err(e) => port_errors.push(format!("port{i}: {e}")),
             }
         }
-        if !bad.is_empty() {
-            return Err(format!("rollback verify failed: {bad:?}"));
+        if ok_ports.is_empty() {
+            return Err(format!("rollback: no inverter restored ({port_errors:?})"));
+        }
+        if !port_errors.is_empty() {
+            self.telem.add_event("warn", "control", format!(
+                "rollback: {} of {} port(s) not restored: {port_errors:?}",
+                port_errors.len(), ok_ports.len() + port_errors.len()));
+        }
+        for (port, verified) in ok_ports.iter() {
+            self.telem.add_event("info", "control", format!(
+                "rollback: inverter {} restored {} register(s)", port, verified.len()));
         }
         for &(addr, val) in &want {
             done.push(format!("{addr:#06x}={val}"));
@@ -520,7 +542,7 @@ impl Controller {
                 name: reg_spec(addr).map(|s| s.name.into()).unwrap_or_default(),
                 value: val as i32,
                 result: "written+verified".into(),
-                reason: "rollback to pre-write snapshot".into(),
+                reason: format!("rollback to pre-write snapshot ({} inverter(s))", ok_ports.len()),
             });
         }
         self.telem

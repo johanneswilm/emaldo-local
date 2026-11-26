@@ -273,11 +273,24 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let to = std::time::Duration::from_millis(800);
+        // Response budget per request, measured from after the request has
+        // left the UART (the slave cannot answer earlier). 1500 ms covers a
+        // slow inverter; the old 800 ms bounded TX+RX together.
+        let to = std::time::Duration::from_millis(
+            std::env::var("WRITE_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500u64),
+        );
+        // One-register FC03 is refused (a 7-byte request is framed as 8 by
+        // the inverter); the probe reads its block and takes the register.
         let rb = |p: &mut serial::SerialPort| -> String {
-            match modbus::read_registers(p, modbus::FC_READ_HOLDING, slave, reg, 1, to) {
-                Ok(d) if d.len() >= 2 => format!("{}", u16::from_be_bytes([d[0], d[1]]) as i16),
-                Ok(d) => format!("short:{d:?}"),
+            // 4 registers from the 8-aligned base containing `reg`.
+            let base = reg & !0x07;
+            let count = ((reg - base) / 2 + 1).max(2);
+            match modbus::read_registers(p, modbus::FC_READ_HOLDING, slave, base, count, to) {
+                Ok(d) if d.len() >= 2 + 2 * ((reg - base) / 2) as usize => {
+                    let o = (((reg - base) / 2) * 2) as usize;
+                    format!("{}", u16::from_be_bytes([d[o], d[o + 1]]) as i16)
+                }
+                Ok(d) => format!("short:{d:02x?}"),
                 Err(e) => format!("err:{e}"),
             }
         };

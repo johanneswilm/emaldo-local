@@ -105,6 +105,6 @@ fn modbus_timeout_is_an_error_not_a_panic() {
     let (_master, slave_path) = open_pty();
     // Nobody answers on the master side.
     let mut port = SerialPort::open(&slave_path, 9600).expect("open pty slave");
-    let r = modbus::read_input_registers(&mut port, 1, 0x3600, 1, Duration::from_millis(300));
+    let r = modbus::read_input_registers(&mut port, 1, 0x3600, 2, Duration::from_millis(300));
     assert!(matches!(r, Err(modbus::ModbusError::Timeout)));
 }

@@ -245,7 +245,22 @@ pub struct ControlConfig {
     /// active, revert to safe setpoints (writes enabled) / alarm (dry-run).
     #[serde(default = "default_watchdog")]
     pub watchdog_secs: u64,
+    /// Do not send an FC16 when the register already holds the wanted
+    /// value (verified by read-back instead). Real inverters may not
+    /// acknowledge a no-op write.
+    #[serde(default = "default_true")]
+    pub skip_noop_writes: bool,
+    /// Modbus response budget (ms) for one request on the inverters. The
+    /// budget starts after the request has left the UART. Real inverters
+    /// are slower than the bench fakes; 1500 ms is generous for 9600 baud.
+    #[serde(default = "default_inverter_timeout_ms")]
+    pub inverter_timeout_ms: u64,
 }
+
+fn default_inverter_timeout_ms() -> u64 {
+    1500
+}
+
 
 fn default_mode() -> String {
     "auto".into()
@@ -297,6 +312,8 @@ impl Default for ControlConfig {
             min_write_interval_ms: default_min_write_ms(),
             max_writes_per_minute: default_max_writes(),
             watchdog_secs: default_watchdog(),
+            skip_noop_writes: true,
+            inverter_timeout_ms: default_inverter_timeout_ms(),
         }
     }
 }

@@ -149,4 +149,23 @@ impl SerialPort {
             libc::tcflush(self.file.as_raw_fd(), libc::TCIFLUSH);
         }
     }
+
+    /// Wait until everything queued for TX has actually left the UART
+    /// (`tcdrain`). On an RS485 half-duplex line the reply cannot arrive
+    /// before the request is fully on the wire, and tcflush() does not
+    /// drain output; without this a read can start while bytes are still
+    /// in the driver queue and a premature flush/timeout can cut a slow
+    /// reply. Returns false when the wait gave up after 500 ms (~50 frames
+    /// at 9600 baud), so a stuck driver can never hang the bus.
+    pub fn drain_tx(&mut self) -> bool {
+        let fd = self.file.as_raw_fd();
+        let ready = unsafe {
+            let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            libc::poll(&mut pfd, 1, 500) > 0
+        };
+        if !ready {
+            return false;
+        }
+        unsafe { libc::tcdrain(fd) == 0 }
+    }
 }

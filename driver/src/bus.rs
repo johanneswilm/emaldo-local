@@ -49,6 +49,18 @@ impl Bus {
     }
 
     /// Number of attached ports.
+    /// Indices of the attached ports (primary first), so callers can walk
+    /// them one at a time.
+    pub fn port_indices(&self) -> Vec<usize> {
+        let guard = self.ports.lock().unwrap();
+        guard
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_some())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.ports.lock().unwrap().iter().filter(|p| p.is_some()).count()
     }
@@ -139,8 +151,28 @@ impl Bus {
             let Some(port) = slot.as_mut() else {
                 continue;
             };
-            let s = modbus::read_input_registers(port, slave, slow.0, slow.1, timeout);
-            let f = modbus::read_input_registers(port, slave, fast.0, fast.1, timeout);
+            // Per port: one quiet-wait, then both blocks back to back with
+            // just the inter-frame gap (the gap is absorbed by the time the
+            // previous reply takes to arrive), so the poller's frames never
+            // straddle a controller write.
+            let pair = retry_stale_port(port, |port| {
+                let a = modbus::read_registers_quiet(
+                    port, modbus::FC_READ_INPUT, slave, slow.0, slow.1, timeout,
+                );
+                match a {
+                    Err(e) => Err(e),
+                    Ok(sb) => {
+                        let f = modbus::read_registers(
+                            port, modbus::FC_READ_INPUT, slave, fast.0, fast.1, timeout,
+                        );
+                        Ok((sb, f))
+                    }
+                }
+            });
+            let (s, f) = match pair {
+                Ok((sb, fb)) => (Ok(sb), fb),
+                Err(e) => (Err(e), Err(modbus::ModbusError::Timeout)),
+            };
             match (s, f) {
                 (Ok(sb), Ok(fb)) => out.push((hex(&sb), hex(&fb))),
                 (s, f) => {
@@ -152,29 +184,64 @@ impl Bus {
         (out, errs)
     }
 
-    /// FC03 read of the same block from EVERY attached port. Returns
-    /// `(port index, bytes)` per port.
-    pub fn read_block_all(
+    /// FC03 block read from one port by index.
+    #[allow(dead_code)]
+    pub fn read_block_at(
         &self,
+        idx: usize,
         slave: u8,
         addr: u16,
         count: u16,
         timeout: Duration,
-    ) -> Vec<(usize, Result<Vec<u8>, String>)> {
-        let mut guard = self.ports.lock().unwrap();
-        let mut out = Vec::new();
-        for (i, slot) in guard.iter_mut().enumerate() {
-            let Some(port) = slot.as_mut() else {
-                continue;
-            };
-            let r = modbus::read_registers(port, modbus::FC_READ_HOLDING, slave, addr, count, timeout)
-                .map_err(|e| e.to_string());
-            out.push((i, r));
-        }
-        out
+    ) -> Result<Vec<u8>, String> {
+        // Quiet first: called standalone (controller), so the port may have
+        // a poll reply still arriving from the last cycle.
+        self.with_port_at(idx, |p| modbus::read_registers_quiet(p, modbus::FC_READ_HOLDING, slave, addr, count, timeout))
     }
 
     /// FC16 block write to one port by index.
+    pub fn read_block_at_retry(
+        &self,
+        idx: usize,
+        slave: u8,
+        addr: u16,
+        count: u16,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
+        self.with_port_at(idx, |p| {
+            retry_stale_port(p, |p| modbus::read_registers_fast(p, modbus::FC_READ_HOLDING, slave, addr, count, timeout))
+        })
+    }
+
+    /// `write_block_at` with the port-level stale retry (drain + re-ask).
+    pub fn write_block_at_retry(
+        &self,
+        idx: usize,
+        slave: u8,
+        addr: u16,
+        values: &[u16],
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.with_port_at(idx, |p| {
+            retry_stale_port(p, |p| modbus::write_multiple_registers(p, slave, addr, values, timeout))
+        })
+    }
+
+    /// `write_single_at` with the port-level stale retry.
+    pub fn write_single_at_retry(
+        &self,
+        idx: usize,
+        slave: u8,
+        addr: u16,
+        value: u16,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.with_port_at(idx, |p| {
+            retry_stale_port(p, |p| modbus::write_single_register(p, slave, addr, value, timeout))
+        })
+    }
+
+    #[allow(dead_code)]
     pub fn write_block_at(
         &self,
         idx: usize,
@@ -187,6 +254,7 @@ impl Bus {
     }
 
     /// FC06 single write to one port by index.
+    #[allow(dead_code)]
     pub fn write_single_at(
         &self,
         idx: usize,
@@ -199,6 +267,11 @@ impl Bus {
     }
 
     /// FC03 single-register read from one port by index.
+    ///
+    /// NOT used for a single register: a 1-register request is 7 bytes and
+    /// the inverter frames it as 8, which desynchronises the answer. Kept
+    /// for multi-register callers only.
+    #[allow(dead_code)]
     pub fn read_holding_at(
         &self,
         idx: usize,
@@ -207,12 +280,17 @@ impl Bus {
         count: u16,
         timeout: Duration,
     ) -> Result<Vec<u8>, String> {
-        self.with_port_at(idx, |p| modbus::read_registers(p, modbus::FC_READ_HOLDING, slave, addr, count, timeout))
+        self.with_port_at(idx, |p| modbus::read_registers_quiet(p, modbus::FC_READ_HOLDING, slave, addr, count, timeout))
     }
 
-    /// Write an FC16 block to the setpoint on EVERY attached inverter, doing
-    /// a read-modify-write per port so each inverter keeps its other block
-    /// registers. Returns per-port results (index, ok|error).
+    /// Write an FC16 block to the setpoint on EVERY attached inverter,
+    /// one port at a time: quiet line -> FC03 block read -> FC16 write ->
+    /// quiet line -> FC03 read-back, with the RTU inter-frame gap between
+    /// frames. The whole fan-out runs under the single bus lock, so the
+    /// poller can never interleave its own frames with an in-flight write
+    /// on the same port. The per-port verify read doubles as the next
+    /// port's "line is quiet" settle. Returns per-port results
+    /// (index, ok|error).
     pub fn write_setpoint_all(
         &self,
         slave: u8,
@@ -221,17 +299,21 @@ impl Bus {
         reg: u16,
         value: u16,
         timeout: Duration,
+        skip_noop: bool,
     ) -> Vec<(usize, Result<(), String>)> {
         let mut guard = self.ports.lock().unwrap();
         let mut out = Vec::new();
         let idx = (reg - blk_start) as usize;
+        let _ = idx;
         for (i, slot) in guard.iter_mut().enumerate() {
             let Some(port) = slot.as_mut() else {
                 continue;
             };
             let res = (|| -> Result<(), String> {
-                let b = modbus::read_registers(port, modbus::FC_READ_HOLDING, slave, blk_start, blk_len, timeout)
-                    .map_err(|e| e.to_string())?;
+                let b = retry_stale_port(port, |p| {
+                    modbus::read_registers_fast(p, modbus::FC_READ_HOLDING, slave, blk_start, blk_len, timeout)
+                })
+                .map_err(|e| format!("read block: {e}"))?;
                 if (b.len() as u16) < blk_len * 2 {
                     return Err(format!("short block {}B", b.len()));
                 }
@@ -240,40 +322,75 @@ impl Bus {
                 if idx >= vals.len() {
                     return Err("reg outside block".into());
                 }
+                if skip_noop && vals[idx] == value {
+                    // Already set: skipping the FC16 avoids a no-op write
+                    // the inverter may not acknowledge. The block read just
+                    // proved the value, so report it as verified.
+                    return Ok(());
+                }
                 vals[idx] = value;
-                modbus::write_multiple_registers(port, slave, blk_start, &vals, timeout)
-                    .map_err(|e| e.to_string())
+                retry_stale_port(port, |p| modbus::write_multiple_registers(p, slave, blk_start, &vals, timeout))
+                    .map_err(|e| format!("write: {e}"))?;
+                // The 8-byte FC16 echo (validated in write_multiple_registers)
+                // carries the exact block address and count that was written,
+                // so it IS the inverter's acknowledgement of this block. No
+                // second single-register read is issued: a one-register FC03
+                // request is 7 bytes and the device frames it as 8, which
+                // desynchronises the answer (the previous stale-SOC symptom).
+                Ok(())
             })();
             out.push((i, res));
         }
         out
     }
+}
 
-    /// Read back `reg` from every attached inverter (for verification).
-    pub fn read_reg_all(
-        &self,
-        slave: u8,
-        reg: u16,
-        timeout: Duration,
-    ) -> Vec<(usize, Result<u16, String>)> {
-        let mut guard = self.ports.lock().unwrap();
-        let mut out = Vec::new();
-        for (i, slot) in guard.iter_mut().enumerate() {
-            let Some(port) = slot.as_mut() else {
-                continue;
-            };
-            let r = modbus::read_registers(port, modbus::FC_READ_HOLDING, slave, reg, 1, timeout)
-                .map_err(|e| e.to_string())
-                .and_then(|b| {
-                    if b.len() >= 2 {
-                        Ok(u16::from_be_bytes([b[0], b[1]]))
-                    } else {
-                        Err("short read".into())
-                    }
-                });
-            out.push((i, r));
+/// Re-ask a request once when the answer had to be re-synchronised
+/// (`ModbusError::Stale`), i.e. a late reply to an earlier frame was still
+/// on the wire. A stale *write* echo is fine to repeat (the value is the
+/// same); the read-back that follows confirms it either way.
+#[allow(dead_code)]
+pub fn retry_stale<T>(mut f: impl FnMut() -> Result<T, ModbusError>) -> Result<T, ModbusError> {
+    match f() {
+        Err(ModbusError::Stale) => {
+            std::thread::sleep(modbus::frame_gap());
+            f()
         }
-        out
+        r => r,
+    }
+}
+
+/// Variant for the per-port helpers: on `Stale` the port's late input is
+/// drained first, then the request is repeated once or twice. A bounded
+/// burst (the setpoint block read-modify-write) can leave its last answer
+/// unread (e.g. when it stops early), and the next request would otherwise
+/// find that answer in front of its own and keep being reset.
+pub fn retry_stale_port<T>(
+    port: &mut SerialPort,
+    mut f: impl FnMut(&mut SerialPort) -> Result<T, ModbusError>,
+) -> Result<T, ModbusError> {
+    let mut tries = 0;
+    loop {
+        match f(port) {
+            Err(ModbusError::Stale) if tries < 2 => {
+                tries += 1;
+                modbus::drain_input(port);
+                std::thread::sleep(modbus::frame_gap());
+            }
+            r => return r,
+        }
+    }
+}
+
+/// String-flavoured `retry_stale` for the per-port helpers (which report
+/// `String` errors).
+pub fn retry_stale_s<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    match f() {
+        Err(e) if e.contains("stale") => {
+            std::thread::sleep(modbus::frame_gap());
+            f()
+        }
+        r => r,
     }
 }
 
@@ -298,7 +415,6 @@ mod tests {
         let b = Bus::new();
         let (reads, errs) = b.read_all_inverters(1, (0x0FA0, 1), (0x0FAF, 1), Duration::from_millis(10));
         assert!(reads.is_empty() && errs.is_empty());
-        assert!(b.write_setpoint_all(1, 0x0FD8, 6, 0x0FDD, 300, Duration::from_millis(10)).is_empty());
-        assert!(b.read_reg_all(1, 0x0FDD, Duration::from_millis(10)).is_empty());
+        assert!(b.write_setpoint_all(1, 0x0FD8, 6, 0x0FDD, 300, Duration::from_millis(10), true).is_empty());
     }
 }

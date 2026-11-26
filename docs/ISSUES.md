@@ -88,6 +88,61 @@ the evidence, and the current status.
     genuinely independent on the hardware (different CH9344 ports) before
     enabling both.
 
+### 2b. Follow-up: the live FC16 write still timed out (2026-11-26, SOAK)
+
+- **Symptom:** after the fix above the ports open and the snapshot works,
+  but on the live unit every service-mode write still failed:
+  `{"register":"0x0fdd","value":0,"result":"error: all inverters failed:
+  [\"inv0: write timeout\", \"inv1: write timeout\", \"inv2: write
+  timeout\"]"}`. A standalone `--write-probe` FC16 on one port works.
+- **Root cause (bench-reproduced, ranked):**
+  1. **A one-register FC03 is structurally undecodable.** A 1-register
+     read request is 7 bytes; the inverter expects 8-byte requests, so it
+     swallows the first CRC byte and answers with shifted framing. On the
+     bench the read-back of the write returned another register's value
+     (`SOC 900` for `0x0FDD`) - exactly the "stale" symptom. The write
+     fan-out verified with that single-register read and also asked for
+     `0x0FDD` *immediately after* an FC16, so any late/echo byte mixed in
+     made it time out. **This is the main cause.**
+  2. **Fixed-size reads on a slow slave.** The old reader expected exactly
+     `8` bytes and poked byte 1 after the first chunk; a reply that
+     arrives late, split, or with a torn tail in front was mistaken for a
+     stale answer (`BadLength`/`timeout`). Timeouts also counted the TX
+     time, and there was no TX drain or inter-frame gap.
+- **Fix:**
+  - `modbus.rs`: self-framing reader (CRC-checked frame anywhere in the
+    buffer, leading garbage skipped, torn frames completed inside the
+    budget, oversized buffers reset), TX drained before the response
+    budget starts, inter-frame gap, explicit `Stale` error, and
+    `reject_single()`. A one-register FC03 request is now refused for
+    **every** caller (the probe reads an aligned 4/6-register block).
+  - `bus.rs`: the setpoint fan-out verifies the read-modify-write with
+    the **validated 8-byte FC16 echo** (address + count) instead of a
+    second, single-register read; per-port block readers and a
+    drain-and-retry on `Stale`; the poll read of one port is contiguous.
+  - `control.rs`: rollback restores the setpoint block with one FC16 per
+    port and confirms the out-of-block registers with their **FC06 echo**
+    (which echoes address and value); nothing reads 0x0FD3..0x0FD7
+    (write-only) any more.
+  - `config.rs`: `[control] inverter_timeout_ms` (default 1500, measured
+    from after TX) and `skip_noop_writes` (default true).
+- **Bench (3 slow reference fakes, +300-1500 ms per reply, optimize mode,
+  override slots = 10 W to guarantee a non-zero setpoint):**
+  `0x0fdd 300 -> written+verified` on all three fakes, and rollback
+  `{"ok":true,"result":"restored 7 registers"}` with every register
+  `written+verified`. `cargo test --offline`: 85 passed.
+- **Live step for the lead (one port, one-shot, no service mode):**
+  1. Read-only sanity: `emd2-drv --config <cfg> --state-dump` (uses the
+     block read) run twice; the setpoint block must be identical and no
+     `read ... FAILED`/`stale` events should appear in the events list.
+  2. One-shot FC16 on **one** port with a value that really changes:
+     `WRITE_PORT=<port> WRITE_FC=16 WRITE_REG=0x0FDD WRITE_HOLD=300`
+     (driver not running on that port; the probe reads back, then writes
+     back 0 / the original). Expect `{"step":"read_after",... "300"}` and
+     no timeout. If it still times out while `--write-probe` with a
+     single port succeeded before, capture `strace -e trace=read,write,ioctl
+     -f` of that probe to see the exact request/response bytes.
+
 ## 3. PV power reads 0 / not parsed from inverter (daytime load understated)
 - The provisional inverter register map is off by default (`map_unvalidated`),
   so live PV power comes from the inverter block only when enabled. Grid comes
