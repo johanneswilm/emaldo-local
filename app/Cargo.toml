@@ -1,9 +1,9 @@
-# Own workspace root: bridge/ is a separate Cargo workspace (Approach B);
-# this driver (Approach A) is deliberately not a member of it.
+# Single app, two roles (bridge | driver) — see docs/SINGLE_APP_PLAN.md.
+# Own workspace root; bridge/crates/emaldo-proto is consumed as a path dependency.
 [workspace]
 
 [package]
-name = "emaldo-driver"
+name = "emaldo-local"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"

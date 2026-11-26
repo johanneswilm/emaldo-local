@@ -28,6 +28,7 @@ struct Pkt {
     topic: String,
     data: Vec<u8>,
     qos: u8,
+    retain: bool,
 }
 
 enum Transport {
@@ -85,6 +86,13 @@ pub struct Client {
     pub password: String,
     pub client_id: String,
     pub tls_insecure: bool,
+    /// Last will and testament: published by the broker if we vanish without
+    /// DISCONNECT, which is what makes Home Assistant's availability work.
+    pub will: Option<(String, Vec<u8>)>,
+    /// Runs after every successful CONNACK (initial connect and every
+    /// reconnect) so retained discovery configs are re-published when the
+    /// broker or Home Assistant restarts.
+    on_connect: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     on_message: Mutex<Option<Handler>>,
     out: Mutex<Sender<Pkt>>,
     out_rx: Mutex<Option<Receiver<Pkt>>>,
@@ -99,6 +107,7 @@ impl Client {
         password: &str,
         client_id: &str,
         tls_insecure: bool,
+        will: Option<(&str, &[u8])>,
     ) -> Arc<Client> {
         let (tx, rx) = channel();
         let c = Arc::new(Client {
@@ -107,6 +116,8 @@ impl Client {
             password: password.to_string(),
             client_id: client_id.to_string(),
             tls_insecure,
+            will: will.map(|(t, p)| (t.to_string(), p.to_vec())),
+            on_connect: Mutex::new(None),
             on_message: Mutex::new(None),
             out: Mutex::new(tx),
             out_rx: Mutex::new(Some(rx)),
@@ -126,6 +137,10 @@ impl Client {
         *self.on_message.lock().unwrap() = Some(h);
     }
 
+    pub fn set_on_connect(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_connect.lock().unwrap() = Some(f);
+    }
+
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
@@ -135,6 +150,18 @@ impl Client {
             topic: topic.to_string(),
             data: payload.to_vec(),
             qos,
+            retain: false,
+        });
+    }
+
+    /// QoS 1 + retain: what Home Assistant expects for discovery configs and
+    /// for availability, so a broker/HA restart does not lose the device.
+    pub fn publish_retained(&self, topic: &str, payload: &[u8]) {
+        let _ = self.out.lock().unwrap().send(Pkt {
+            topic: topic.to_string(),
+            data: payload.to_vec(),
+            qos: 1,
+            retain: true,
         });
     }
 
@@ -147,6 +174,7 @@ impl Client {
             topic: format!("__subscribe__{topic}"),
             data: Vec::new(),
             qos: 0,
+            retain: false,
         });
     }
 
@@ -205,6 +233,12 @@ impl Client {
             write_packet(&mut t, 0x82, &full).map_err(|e| format!("subscribe: {e}"))?;
         }
 
+        // Re-publish discovery configs and availability on every connect, so a
+        // broker or Home Assistant restart does not silently drop the device.
+        if let Some(f) = self.on_connect.lock().unwrap().clone() {
+            f();
+        }
+
         t.set_read_timeout(Some(Duration::from_millis(500)));
         let mut last_ping = Instant::now();
         let mut pending_qos1: HashMap<u16, Instant> = HashMap::new();
@@ -224,17 +258,18 @@ impl Client {
                     write_packet(&mut t, 0x82, &full).map_err(|e| format!("subscribe: {e}"))?;
                     continue;
                 }
+                let hdr = 0x30u8
+                    | ((p.qos & 0x03) << 1)
+                    | if p.retain { 1 } else { 0 };
+                let mut body = encode_str(&p.topic);
                 if p.qos == 1 {
                     mid = mid.wrapping_add(1);
-                    let mut body = encode_str(&p.topic);
                     body.extend_from_slice(&mid.to_be_bytes());
-                    body.extend_from_slice(&p.data);
-                    write_packet(&mut t, 0x32, &body).map_err(|e| format!("publish: {e}"))?;
+                }
+                body.extend_from_slice(&p.data);
+                write_packet(&mut t, hdr, &body).map_err(|e| format!("publish: {e}"))?;
+                if p.qos == 1 {
                     pending_qos1.insert(mid, Instant::now());
-                } else {
-                    let mut body = encode_str(&p.topic);
-                    body.extend_from_slice(&p.data);
-                    write_packet(&mut t, 0x30, &body).map_err(|e| format!("publish: {e}"))?;
                 }
             }
             pending_qos1.retain(|_, at| at.elapsed() < Duration::from_secs(5));
@@ -300,9 +335,18 @@ impl Client {
 
     fn encode_connect(&self) -> Vec<u8> {
         let mut vh = Vec::new();
-        vh.extend_from_slice(b"MQTT");
+        // The protocol name is a length-prefixed string, like every other
+        // MQTT UTF-8 string: 0x00 0x04 "MQTT".
+        vh.extend_from_slice(&encode_str("MQTT"));
         vh.push(4); // level
         let mut flags = 0x02u8; // clean session
+        if let Some((topic, _)) = &self.will {
+            if !topic.is_empty() {
+                flags |= 0x04; // Will Flag
+                flags |= 0x20; // Will Retain: the offline notice must be kept
+                flags |= 0x08; // Will QoS 1 (bits 3-4)
+            }
+        }
         if !self.username.is_empty() {
             flags |= 0x80;
             if !self.password.is_empty() {
@@ -312,6 +356,13 @@ impl Client {
         vh.push(flags);
         vh.extend_from_slice(&[0x00, 0x3C]); // keepalive 60
         let mut payload = encode_str(&self.client_id);
+        // Will topic and will message come before the credentials, in that order.
+        if flags & 0x04 != 0 {
+            if let Some((topic, msg)) = &self.will {
+                payload.extend_from_slice(&encode_str(topic));
+                payload.extend_from_slice(&encode_bytes(msg));
+            }
+        }
         if flags & 0x80 != 0 {
             payload.extend_from_slice(&encode_str(&self.username));
             if flags & 0x40 != 0 {
@@ -365,6 +416,15 @@ fn encode_str(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + s.len());
     out.extend_from_slice(&(s.len() as u16).to_be_bytes());
     out.extend_from_slice(s.as_bytes());
+    out
+}
+
+/// Same 2-byte length prefix as a UTF-8 string, for will payloads (which are
+/// arbitrary bytes, not necessarily valid UTF-8).
+fn encode_bytes(b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + b.len());
+    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+    out.extend_from_slice(b);
     out
 }
 
@@ -478,5 +538,67 @@ mod tests {
         assert_eq!(parse_url("mqtt://10.0.0.2:1883").unwrap(), ("10.0.0.2".into(), 1883, false));
         assert_eq!(parse_url("mqtts://broker.local").unwrap(), ("broker.local".into(), 8883, true));
         assert!(parse_url("http://x").is_err());
+    }
+}
+
+#[cfg(test)]
+mod conn_wire_tests {
+    use super::*;
+
+    /// Mock broker: capture the CONNECT frame, answer with a CONNACK.
+    #[test]
+    fn connect_frame_matches_mqtt311() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match sock.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break, // read timeout: the frame is complete
+                }
+            }
+            let _ = sock.write_all(&[0x20, 0x02, 0x00, 0x00]);
+            let _ = sock.flush();
+            std::thread::sleep(Duration::from_millis(300));
+            buf
+        });
+        let c = Client::new(
+            &format!("mqtt://127.0.0.1:{port}"),
+            "user",
+            "pass",
+            "HMvSUfAafuYCokvv",
+            false,
+            Some(("emaldo/powercore/status", b"offline".as_slice())),
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        c.close();
+        let buf = handle.join().unwrap();
+        eprintln!("captured {} bytes: {:02x?}", buf.len(), &buf[..buf.len().min(64)]);
+        assert_eq!(buf[0], 0x10, "CONNECT fixed header");
+        // variable header: length-prefixed name, level, flags, keepalive
+        assert_eq!(&buf[2..4], &[0x00, 0x04], "protocol name length");
+        assert_eq!(&buf[4..8], b"MQTT", "protocol name");
+        assert_eq!(buf[8], 4, "protocol level");
+        // clean session + will + will QoS1 + will retain + username + password
+        assert_eq!(buf[9], 0xEE, "connect flags");
+        assert_eq!(&buf[10..12], &[0x00, 0x3C], "keepalive 60");
+        let clen = u16::from_be_bytes([buf[12], buf[13]]) as usize;
+        assert_eq!(&buf[14..14 + clen], b"HMvSUfAafuYCokvv", "client id");
+        let mut p = 14 + clen;
+        let wlen = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+        assert_eq!(&buf[p + 2..p + 2 + wlen], b"emaldo/powercore/status", "will topic");
+        p += 2 + wlen;
+        let mlen = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+        assert_eq!(&buf[p + 2..p + 2 + mlen], b"offline", "will message");
+        p += 2 + mlen;
+        let ulen = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+        assert_eq!(&buf[p + 2..p + 2 + ulen], b"user", "username");
+        let rem = encode_rem_len(buf.len() - 2);
+        assert_eq!(buf[1], rem[0], "remaining length");
     }
 }

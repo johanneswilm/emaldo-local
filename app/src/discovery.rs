@@ -86,7 +86,14 @@ pub fn publish_state(c: &Client, base: &str, st: &State) {
     }
 }
 
-pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name: &str, st: &State, base: &str) {
+/// Retained availability flag. Kept separate from the configs so it is
+/// published even when Home Assistant discovery is turned off.
+pub fn publish_availability(c: &Client, base: &str) {
+    let base = base.trim_end_matches('/');
+    c.publish_retained(&format!("{base}/status"), b"online");
+}
+
+pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name: &str, st: &State, base: &str) -> usize {
     let base = base.trim_end_matches('/');
     let dev = serde_json::json!({
         "ids": [device_id],
@@ -97,7 +104,7 @@ pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name:
     let mut add = |comp: &str, object_id: &str, name: &str, extra: serde_json::Value| {
         let mut obj = serde_json::json!({
             "name": name,
-            "uniq_id": format!("{device_id}_{object_id}"),
+            "uniq_id": format!("emaldo-local:{device_id}:{object_id}"),
             "avty_t": format!("{base}/status"),
             "dev": dev,
         });
@@ -176,10 +183,12 @@ pub fn publish_discovery(c: &Client, prefix: &str, device_id: &str, device_name:
                 "unit_of_meas": "W", "dev_cla": "power", "stat_cla": "measurement"}),
         );
     }
-    c.publish(&format!("{base}/status"), b"online", 1);
+    let mut n = 0usize;
     for (topic, obj) in ents {
         if let Ok(b) = serde_json::to_vec(&obj) {
-            c.publish(&topic, &b, 1);
+            c.publish_retained(&topic, &b);
+            n += 1;
         }
     }
+    n
 }

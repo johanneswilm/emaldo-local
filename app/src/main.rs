@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Johannes Wilm
 //
-// emaldo-driver — lean Rust driver for the Emaldo Power Core 2.0 module.
+// emaldo-local — lean Rust driver for the Emaldo Power Core 2.0 module.
 //
 // Phase 1: read-only hardware telemetry over Modbus RTU and the MCU
 // sysfs, e-ink display, MQTT + Home Assistant discovery, authenticated
@@ -81,7 +81,15 @@ fn hex(b: &[u8]) -> String {
 fn main() {
     tls::init();
 
-    let mut cfg_path = PathBuf::from("/root/emaldo-driver.toml");
+    // One config file for both roles; the driver-era path is still honoured so
+    // an existing install keeps working untouched.
+    let mut cfg_path = PathBuf::from("/root/emaldo-local.toml");
+    if !cfg_path.exists() {
+        let legacy = PathBuf::from("/root/emaldo-driver.toml");
+        if legacy.exists() {
+            cfg_path = legacy;
+        }
+    }
     let mut rollback_mode = false;
     let mut mcu_probe = false;
     let mut mcu_port: Option<String> = None;
@@ -190,12 +198,12 @@ fn main() {
                 }
             }
             "--version" => {
-                println!("emaldo-driver {VERSION}");
+                println!("emaldo-local {VERSION}");
                 return;
             }
             other => {
                 eprintln!(
-                    "unknown argument {other:?}\nusage: emaldo-driver [--config PATH] [--rollback]\n       emaldo-driver [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-driver [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-driver --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --can-poll [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-driver [--config PATH] --prices-probe\n       emaldo-driver [--config PATH] --solar-probe\n       emaldo-driver [--config PATH] --plan-probe SOC\n       emaldo-driver [--config PATH] --switches-probe\n       emaldo-driver --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-driver --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
+                    "unknown argument {other:?}\nusage: emaldo-local [--config PATH] [--rollback]\n       emaldo-local [--config PATH] --mcu-probe [--mcu-port PATH] [--mcu-timeout-ms N]\n       emaldo-local [--config PATH] --mcu-raw-dump SECS [--mcu-port PATH]\n       emaldo-local --can-probe [--can-iface IF] [--can-seconds N]\n       emaldo-local [--config PATH] --can-poll [--can-iface IF] [--can-seconds N]\n       emaldo-local [--config PATH] --state-dump [--can-iface IF] [--can-seconds N]\n       emaldo-local [--config PATH] --prices-probe\n       emaldo-local [--config PATH] --solar-probe\n       emaldo-local [--config PATH] --plan-probe SOC\n       emaldo-local [--config PATH] --switches-probe\n       emaldo-local --write-probe WATTS   (WRITE_PORT/WRITE_SLAVE/WRITE_REG/WRITE_HOLD env; app must be stopped)\n       emaldo-local --rs485-probe [--rs485-ports P1,P2] [--rs485-bauds B1,B2] [--rs485-slaves HEX,...] [--rs485-sniff SECS]"
                 );
                 std::process::exit(2);
             }
@@ -668,12 +676,14 @@ fn main() {
             if cfg.mqtt.broker_url.is_empty() {
                 return;
             }
+            let avail_topic = format!("{}/status", cfg.mqtt.topic_prefix.trim_end_matches('/'));
             let mc = mqtt::Client::new(
                 &cfg.mqtt.broker_url,
                 &cfg.mqtt.username,
                 &cfg.mqtt.password,
                 &dev_id,
                 cfg.mqtt.tls_insecure,
+                Some((avail_topic.as_str(), b"offline".as_slice())),
             );
             let prefix = cfg.mqtt.topic_prefix.clone();
             let telem2 = telem.clone();
@@ -708,20 +718,36 @@ fn main() {
             };
             mc.set_on_message(handler);
             mc.subscribe(&format!("{prefix}/cmd/#"), Arc::new(|_| {}));
-            if cfg.mqtt.ha_discovery {
+            {
+                // Availability + discovery configs are (re)published on every
+                // CONNACK, so a broker or HA restart re-registers the device
+                // without waiting for the driver to restart.
                 let name = if cfg.device.name.is_empty() {
                     "Emaldo Power Core".to_string()
                 } else {
                     cfg.device.name.clone()
                 };
-                discovery::publish_discovery(
-                    &mc,
-                    &cfg.mqtt.discovery_prefix,
-                    &dev_id,
-                    &name,
-                    &telem.current(),
-                    &prefix,
-                );
+                let dpfx = cfg.mqtt.discovery_prefix.clone();
+                let base = prefix.clone();
+                let dev2 = dev_id.clone();
+                let telem3 = telem.clone();
+                let discover = cfg.mqtt.ha_discovery;
+                let weak = Arc::downgrade(&mc);
+                mc.set_on_connect(Arc::new(move || {
+                    let Some(c) = weak.upgrade() else { return };
+                    discovery::publish_availability(&c, &base);
+                    if discover {
+                        let n = discovery::publish_discovery(
+                            &c,
+                            &dpfx,
+                            &dev2,
+                            &name,
+                            &telem3.current(),
+                            &base,
+                        );
+                        telem3.add_event("info", "mqtt", format!("published {n} discovery configs"));
+                    }
+                }));
             }
             *guard = Some(mc);
         }
@@ -861,7 +887,7 @@ fn main() {
         &cfg0.web.tls_cert,
         &cfg0.web.tls_key,
         &state_dir,
-        vec![cfg0.device.name.clone(), "emaldo-driver.local".to_string()],
+        vec![cfg0.device.name.clone(), "emaldo-local.local".to_string()],
     ) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -905,9 +931,9 @@ fn main() {
     if store.get().admin.password_hash.is_empty() {
         eprintln!("FIRST BOOT: open https://<device-ip>:8443/ to run the setup wizard");
     }
-    telem.add_event("info", "main", format!("emaldo-driver {VERSION} up"));
+    telem.add_event("info", "main", format!("emaldo-local {VERSION} up"));
     eprintln!(
-        "emaldo-driver {VERSION} up: web {} (TLS), device id {}, bus {}, writes {}",
+        "emaldo-local {VERSION} up: web {} (TLS), device id {}, bus {}, writes {}",
         cfg0.web.listen_addr,
         dev_id,
         if cfg0.hardware.bus_enabled {
