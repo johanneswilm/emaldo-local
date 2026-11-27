@@ -118,52 +118,53 @@ start and persisted next to the config (`web-cert.pem` / `web-key.pem`,
 ### Configuration (`/root/emaldo-local/config.json`, `driver` section)
 
 Deliberately **not** `/root/config.toml` — that file belongs to the vendor
-app and stays untouched. The config is a TOML tree of sections `device`,
-`mqtt`, `web`, `hardware`, `admin`, `policy` (+ `policy.optimizer`),
-`control`, `prices`, `solar`; the exhaustive, always-current field list is
-`driver/src/config.rs`. A minimal live (read-only) example:
+app and stays untouched. One JSON document for both roles: the bridge's keys
+at the top level, this role's sections under `driver` (`device`, `mqtt`,
+`web`, `hardware`, `admin`, `policy` + `policy.optimizer`, `control`,
+`prices`, `solar`). The exhaustive, always-current field list is
+`app/src/config.rs`.
 
-```toml
-[device]
-name = "Power Core"
+**Comments are allowed.** `//` to end of line anywhere between values, so a
+hand edit can explain itself; `//` inside a string is left alone. Comments are
+ignored on read and *kept* on save: a save rewrites only the values of the
+keys that role owns, byte for byte around them. A minimal live (read-only)
+example:
 
-[mqtt]
-broker_url = ""          # mqtt://host:1883 or mqtts://host:8883; empty = off
-topic_prefix = "emaldo/powercore"
-ha_discovery = true
+```jsonc
+{
+  // one file for both roles: bridge keys here, driver's under "driver"
+  "mode": "off",
 
-[web]
-listen_addr = "0.0.0.0:4443"
+  "driver": {
+    "device": { "name": "Power Core" },
 
-[hardware]
-simulate = false         # synthetic telemetry; never on a real install
-bus_enabled = false      # false = no Modbus/MCU UARTs (live next to vendor app)
-can_poll = true          # active CAN BMS poller (packs are responders)
-meter_enabled = true     # b-sensor grid meter on /dev/ttyCH9344USB1
-meter_port = "/dev/ttyCH9344USB1"
+    "mqtt": {
+      "broker_url": "",                 // mqtt://host:1883, empty = off
+      "topic_prefix": "emaldo/powercore",
+      "ha_discovery": true
+    },
 
-[prices]                 # Nordpool day-ahead (keyless), cached on disk
-enabled = true
-area = "SE4"
-currency = "EUR"
+    "web": { "listen_addr": "0.0.0.0:4443" },   // same port in both roles
 
-[solar]                  # Open-Meteo PV forecast (keyless)
-enabled = true
-latitude = 55.7
-longitude = 13.2
+    "hardware": {
+      "simulate": false,                // synthetic telemetry; never on a real install
+      "bus_enabled": false,             // false = no Modbus/MCU UARTs (live next to the vendor app)
+      "can_poll": true,                 // active CAN BMS poller (packs are responders)
+      "meter_enabled": true,            // b-sensor grid meter
+      "meter_port": "/dev/ttyCH9344USB1"
+    },
 
-[policy]
-enabled = true
-mode = "optimize"        # auto | idle | charge | discharge | optimize
-reserve_percent = 20     # never discharge below this SOC
-override_slots = []      # 96x15min, e2e semantics (PROTOCOL.md §8)
+    "prices": { "enabled": true, "area": "SE4", "currency": "EUR" },   // Nordpool, keyless
+    "solar":  { "enabled": true, "latitude": 55.7, "longitude": 13.2 }, // Open-Meteo, keyless
 
-[control]
-writes_enabled = false   # MASTER SWITCH for bus writes; runtime-flippable
-power_scale = 10         # register units per watt (bench uses 10)
-min_write_interval_ms = 5000
-max_writes_per_minute = 12
-watchdog_secs = 60
+    "policy": {
+      "enabled": true,
+      "mode": "optimize",               // auto | idle | charge | discharge | optimize
+      "reserve_percent": 20,            // never discharge below this SOC
+      "override_slots": []              // 96x15min, e2e semantics (PROTOCOL.md §8)
+    }
+  }
+}
 ```
 
 Other `[hardware]` keys (Modbus poll, MCU, CAN listener, meter timing),

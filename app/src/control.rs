@@ -651,11 +651,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("config.toml"),
-            "[control]\npower_scale = 100\nwrites_enabled = false\n",
+            dir.join("config.json"),
+            r#"{"driver": {"control": {"power_scale": 100, "writes_enabled": false}}}"#,
         )
         .unwrap();
-        let cfg = ConfigStore::load(&dir.join("config.toml")).unwrap();
+        let cfg = ConfigStore::load(&dir.join("config.json")).unwrap();
         let ctrl = Controller::new(cfg.clone(), TelemStore::new(), Bus::new(), dir.clone());
         let act = RegisterActuator::new(cfg.clone(), ctrl.clone());
 

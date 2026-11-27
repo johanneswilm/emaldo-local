@@ -6,6 +6,27 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# JSON only, with comments (2026-11-27, last)
+
+The TOML reader, the `toml` dependency and the standalone-install migration are
+gone: this project's config has only ever been JSON. `/root/config.toml` is the
+*vendor* app's file and is still written by the mode switch — that is a
+different document and unchanged.
+
+The config parser now accepts `//` comments to end of line (string-aware:
+`"https://…"` is untouched) and the writer keeps them: a save rewrites only the
+values of the top-level keys the saving role owns, splicing them into the
+original text, with new keys appended before the closing brace. Every rewrite
+is re-parsed and compared against the intended document; on any disagreement
+the value is serialised plainly instead, so a comment-preserving bug can never
+store a config that reads back differently. Verified live: a commented file
+saved by the driver (61 bridge keys kept) and then by the bridge (driver table
+kept) still carried its comments and its `https://` URLs.
+
+Tests: 142 (2 new: new-key insertion, comment survival across a real save).
+
+---
+
 # One config file, versioned API (2026-11-27, later)
 
 **API is versioned again**: every route lives under `/api/v1/` in both roles

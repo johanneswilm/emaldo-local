@@ -414,8 +414,9 @@ impl<T> Clone for Store<T> {
 
 impl<T: serde::de::DeserializeOwned + Serialize + Default> Store<T> {
     pub fn load(path: &Path) -> std::io::Result<Store<T>> {
-        let value = match std::fs::read(path) {
-            Ok(b) => serde_json::from_slice(&b)
+        let value: T = match std::fs::read(path) {
+            Ok(b) => crate::config::shared::parse(&String::from_utf8_lossy(&b))
+                .and_then(|v| serde_json::from_value(v))
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => T::default(),
             Err(e) => return Err(e),
@@ -485,15 +486,14 @@ impl<T: serde::de::DeserializeOwned + Serialize + Default> Store<T> {
         let mut doc: serde_json::Value =
             serde_json::to_value(&*self.value.read().unwrap())
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let other = std::fs::read_to_string(&self.path)
+        let base = std::fs::read_to_string(&self.path).unwrap_or_default();
+        let other = crate::config::shared::parse(&base)
             .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|d| d.get("driver").cloned());
         if let (Some(obj), Some(other)) = (doc.as_object_mut(), other) {
             obj.insert("driver".into(), other);
         }
-        serde_json::to_vec_pretty(&doc)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        Ok(crate::config::shared::rewrite_owned(&base, &doc).into_bytes())
     }
 
     /// True when the file on disk changed since the bridge last read or wrote

@@ -714,55 +714,315 @@ pub mod shared {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    /// Why a file is or is not ours to read as the shared document.
-    pub enum Document {
-        /// A shared JSON document, `driver` present or not (empty = defaults).
-        Shared(Value),
-        /// Not JSON: a pre-merge TOML config or an empty file.
-        Legacy,
-    }
-
-    pub fn classify(text: &str) -> Document {
-        match serde_json::from_str::<Value>(text) {
-            Ok(Value::Object(_)) => Document::Shared(
-                serde_json::from_str::<Value>(text)
-                    .ok()
-                    .and_then(|d| d.get("driver").cloned())
-                    .unwrap_or(Value::Object(Default::default())),
-            ),
-            _ => Document::Legacy,
+    /// The `driver` table of a shared document. `None` only when the text is
+    /// not a JSON object at all (an empty file is an empty document).
+    pub fn driver_table(text: &str) -> Option<Value> {
+        match parse(text) {
+            Ok(Value::Object(doc)) => Some(match doc.get("driver") {
+                None | Some(Value::Null) => Value::Object(Default::default()),
+                Some(v) => v.clone(),
+            }),
+            _ => None,
         }
     }
 
-    /// Move an existing standalone install onto the shared file: the bridge's
-    /// JSON (or its absence) becomes the document, the merchant TOML's tables
-    /// land under `driver`, and the old files are kept next to it as
-    /// `*.pre-merge`.
-    pub fn migrate(shared: &Path, toml_src: &Path) -> Result<bool, String> {
-        let old_toml = std::fs::read_to_string(toml_src).unwrap_or_default();
-        if old_toml.trim().is_empty() {
-            return Ok(false);
+    /// Parse the config as JSON with `//` line comments, so the file can carry
+    /// notes like `"max_soc_percent": 100  // leave headroom in summer`.
+    /// Comments are stripped on read and not written back: a save keeps the
+    /// operator's text out of the way of the values it rewrites, and the old
+    /// file survives as `.bak`. `//` inside a string is untouched.
+    pub fn parse(text: &str) -> Result<Value, serde_json::Error> {
+        serde_json::from_str(&strip_comments(text))
+    }
+
+    /// Drop `//` comments while respecting string literals and escapes.
+    pub fn strip_comments(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        let mut in_string = false;
+        let mut escaped = false;
+        while let Some(c) = chars.next() {
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if c == '"' {
+                in_string = true;
+                out.push(c);
+            } else if c == '/' && chars.peek() == Some(&'/') {
+                while let Some(&n) = chars.peek() {
+                    if n == '\n' { break; }
+                    chars.next();
+                }
+            } else {
+                out.push(c);
+            }
         }
-        let mut doc: Value = std::fs::read_to_string(shared)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_else(|| Value::Object(Default::default()));
-        let cfg: Config =
-            toml::from_str(&old_toml).map_err(|e| format!("parse {}: {e}", toml_src.display()))?;
-        let obj = doc.as_object_mut().ok_or("shared document is not an object")?;
-        obj.insert("driver".into(), serde_json::to_value(&cfg).map_err(|e| e.to_string())?);
-        let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-        let tmp = shared.with_extension("tmp");
-        std::fs::write(&tmp, &text).map_err(|e| e.to_string())?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-        if shared.exists() {
-            let bak = shared.with_extension("pre-merge");
-            std::fs::copy(shared, &bak).map_err(|e| e.to_string())?;
+        out
+    }
+
+    /// Rewrite the *text* of a document: `base` (as read from disk) with
+    /// `new` merged in, touching only the owned top-level keys.
+    ///
+    /// Whole-document serialisation erases the operator's `//` notes on every
+    /// save. Here the original text is kept byte for byte except the values of
+    /// keys in `new`: each such value is replaced in place, an owned key that
+    /// disappeared loses its value but keeps its own line's comment prefix,
+    /// and a new key is inserted before the closing brace with the indentation
+    /// of its neighbours. The result is re-parsed and compared with `new`; on
+    /// any disagreement the caller's value is serialised instead, so a corrupt
+    /// file can never reach disk.
+    pub fn rewrite_owned(base: &str, new: &Value) -> String {
+        let fallback = || serde_json::to_string_pretty(new).unwrap_or_else(|_| "{}".into());
+        let Some(new_obj) = new.as_object() else { return fallback() };
+        // The root object starts at the first `{` that is outside comments and
+        // strings: scanning the raw text would anchor on `{` inside a comment.
+        let chars: Vec<char> = strip_comments(base).chars().collect();
+        let Some(spans) = top_level_spans(&chars) else { return fallback() };
+        // (start of value, end of value) in byte offsets, from char offsets.
+        let byte_at = |i: usize| chars[..i.min(chars.len())].iter().map(|c| c.len_utf8()).sum::<usize>();
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        let mut seen: Vec<&String> = Vec::new();
+        for sp in &spans {
+            let Some(v) = new_obj.get(&sp.key) else { continue };
+            seen.push(&sp.key);
+            if sp.start == sp.end {
+                // A key whose value is absent cannot occur in valid JSON.
+                return fallback();
+            }
+            edits.push((byte_at(sp.start), byte_at(sp.end), render_value(v, sp.indent)));
         }
-        std::fs::rename(&tmp, shared).map_err(|e| e.to_string())?;
-        let toml_bak = toml_src.with_extension("toml.pre-merge");
-        let _ = std::fs::rename(toml_src, &toml_bak);
-        Ok(true)
+        // Any key of `new` that the file does not have yet is appended.
+        let missing: Vec<&String> = new_obj.keys().filter(|k| !seen.contains(k)).collect();
+        if !missing.is_empty() {
+            // New keys: insert before the closing brace, one per line.
+            let insert_at = byte_at(root_close(&chars));
+            let mut tail = String::new();
+            for (k, v) in new_obj {
+                if seen.contains(&k) { continue; }
+                let comma = if spans.is_empty() && tail.is_empty() { "" } else { "," };
+                tail.push_str(&format!("{comma}\n  \"{}\": {}", escape_key(k), render_value(v, 2)));
+            }
+            if !tail.is_empty() {
+                edits.push((insert_at, insert_at, tail));
+            }
+        }
+        edits.sort_by_key(|(a, b, _)| (*a, *b));
+        // Offsets were measured on the comment-stripped text; map each one
+        // back to its place in the original so the comments around it stay.
+        let plain: String = base.chars().collect();
+        let mut out = String::with_capacity(plain.len() + 256);
+        let mut at = 0;
+        for (a, b, text) in edits {
+            let (Some(oa), Some(ob)) = (strip_offset(base, a), strip_offset(base, b)) else {
+                return fallback();
+            };
+            if oa < at || ob < oa || ob > plain.len() { return fallback(); }
+            out.push_str(&plain[at..oa]);
+            out.push_str(&text);
+            at = ob;
+        }
+        out.push_str(&plain[at..]);
+        // Re-parsed and compared: a patcher bug can never write a config the
+        // next start would not read back as the same values.
+        match parse(&out) {
+            Ok(v) if &v == new => out,
+            _ => fallback(),
+        }
+    }
+
+    /// Byte offset in `original` of the character at byte offset `stripped_at`
+    /// in `strip_comments(original)`.
+    fn strip_offset(original: &str, stripped_at: usize) -> Option<usize> {
+        let target = stripped_at;
+        let mut produced = 0usize;
+        let mut i = 0usize;
+        let bytes = original.as_bytes();
+        let mut in_string = false;
+        let mut escaped = false;
+        while i < bytes.len() {
+            if produced == target {
+                return Some(i);
+            }
+            let rest = &original[i..];
+            let c = rest.chars().next()?;
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                produced += c.len_utf8();
+                i += c.len_utf8();
+            } else if c == '"' {
+                in_string = true;
+                produced += 1;
+                i += 1;
+            } else if rest.starts_with("//") {
+                // Skip the comment and its line break: neither is produced.
+                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            } else {
+                produced += c.len_utf8();
+                i += c.len_utf8();
+            }
+        }
+        if produced == target { Some(bytes.len()) } else { None }
+    }
+
+    struct Span {
+        key: String,
+        /// Char offsets of the value, exclusive end.
+        start: usize,
+        end: usize,
+        indent: usize,
+    }
+
+    fn escape_key(k: &str) -> String {
+        k.chars().map(|c| match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            c => c.to_string(),
+        }).collect()
+    }
+
+    fn render_value(v: &Value, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        serde_json::to_string_pretty(v)
+            .unwrap_or_default()
+            .replace('\n', &format!("\n{pad}"))
+    }
+
+    /// Index of the root object's closing brace.
+    fn root_close(chars: &[char]) -> usize {
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (i, &c) in chars.iter().enumerate() {
+            if in_string {
+                if escaped { escaped = false } else if c == '\\' { escaped = true } else if c == '"' { in_string = false }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 { return i; }
+                }
+                _ => {}
+            }
+        }
+        0
+    }
+
+    /// End char offset (exclusive) of the JSON value starting at `i`.
+    fn skip_value(chars: &[char], mut i: usize, close: usize) -> usize {
+        while i < close && chars[i].is_whitespace() { i += 1; }
+        if i >= close { return i; }
+        match chars[i] {
+            '"' => {
+                i += 1;
+                while i < close {
+                    if chars[i] == '\\' { i += 2; continue; }
+                    if chars[i] == '"' { return i + 1; }
+                    i += 1;
+                }
+                i
+            }
+            '{' | '[' => {
+                let mut depth = 0i32;
+                while i < close {
+                    match chars[i] {
+                        '"' => {
+                            i += 1;
+                            while i < close {
+                                if chars[i] == '\\' { i += 1; continue; }
+                                if chars[i] == '"' { break; }
+                                i += 1;
+                            }
+                        }
+                        '{' | '[' => depth += 1,
+                        '}' | ']' => {
+                            depth -= 1;
+                            if depth == 0 { return i + 1; }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i
+            }
+            _ => {
+                while i < close && chars[i] != ',' { i += 1; }
+                i
+            }
+        }
+    }
+
+    /// Key -> value spans of the root object, with each value's indent depth.
+    fn top_level_spans(chars: &[char]) -> Option<Vec<Span>> {
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut start_root = None;
+        let mut end_root = None;
+        for (i, &c) in chars.iter().enumerate() {
+            if in_string {
+                if escaped { escaped = false } else if c == '\\' { escaped = true } else if c == '"' { in_string = false }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' => {
+                    depth += 1;
+                    if depth == 1 { start_root = Some(i); }
+                }
+                '}' => {
+                    if depth == 1 { end_root = Some(i); }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        let (open, close) = (start_root?, end_root?);
+        let mut out = Vec::new();
+        let mut i = open + 1;
+        while i < close {
+            // A top-level key starts at depth 1.
+            while i < close && chars[i].is_whitespace() { i += 1; }
+            if i >= close || chars[i] != '"' { break; }
+            let key_start = i + 1;
+            let mut j = key_start;
+            while j < close {
+                if chars[j] == '\\' { j += 2; continue; }
+                if chars[j] == '"' { break; }
+                j += 1;
+            }
+            let key: String = chars[key_start..j].iter().collect();
+            let mut k = j + 1;
+            while k < close && chars[k].is_whitespace() { k += 1; }
+            if k >= close || chars[k] != ':' { return None; }
+            let mut v = k + 1;
+            while v < close && chars[v].is_whitespace() { v += 1; }
+            let vend = skip_value(chars, v, close);
+            // Indentation of the value's own line (its column).
+            let line_start = chars[..v].iter().rposition(|c| *c == '\n').map(|p| p + 1).unwrap_or(0);
+            let indent = v.saturating_sub(line_start);
+            out.push(Span { key, start: v, end: vend, indent });
+            i = vend;
+            while i < close && chars[i].is_whitespace() { i += 1; }
+            if i < close && chars[i] == ',' { i += 1; }
+        }
+        Some(out)
     }
 
     /// Rewrite `old` with `driver` replaced by `cfg`, keeping every other key
@@ -771,10 +1031,10 @@ pub mod shared {
         let mut doc: Value = if old.trim().is_empty() {
             Value::Object(Default::default())
         } else {
-            match serde_json::from_str(old) {
+            match parse(old) {
                 Ok(v) => v,
-                // A legacy TOML file: keep it as the .bak, start the JSON
-                // document with what this role reads.
+                // Unreadable: it stays on disk as the .bak and the document
+                // starts from what this role knows.
                 Err(_) => Value::Object(Default::default()),
             }
         };
@@ -783,7 +1043,7 @@ pub mod shared {
             "driver".into(),
             serde_json::to_value(cfg).map_err(|e| e.to_string())?,
         );
-        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+        Ok(rewrite_owned(old, &doc))
     }
 }
 
@@ -844,15 +1104,11 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
-        let mut cfg: Config = match shared::classify(&text) {
-            shared::Document::Shared(table) => serde_json::from_value(table)
+        let mut cfg: Config = match shared::driver_table(&text) {
+            Some(table) => serde_json::from_value(table)
                 .map_err(|e| format!("parse {} [driver]: {e}", path.display()))?,
-            // A pre-merge TOML file (or an empty one): still read, migrated on
-            // the next save.
-            shared::Document::Legacy if text.trim().is_empty() => Config::default(),
-            shared::Document::Legacy => {
-                toml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?
-            }
+            None if text.trim().is_empty() => Config::default(),
+            None => return Err(format!("parse {}: not a JSON object", path.display())),
         };
         cfg.hardware.resolve();
         Ok(Arc::new(Store {
@@ -927,6 +1183,89 @@ mod shared_doc_tests {
     use super::*;
 
     #[test]
+    fn rewriting_the_drivers_table_leaves_every_other_value_alone() {
+        let base = r#"{
+ // shared config
+ "mode": "local",          // cloud leg off
+ "users": {"op": {"salt": "a", "hash": "b", "iterations": 100000}},
+ "ui_port": 4443,
+ "driver": {"device": {"name": "old"}, "web": {"listen_addr": "0.0.0.0:4443"}}
+}"#;
+        let before = shared::parse(base).unwrap();
+        let mut doc = before.clone();
+        doc["driver"]["device"]["name"] = serde_json::json!("new name");
+        let text = shared::rewrite_owned(base, &doc);
+        let after = shared::parse(&text).unwrap();
+        assert_eq!(after, doc, "every value must survive the rewrite: {text}");
+        assert!(text.contains("new name"));
+        // The operator's notes survive a save; only values change.
+        assert!(text.contains("// shared config"), "header comment lost: {text}");
+        assert!(text.contains("// cloud leg off"), "inline comment lost: {text}");
+        assert!(text.contains("\"ui_port\": 4443"), "untouched value rewritten: {text}");
+        assert_eq!(text.matches("\"mode\"").count(), 1, "duplicate key: {text}");
+    }
+
+    #[test]
+    fn a_new_key_is_inserted_and_comments_stay() {
+        let base = "{\n // keep me\n \"a\": 1\n}\n";
+        let doc = serde_json::json!({"a": 1, "b": {"c": 2}});
+        let text = shared::rewrite_owned(base, &doc);
+        assert_eq!(shared::parse(&text).unwrap(), doc);
+        assert!(text.contains("// keep me"), "{text}");
+        assert!(text.contains("\"b\""), "{text}");
+    }
+
+    #[test]
+    fn an_absent_owned_key_drops_its_value_but_not_others() {
+        let base = "{\n \"a\": 1,\n \"gone\": \"x\"   // note about gone\n}\n";
+        let doc = serde_json::json!({"a": 1});
+        let text = shared::rewrite_owned(base, &doc);
+        assert_eq!(shared::parse(&text).unwrap(), doc, "{text}");
+        assert!(!text.contains("\"gone\""), "{text}");
+    }
+
+    #[test]
+    fn comments_are_allowed_and_strings_are_untouched() {
+        let text = r#"{
+  // the battery keeps 3 kWh in reserve
+  "policy": {"reserve_percent": 21.0},
+  "api_bind": "0.0.0.0",        // not used when the token is set
+  "url": "https://example.test//path",
+  "note": "trailing // kept"
+}"#;
+        let v = shared::parse(text).unwrap();
+        assert_eq!(v["policy"]["reserve_percent"], serde_json::json!(21.0));
+        assert_eq!(v["url"], serde_json::json!("https://example.test//path"));
+        assert_eq!(v["note"], serde_json::json!("trailing // kept"));
+    }
+
+    #[test]
+    fn a_quote_inside_a_string_does_not_end_it() {
+        let text = r#"{"s": "he said \"a // b\"", "n": 1}"#;
+        let v = shared::parse(text).unwrap();
+        assert_eq!(v["n"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn a_commented_file_loads_and_a_save_keeps_the_values() {
+        let dir = std::env::temp_dir().join(format!("emaldo-comments-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        std::fs::write(&path, "{\n  // bridge keys\n  \"mode\": \"local\",\n  \"driver\": {\"device\": {\"name\": \"commented\"}}\n}\n").unwrap();
+        let store = Store::load(&path).unwrap();
+        assert_eq!(store.get().device.name, "commented");
+        let mut cfg = store.get();
+        cfg.policy.reserve_percent = 44.0;
+        store.save(&cfg).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = shared::parse(&text).unwrap();
+        assert_eq!(doc["mode"], serde_json::json!("local"));
+        assert_eq!(doc["driver"]["policy"]["reserve_percent"], serde_json::json!(44.0));
+        assert!(text.contains("// bridge keys"), "the operator's note must survive the save: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn driver_save_keeps_the_bridges_keys() {
         let dir = std::env::temp_dir().join(format!("emaldo-shared-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -948,27 +1287,6 @@ mod shared_doc_tests {
         let again = Store::load(&path).unwrap().get();
         assert_eq!(again.device.name, "Power Core");
         assert_eq!(again.policy.reserve_percent, 27.0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_standalone_toml_install_is_migrated_once() {
-        let dir = std::env::temp_dir().join(format!("emaldo-migrate-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let shared = dir.join("config.json");
-        let toml_src = dir.join("emaldo-local.toml");
-        std::fs::write(&shared, r#"{"mode":"local","lan_cidrs":["192.168.0.0/16"]}"#).unwrap();
-        std::fs::write(&toml_src, "[device]\nname = \"Legacy\"\n[web]\nlisten_addr = \"10.0.0.2:4443\"\n").unwrap();
-
-        assert!(shared::migrate(&shared, &toml_src).unwrap());
-        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
-        assert_eq!(doc["mode"], serde_json::json!("local"));
-        assert_eq!(doc["driver"]["device"]["name"], serde_json::json!("Legacy"));
-        assert!(dir.join("config.pre-merge").exists(), "old bridge config must be kept");
-        assert!(!toml_src.exists(), "the TOML is moved aside after migration");
-
-        let cfg = Store::load(&shared).unwrap().get();
-        assert_eq!(cfg.web.listen_addr, "10.0.0.2:4443");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
