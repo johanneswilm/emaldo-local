@@ -12,41 +12,6 @@ roles** — it either keeps the vendor app and takes over its cloud, or it
 replaces the vendor app on the buses — plus shared reverse-engineering and
 test bench tooling. The roles differ in what they keep and what they give up.
 
-> ## ⚠ Safety: do not flash while the vendor is alive
->
-> Neither approach *requires* flashing the vendor firmware, but both change
-> how the module reaches its cloud. While Emaldo's servers still exist, the
-> vendor app keeps your battery registered — including **grid-rewards / FCR
-> programmes that may pay you** — and keeps OTA working. Changing its
-> endpoints can cost you that and can brick remote manageability.
->
-> - The **driver** role can run *alongside* the vendor app in read-only mode
->   (no bus writes, passive CAN). That is safe to run today.
-> - The **bridge** role deliberately redirects the vendor app's cloud. It works
->   and is reversible in one command (`emaldo-local mode vendor`), but it
->   rewrites `/etc/hosts`, routes and the resolver — read
->   [`app/OPERATIONS.md`](app/OPERATIONS.md) before doing it on a live box.
->
-> Treat any change to the vendor app's environment as potentially
-> unrecoverable without hardware access (UART console). The original vendor
-> IoT firmware (`6102ea751f963eea.bin`, md5 `94d351b8f1857c79cd710f2f95347cf2`,
-> ~31 MB, *not* in this repo) is your rollback image — back it up offline.
-> License: GPL-3.0-only (see `LICENSE`).
-
-## Credits
-
-This project builds on the community's Home Assistant work — notably
-[pylenius/ha-emaldo](https://github.com/pylenius/ha-emaldo) and
-[wertigpar/ha-battery-optimizer](https://github.com/wertigpar/ha-battery-optimizer).
-See [CREDITS.md](CREDITS.md).
-
-## Access & isolation
-
-How to get **SSH access** to a Power Core module, **persist** it, and **shut
-the vendor out** (cloud + its remote-access tunnel) — plus the safety and
-reversal steps — is in [`docs/ACCESS.md`](docs/ACCESS.md). Read it before
-changing anything on a live box.
-
 ## One binary, two roles
 
 Since 2026-11-26 the two approaches are **one Rust package** (`app/`, binary
@@ -62,6 +27,13 @@ On the live Power Core both roles currently run side by side from one artifact
 (`Before=monitor.service`, so the front listens before the vendor app dials) and
 the driver unit `emaldo-local-driver.service` in read-only telemetry mode. Bridge RSS
 3.8 MB, driver RSS 3.1 MB.
+
+## Access & isolation
+
+How to get **SSH access** to a Power Core module, **persist** it, and **shut
+the vendor out** (cloud + its remote-access tunnel) — plus the safety and
+reversal steps — is in [`docs/ACCESS.md`](docs/ACCESS.md). Read it before
+changing anything on a live box.
 
 ### Status (2026-11-26)
 
@@ -145,6 +117,30 @@ addresses — does **not** belong in git. On a battery they live in
 `~/.config/emaldo-local/` (`EMALDO_LEARN_CREDS`). Test fixtures use
 documentation address ranges only.
 
-Commit history before the 2026-11-25 cleanup contained ids of one real
-installation (`learn/learn_server.py`, `scripts/`, `emaldo_re/`); a history
-rewrite is required before publishing that history to the public remote.
+> ## ⚠ Safety: do not flash while the vendor is alive
+>
+> Neither approach *requires* flashing the vendor firmware, but both change
+> how the module reaches its cloud. While Emaldo's servers still exist, the
+> vendor app keeps your battery registered — including **grid-rewards / FCR
+> programmes that may pay you** — and keeps OTA working. Changing its
+> endpoints can cost you that and can brick remote manageability.
+>
+> - The **driver** role can run *alongside* the vendor app in read-only mode
+>   (no bus writes, passive CAN). That is safe to run today.
+> - The **bridge** role deliberately redirects the vendor app's cloud. It works
+>   and is reversible in one command (`emaldo-local mode vendor`), but it
+>   rewrites `/etc/hosts`, routes and the resolver — read
+>   [`app/OPERATIONS.md`](app/OPERATIONS.md) before doing it on a live box.
+>
+> Treat any change to the vendor app's environment as potentially
+> unrecoverable without hardware access (UART console). The original vendor
+> IoT firmware (`6102ea751f963eea.bin`, md5 `94d351b8f1857c79cd710f2f95347cf2`,
+> ~31 MB, *not* in this repo) is your rollback image — back it up offline.
+> License: GPL-3.0-only (see `LICENSE`).
+
+## Credits
+
+This project builds on the community's Home Assistant work — notably
+[pylenius/ha-emaldo](https://github.com/pylenius/ha-emaldo) and
+[wertigpar/ha-battery-optimizer](https://github.com/wertigpar/ha-battery-optimizer).
+See [CREDITS.md](CREDITS.md).
