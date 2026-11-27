@@ -6,6 +6,22 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# Deployed to the live unit (2026-11-27 14:0x UTC)
+
+ARMv7 build pushed to `/root/emaldo-local/emaldo-local` (old binary kept as
+`backups/emaldo-local-20261127-1305`, config as `config.json.pre-deploy-*`).
+Since the unit restarted: versioned API (`/api/v1/*`; the old `/api/*` paths
+answer 401), `/api/v1/role` → `{"role":"bridge","authed":false}`, one page on
+`:4443`, 14 MQTT discovery configs republished, bridge RSS ~4 MB, CPU ~12 %.
+
+One regression found during verification and fixed on the spot: the run's
+`writes_enabled` read `false` while warm-up held the engine off. The actuator
+now reports the gate from the config, not from its last attempt.
+
+Bridge soak running: 30 samples, one a minute.
+
+---
+
 # E-ink: full clear at start, role-aware (2026-11-27, last)
 
 Leftover pixels after a role switch came from two things: the boot clear only

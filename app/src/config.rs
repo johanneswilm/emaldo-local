@@ -1257,6 +1257,18 @@ mod shared_doc_tests {
     }
 
     #[test]
+    fn the_bridge_store_reads_a_true_gate_from_the_file() {
+        let dir = std::env::temp_dir().join(format!("emaldo-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"control": {"writes_enabled": true, "power_scale": 10}}"#).unwrap();
+        let store = crate::bridge::config::Store::<crate::bridge::config::Config>::load(&path).unwrap();
+        assert!(store.get().control.writes_enabled, "the file said true");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_absent_gate_reads_as_closed_from_the_shared_document() {
         // A file that predates the gate must not silently enable bus writes
         // in the bridge: the bridge constructor applies its own default.

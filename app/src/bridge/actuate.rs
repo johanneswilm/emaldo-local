@@ -275,7 +275,12 @@ impl Actuator for E2eActuator {
     }
 
     fn status(&self) -> Applied {
-        self.state.lock().unwrap().clone()
+        // The gate is a property of the config, not of the last write attempt:
+        // the engine stands down while it warms up or the telemetry is stale,
+        // and the UI must still say whether writes are armed.
+        let mut st = self.state.lock().unwrap().clone();
+        st.writes_enabled = self.bridge.cfg.get().control.writes_enabled;
+        st
     }
 }
 
@@ -283,6 +288,19 @@ impl Actuator for E2eActuator {
 mod tests {
     use super::*;
     use crate::optimizer::PlanSlot;
+
+    #[test]
+    fn status_reports_the_gate_even_before_the_first_write() {
+        // The plan pane must not claim "dry-run" while reads are still warming
+        // up: the gate is whatever the config says.
+        let (_dir, bridge) = crate::bridge::tests::fixture("actstatus");
+        bridge.cfg.update(|c| c.control.writes_enabled = true).unwrap();
+        let relay = crate::bridge::relay::Relay::start(bridge.clone(), 0, 0).unwrap();
+        let act = E2eActuator::new(bridge.clone(), relay);
+        assert!(act.status().writes_enabled);
+        bridge.cfg.update(|c| c.control.writes_enabled = false).unwrap();
+        assert!(!act.status().writes_enabled);
+    }
 
     fn plan_at(now: i64, intents: &[Intent], powers: &[f64]) -> Plan {
         let day = day_start_unix(now);

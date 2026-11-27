@@ -41,7 +41,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// A bridge with a provisioned identity and loopback-only, ephemeral ports.
-fn fixture(tag: &str) -> (PathBuf, Arc<Bridge>) {
+pub(crate) fn fixture(tag: &str) -> (PathBuf, Arc<Bridge>) {
     let dir = scratch(tag);
     let cfg_path = dir.join("config.json");
     let mut cfg = Config::default();
