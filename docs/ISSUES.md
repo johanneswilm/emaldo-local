@@ -43,6 +43,27 @@ the evidence, and the current status.
   fb driver, or `/sys/class/graphics/fb0/name`) for an fb_ops fsync/deferred_io.
 - **Not a data problem:** telemetry/web/MQTT are unaffected; it is display-only.
 
+## 1b. Pixels stay on the panel after a role switch (2026-11-27)
+- **Symptom:** after the driver role drew the screen, the bridge (vendor app
+  drawing) shows its own layout with old pixels in the gaps; nothing repaints
+  the panel between role changes. E-ink keeps its image without electrical
+  refresh, so leftover content stays for hours.
+- **Probed on the live unit:** the panel is the NXP mxc_epdc controller
+  (`/proc/kallsyms` has `mxc_epdc_fb_*`, `fb_uc8276`, `pan_display`).
+  `FBIO_LCD_CHANGE_CONTROL` (0x400446AF), legacy 0x46AF/0x4612 and friends all
+  return **ENOTTY**; `/dev/mem` reads are blocked, so the closed module's ioctl
+  set cannot be recovered from the running kernel. `FBIOPUT_VSCREENINFO`
+  succeeds but changes nothing visible.
+- **What is fixed in code:** the boot clear now wipes the *whole* mapping (it
+  only repainted the visible rectangle before), does a second pass after
+  1.5 s, and the driver role clears by default
+  (`hardware.display_clear_on_start`, driver default true). The bridge adopts
+  the current screen instead of erasing the vendor app's drawing; set the flag
+  there to clean up after a driver run.
+- **What is not:** a controller-level full refresh (waveform/LUT) needs the
+  vendor kernel's update ioctl; without it the first paint after a role change
+  may still leave faint ghosts. Status: MITIGATED, NEEDS LIVE LOOK.
+
 ## 2. Live inverter setpoint writes time out (control not executed)
 - **Symptom:** in service mode (`writes_enabled=true`, `mode=optimize`) the
   controller reaches the write step but logs

@@ -34,6 +34,12 @@ use std::time::Duration;
 
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
 const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+// No custom ioctl here on purpose. The panel is the NXP mxc_epdc controller
+// (`fb_uc8276`), whose update path only the closed vendor kernel module knows;
+// `FBIO_LCD_CHANGE_CONTROL` and the legacy 0x46xx numbers all return ENOTTY on
+// this unit (probed 2026-11-27, docs/ISSUES.md #1), and `/dev/mem` is blocked,
+// so the number cannot be recovered from the running kernel. The vendor app's
+// own update trigger is the fsync this module already does.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How the e-ink panel is told to pick up new pixels.
@@ -213,9 +219,33 @@ impl Renderer {
             black,
         };
 
-        // One full clear at boot (the only full refresh).
-        cv.shadow.fill(white);
-        flush_diff(fb0, cv.shadow, Some(fd), mode);
+        // Boot clear. The whole mapping, not just the visible rectangle, so
+        // nothing a previous renderer (the other role, the vendor app) left
+        // in the buffer survives. Pixels left on an e-ink panel persist until
+        // something repaints them, which is why the driver clears the screen
+        // it no longer owns.
+        //
+        // The bridge role does NOT clear by default: there the vendor app
+        // draws the panel and its content is wanted. `display_clear_on_start`
+        // forces it (e.g. to clean up after a driver run).
+        if cfg.hardware.display_clear_on_start {
+            cv.shadow.fill(white);
+            flush_diff(fb0, cv.shadow, Some(fd), mode);
+        } else {
+            // Adopt what is on screen: only our own future changes get written.
+            cv.shadow.copy_from_slice(fb0);
+        }
+
+        if cfg.hardware.display_clear_on_start {
+            // A second pass once the panel has taken the clear: the first
+            // update after a role change can land while the controller is
+            // still finishing its previous frame.
+            std::thread::sleep(Duration::from_millis(1500));
+            for b in fb0.iter_mut() {
+                *b = white;
+            }
+            refresh(fb0, Some(fd), mode);
+        }
 
         let mut last_fp = String::new();
         loop {
@@ -335,6 +365,10 @@ fn refresh(fb0: &[u8], fd: Option<std::os::unix::io::RawFd>, mode: FlushMode) {
                 fb0.len(),
                 libc::MS_SYNC,
             );
+            // The vendor's own trigger, verbatim: fsync of the fb fd.
+            if let Some(fd) = fd {
+                let _ = libc::fsync(fd);
+            }
         },
         FlushMode::File => {
             // No controller behind a regular file; keep the fd argument for
@@ -467,6 +501,17 @@ mod tests {
         // out of bounds: no panic
         cv.set_ink(-1, -1, true);
         cv.set_ink(400, 0, true);
+    }
+
+    #[test]
+    fn a_boot_clear_repaints_the_whole_buffer() {
+        // The leftover-pixels bug: a previous renderer's content outside the
+        // visible rectangle must not survive the clear.
+        let mut fb = vec![0xFFu8; 15001];
+        let white = 0u8;
+        let shadow = vec![white; 15001];
+        assert!(flush_diff(&mut fb, &shadow, None, FlushMode::File));
+        assert!(fb.iter().all(|b| *b == white), "stale bytes survived the clear");
     }
 
     #[test]

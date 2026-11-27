@@ -6,6 +6,21 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# E-ink: full clear at start, role-aware (2026-11-27, last)
+
+Leftover pixels after a role switch came from two things: the boot clear only
+repainted the visible rectangle of the mapping, and nothing cleared the panel
+between roles. The clear now fills the whole mapping, repeats after 1.5 s, and
+is owned by the role that draws the screen: the driver clears by default
+(`hardware.display_clear_on_start`), the bridge adopts what is on screen unless
+the flag is set. The refresh trigger stays the vendor's fsync of the fb fd;
+the mxc_epdc update ioctls all return ENOTTY on this unit (probed and recorded
+in docs/ISSUES.md #1b), so no unverified ioctl ships.
+
+Tests: 146 (2 new: full-mapping clear, role default).
+
+---
+
 # Driver writes by default, --read-only (2026-11-27, last)
 
 The driver role owns the bus it runs on, so `control.writes_enabled` now

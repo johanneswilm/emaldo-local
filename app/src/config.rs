@@ -148,6 +148,12 @@ pub struct HardwareConfig {
     pub framebuffer: String,
     #[serde(default = "default_true")]
     pub display_enabled: bool,
+    /// Wipe the panel once at start (full white, two passes). On by default in
+    /// the driver role, which owns the screen; the bridge leaves the vendor
+    /// app's drawing alone unless this is set. Stale e-ink pixels from an
+    /// earlier renderer only go away when something clears them.
+    #[serde(default)]
+    pub display_clear_on_start: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -685,6 +691,8 @@ impl Default for HardwareConfig {
             meter_interval_secs: default_meter_interval(),
             framebuffer: default_fb(),
             display_enabled: true,
+            // The driver owns the panel; the bridge sets this false.
+            display_clear_on_start: true,
         };
         hw.resolve();
         hw
@@ -718,8 +726,6 @@ pub struct Store {
 pub mod shared {
     use super::Config;
     use serde_json::Value;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
 
     /// The `driver` table of a shared document. `None` only when the text is
     /// not a JSON object at all (an empty file is an empty document).
@@ -1229,6 +1235,17 @@ mod shared_doc_tests {
         let text = shared::rewrite_owned(base, &doc);
         assert_eq!(shared::parse(&text).unwrap(), doc, "{text}");
         assert!(!text.contains("\"gone\""), "{text}");
+    }
+
+    #[test]
+    fn the_driver_clears_the_panel_and_the_bridge_adopts_it() {
+        // The driver owns the screen; the bridge must not erase the vendor
+        // app's drawing unless the operator asks for it.
+        assert!(HardwareConfig::default().display_clear_on_start);
+        // Absent from a config file (the bridge's own document has no
+        // `hardware` section), the flag reads as off.
+        let hw: HardwareConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!hw.display_clear_on_start);
     }
 
     #[test]
