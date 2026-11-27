@@ -886,6 +886,18 @@ fn the_page_is_one_document_for_both_roles() {
 }
 
 #[test]
+fn stream_frames_are_tagged_as_state() {
+    // A bare telemetry state rendered into the vendor view blanked the battery
+    // card a second after load; every frame now names its kind.
+    let ui = include_str!("../bridge/ui.rs");
+    assert!(ui.contains("json!(\"state\")"), "bridge stream frames need a kind");
+    let web = include_str!("../web.rs");
+    assert!(web.contains("json!(\"state\")"), "driver stream frames need a kind");
+    let js = include_str!("../web/app.js");
+    assert!(js.contains("st.kind === \"state\""), "the page must route frames by kind");
+}
+
+#[test]
 fn the_page_keeps_the_flow_diagram_and_charts() {
     // The graphical layer (energy-flow hero, battery fill, charts, device
     // tree) was lost once in a refactor; these ids are what draw it.

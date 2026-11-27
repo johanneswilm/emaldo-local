@@ -350,6 +350,9 @@ impl Handler for Ui {
 impl Ui {
     /// Server-sent state frames, the same shape the driver role sends: the
     /// shared page renders either without knowing which side produced it.
+    /// Each frame carries its kind, so the page never mistakes a bare
+    /// telemetry state for the vendor status snapshot (which is what made the
+    /// battery card flip to "no battery read yet" a second after load).
     fn stream(&self) -> Resp {
         let telem = self.bridge.telem.clone();
         Resp::stream(Box::new(move |w: &mut dyn std::io::Write| {
@@ -366,7 +369,12 @@ impl Ui {
                     }
                     Err(_) => return,
                 };
-                let Ok(b) = serde_json::to_vec(&st) else { continue };
+                let mut v = serde_json::to_value(&st).unwrap_or_else(|_| json!({}));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("kind".into(), json!("state"));
+                    obj.insert("role".into(), json!("bridge"));
+                }
+                let Ok(b) = serde_json::to_vec(&v) else { continue };
                 let mut frame = b"data: ".to_vec();
                 frame.extend_from_slice(&b);
                 frame.extend_from_slice(b"\n\n");

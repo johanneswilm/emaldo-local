@@ -608,7 +608,14 @@ impl WebServer {
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(st) => {
-                    if let Ok(b) = serde_json::to_vec(&st) {
+                    // `kind` lets the page route the frame: a bare state is
+                    // not a vendor status snapshot.
+                    let mut v = serde_json::to_value(&st).unwrap_or(serde_json::json!({}));
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("kind".into(), serde_json::json!("state"));
+                        obj.insert("role".into(), serde_json::json!("driver"));
+                    }
+                    if let Ok(b) = serde_json::to_vec(&v) {
                         let mut frame = b"data: ".to_vec();
                         frame.extend_from_slice(&b);
                         frame.extend_from_slice(b"\n\n");

@@ -12,6 +12,7 @@ let snap = null;
 let es = null;
 let timer = null;
 let HIST = [];
+const app = {};
 let CFG = null;
 
 // ---------------------------------------------------------------- plumbing
@@ -228,6 +229,27 @@ function startStream() {
   es.onmessage = (ev) => {
     let st = null;
     try { st = JSON.parse(ev.data); } catch (e) { return; }
+    // A state frame is telemetry only; the vendor status snapshot is what
+    // carries `telemetry` keyed by report. Rendering a state into the bridge
+    // view blanked the battery card right after page load.
+    if (st.kind === "state") {
+      // State frames are telemetry; the bridge view is built from the status
+      // snapshot, so refresh that (coalesced to one request per second).
+      if (ROLE === "bridge") {
+        const now = Date.now();
+        if (!app.pendingStatus && now - (app.lastStatus || 0) > 1000) {
+          app.pendingStatus = true;
+          call("/api/v1/status").then((r) => {
+            app.pendingStatus = false;
+            app.lastStatus = Date.now();
+            if (r.ok && r.j) { snap = r.j; renderBridge(r.j); }
+          });
+        }
+      } else {
+        renderDriverState(st);
+      }
+      return;
+    }
     if (ROLE === "bridge") { snap = st; renderBridge(st); }
     else { renderDriverState(st); }
   };
