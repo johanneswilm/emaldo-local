@@ -1,0 +1,23 @@
+[Unit]
+Description=emaldo-local driver (direct hardware control, no vendor app)
+After=network-online.target
+Wants=network-online.target
+# Mutually exclusive with the bridge and with the vendor supervisor: the
+# driver role owns the Modbus/CAN/MCU buses the vendor app uses.
+Conflicts=emaldo-local.service monitor.service
+Before=emaldo-local.service
+
+[Service]
+Type=simple
+ExecStart=/root/emaldo-local/emaldo-local driver --config /root/emaldo-local.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+MemoryMax=64M
+TasksMax=64
+LimitNOFILE=512
+StandardOutput=append:/root/emaldo-local/driver-stdout.log
+StandardError=append:/root/emaldo-local/driver-stderr.log
+
+[Install]
+WantedBy=multi-user.target

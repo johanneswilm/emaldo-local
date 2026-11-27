@@ -60,7 +60,7 @@ Since 2026-11-26 the two approaches are **one Rust package** (`app/`, binary
 On the live Power Core both roles currently run side by side from one artifact
 (`/root/emaldo-local/emaldo-local`): the bridge unit `emaldo-local.service`
 (`Before=monitor.service`, so the front listens before the vendor app dials) and
-the driver unit `emaldo-driver.service` in read-only telemetry mode. Bridge RSS
+the driver unit `emaldo-local-driver.service` in read-only telemetry mode. Bridge RSS
 3.8 MB, driver RSS 3.1 MB.
 
 ### Status (2026-11-26)

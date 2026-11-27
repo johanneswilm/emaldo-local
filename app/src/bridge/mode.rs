@@ -644,6 +644,22 @@ pub fn set_vendor(bridge: &Arc<Bridge>) -> Result<Value, CmdError> {
 /// instance rule.
 pub fn restart_vendor_app(bridge: &Bridge) -> Value {
     let cfg = bridge.cfg.get();
+    // The supervisor units exist on the battery only. A dev box running this
+    // against a scratch config has neither them nor the vendor app; asking it
+    // for `systemctl restart monitor.service` reaches the host's systemd and
+    // can raise a polkit prompt on the operator's desktop.
+    if !Path::new(&cfg.vendor_db_dir).exists() && cfg.monitor_units.iter().all(|u| {
+        !Path::new(&format!("/etc/systemd/system/{u}"))
+            .exists()
+            && !Path::new(&format!("/lib/systemd/system/{u}")).exists()
+    }) {
+        bridge.log.write(
+            Level::Info,
+            "mode",
+            "no vendor supervisor on this host: not restarting anything",
+        );
+        return json!([{"unit": "-", "ok": false, "error": "no vendor supervisor on this host"}]);
+    }
     let mut done = Vec::new();
     for unit in &cfg.monitor_units {
         match run("systemctl", ["restart", unit].as_slice()) {

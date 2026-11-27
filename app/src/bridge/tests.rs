@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -467,12 +467,16 @@ fn ui_requires_setup_then_authentication() {
     let lan: SocketAddr = "192.168.50.20:40001".parse().unwrap();
     let internet: SocketAddr = "203.0.113.9:40002".parse().unwrap();
 
-    // Nothing but the setup page until an operator exists (no default password).
+    // Nothing but the shared page and the setup probe until an operator
+    // exists (no default password). The page itself carries the setup form.
     let r = ui.handle(&req("GET", "/api/status", b"", lan, &[]));
-    assert_eq!(r.status, 428, "API answered before any user was configured");
+    assert_eq!(r.status, 401, "data answered before any user was configured");
+    let probe: Value = serde_json::from_slice(&ui.handle(&req("GET", "/api/role", b"", lan, &[])).body).unwrap();
+    assert_eq!(probe["setup_required"], json!(true));
+    assert_eq!(probe["role"], json!("bridge"));
     assert_eq!(ui.handle(&req("GET", "/", b"", lan, &[])).status, 200);
     let page = String::from_utf8_lossy(&ui.handle(&req("GET", "/", b"", lan, &[])).body).into_owned();
-    assert!(page.contains("first operator user"), "setup page content: {page}");
+    assert!(page.contains("First-run setup"), "setup form missing: {page}");
 
     // The internet is never served, whatever the port forwarding looks like.
     assert_eq!(ui.handle(&req("GET", "/", b"", internet, &[])).status, 403);
@@ -480,16 +484,16 @@ fn ui_requires_setup_then_authentication() {
 
     // Weak passwords are refused; then the user exists and a session is issued.
     let weak = body_json(&json!({"user": "op", "password": "short"}));
-    assert_eq!(ui.handle(&req("POST", "/setup", &weak, lan, &[])).status, 400);
+    assert_eq!(ui.handle(&req("POST", "/api/setup", &weak, lan, &[])).status, 400);
     let good = body_json(&json!({"user": "op", "password": "correct battery horse"}));
-    let r = ui.handle(&req("POST", "/setup", &good, lan, &[]));
+    let r = ui.handle(&req("POST", "/api/setup", &good, lan, &[]));
     assert_eq!(r.status, 200);
     let cookie = session_cookie(&r).expect("setup did not issue a session cookie");
 
     // Unauthenticated and wrong-credential attempts.
     assert_eq!(ui.handle(&req("GET", "/api/status", b"", lan, &[])).status, 401);
     let bad = body_json(&json!({"user": "op", "password": "nope nope nope"}));
-    assert_eq!(ui.handle(&req("POST", "/login", &bad, lan, &[])).status, 401);
+    assert_eq!(ui.handle(&req("POST", "/api/login", &bad, lan, &[])).status, 401);
 
     // Status works with the session; the UI is the only audience.
     let r = ui.handle(&req("GET", "/api/status", b"", lan, &[("cookie", &cookie)]));
@@ -575,7 +579,7 @@ fn ui_schedule_write_maps_to_the_module_command() {
     bridge.cfg.update(|c| c.users = users).unwrap();
     let r = ui.handle(&req(
         "POST",
-        "/login",
+        "/api/login",
         &body_json(&json!({"user": "op", "password": "correct battery horse"})),
         lan,
         &[],
@@ -859,4 +863,124 @@ fn bridge_config_round_trips_the_mqtt_section() {
     assert_eq!(c.mqtt.unique_prefix, "up");
     let back = serde_json::to_string(&c).unwrap();
     assert!(back.contains("\"broker_url\":\"mqtt://10.0.0.1:1883\""), "{back}");
+}
+
+#[test]
+fn the_page_is_one_document_for_both_roles() {
+    let (_dir, bridge) = fixture("unified");
+    let ui = Ui::new(bridge.clone());
+    let lan: SocketAddr = "192.168.50.20:40010".parse().unwrap();
+
+    // Unauthenticated: the page is still served (it carries the sign-in), and
+    // it is the same document the driver role embeds.
+    let page = String::from_utf8_lossy(&ui.handle(&req("GET", "/", b"", lan, &[])).body).into_owned();
+    assert_eq!(page, include_str!("../web/index.html"));
+    // Both roles embed this one file: `web.rs` reads it as well.
+    assert!(include_str!("../web.rs").contains("include_bytes!(\"web/index.html\")"),
+        "the driver role must serve the same document");
+    // Role-specific panes are marked in the markup, not duplicated per role.
+    assert!(page.contains("data-pane=\"bridge\""));
+    assert!(page.contains("data-pane=\"driver\""));
+    // No legacy standalone sign-in pages survive.
+    assert!(!page.contains("emaldo-local sign in"));
+}
+
+#[test]
+fn the_role_probe_answers_before_login() {
+    let (_dir, bridge) = fixture("roleprobe");
+    let ui = Ui::new(bridge.clone());
+    let lan: SocketAddr = "192.168.50.21:40011".parse().unwrap();
+    let p: Value = serde_json::from_slice(&ui.handle(&req("GET", "/api/role", b"", lan, &[])).body).unwrap();
+    assert_eq!(p["role"], json!("bridge"));
+    assert_eq!(p["authed"], json!(false));
+    assert_eq!(p["setup_required"], json!(true));
+    // The stream is a session endpoint, not an open one.
+    assert_eq!(ui.handle(&req("GET", "/api/stream", b"", lan, &[])).status, 401);
+}
+
+#[test]
+fn a_stream_response_has_no_content_length() {
+    let r = Resp::stream(Box::new(|w: &mut dyn std::io::Write| {
+        let _ = w.write_all(b": ping\n\n");
+    }));
+    assert!(r.stream.is_some());
+    assert!(r.body.is_empty());
+    assert_eq!(r.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()), Some("text/event-stream"));
+}
+
+#[test]
+fn dotted_config_keys_reach_policy_fields() {
+    // The plan pane edits the engine through `policy.*`; before the whitelist
+    // knew these paths the write was silently dropped.
+    let (_dir, bridge) = fixture("dotted");
+    let ui = Ui::new(bridge.clone());
+    let lan: SocketAddr = "192.168.50.22:40012".parse().unwrap();
+    let users: BTreeMap<String, crate::bridge::config::User> =
+        [("op".to_string(), crate::bridge::config::new_user("correct battery horse"))]
+            .into_iter()
+            .collect();
+    bridge.cfg.update(|c| c.users = users).unwrap();
+    let cookie = session_cookie(&ui.handle(&req(
+        "POST",
+        "/api/login",
+        &body_json(&json!({"user": "op", "password": "correct battery horse"})),
+        lan,
+        &[],
+    )))
+    .unwrap();
+
+    let body = body_json(&json!({"policy.mode": "idle", "policy.reserve_percent": 33.5}));
+    let out: Value = serde_json::from_slice(
+        &ui.handle(&req("POST", "/api/config", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")])).body,
+    )
+    .unwrap();
+    assert!(out["rejected"].as_array().unwrap().is_empty(), "rejected: {out}");
+    let cfg = bridge.cfg.get();
+    assert_eq!(cfg.policy.mode, "idle");
+    assert_eq!(cfg.policy.reserve_percent, 33.5);
+}
+
+#[test]
+fn a_restart_request_outside_systemd_is_refused() {
+    // On a dev box `systemctl restart` would hit the host's own unit (and can
+    // raise a polkit prompt); the handler must refuse instead.
+    let (_dir, bridge) = fixture("restartguard");
+    let ui = Ui::new(bridge.clone());
+    let lan: SocketAddr = "192.168.50.23:40013".parse().unwrap();
+    let users: BTreeMap<String, crate::bridge::config::User> =
+        [("op".to_string(), crate::bridge::config::new_user("correct battery horse"))]
+            .into_iter()
+            .collect();
+    bridge.cfg.update(|c| c.users = users).unwrap();
+    let cookie = session_cookie(&ui.handle(&req(
+        "POST",
+        "/api/login",
+        &body_json(&json!({"user": "op", "password": "correct battery horse"})),
+        lan,
+        &[],
+    )))
+    .unwrap();
+    // The fixture's unit name is not this binary's unit (nor running at all),
+    // so the guard fires regardless of INVOCATION_ID in the environment.
+
+    let out: Value = serde_json::from_slice(
+        &ui.handle(&req("POST", "/api/restart", &body_json(&json!({"target": "bridge"})), lan,
+            &[("cookie", &cookie), ("x-emaldo-local", "1")])).body,
+    )
+    .unwrap();
+    assert_eq!(out["ok"], json!(false));
+}
+
+#[test]
+fn vendor_restart_is_skipped_when_no_supervisor_exists() {
+    let (_dir, bridge) = fixture("nosupervisor");
+    let out = crate::bridge::mode::restart_vendor_app(&bridge);
+    // Either the fixture's db dir or a real unit exists on the build host;
+    // on a dev box neither does, and then nothing may be restarted.
+    let arr = out.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    if Path::new("/root/db").exists() || Path::new("/etc/systemd/system/monitor.service").exists() {
+        return;
+    }
+    assert_eq!(arr[0]["ok"], json!(false));
 }

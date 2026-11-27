@@ -52,15 +52,16 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-const HASH_ITERATIONS: u32 = 60_000;
+/// PBKDF2-HMAC-SHA256, the format the bridge role stores in its user map.
+/// Both roles must agree: the operator's password file is one file, and a
+/// hash written by one role has to verify in the other.
+pub const HASH_ITERATIONS: u32 = 100_000;
 
 pub fn hash_password(pw: &str, salt_b64: &str) -> String {
-    let salt = b64_decode(salt_b64).unwrap_or_default();
-    let mut h = ring::digest::digest(&ring::digest::SHA256, &[&salt, pw.as_bytes()].concat());
-    for _ in 1..HASH_ITERATIONS {
-        h = ring::digest::digest(&ring::digest::SHA256, h.as_ref());
-    }
-    b64_encode(h.as_ref())
+    let salt = b64_decode(salt_b64).unwrap_or_else(|| salt_b64.as_bytes().to_vec());
+    let mut out = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pw.as_bytes(), &salt, HASH_ITERATIONS, &mut out);
+    b64_encode(&out)
 }
 
 /// Stable identity used by MQTT discovery and the web UI.

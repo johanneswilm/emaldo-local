@@ -44,14 +44,30 @@ pub struct Resp {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Server-sent events: when set, the response has no length and the writer
+    /// runs until the client goes away or it returns.
+    pub stream: Option<Box<dyn FnOnce(&mut dyn std::io::Write) + Send>>,
 }
 
 impl Resp {
+    /// An open-ended `text/event-stream`: the closure owns the connection.
+    pub fn stream(writer: Box<dyn FnOnce(&mut dyn std::io::Write) + Send>) -> Resp {
+        Resp {
+            status: 200,
+            headers: vec![
+                ("content-type".into(), "text/event-stream".into()),
+                ("cache-control".into(), "no-cache".into()),
+            ],
+            body: Vec::new(),
+            stream: Some(writer),
+        }
+    }
     pub fn json(body: impl Into<Vec<u8>>) -> Resp {
         Resp {
             status: 200,
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.into(),
+            stream: None,
         }
     }
     pub fn bytes(content_type: &str, body: impl Into<Vec<u8>>) -> Resp {
@@ -59,6 +75,7 @@ impl Resp {
             status: 200,
             headers: vec![("content-type".into(), content_type.into())],
             body: body.into(),
+            stream: None,
         }
     }
     pub fn text(status: u16, msg: &str) -> Resp {
@@ -66,6 +83,7 @@ impl Resp {
             status,
             headers: vec![("content-type".into(), "text/plain; charset=utf-8".into())],
             body: msg.as_bytes().to_vec(),
+            stream: None,
         }
     }
     /// Empty 204: what a client expects from a connectivity probe when the
@@ -75,6 +93,7 @@ impl Resp {
             status: 204,
             headers: vec![],
             body: vec![],
+            stream: None,
         }
     }
     pub fn status(mut self, code: u16) -> Resp {
@@ -155,8 +174,10 @@ fn serve_conn(tcp: TcpStream, cfg: Arc<ServerConfig>, handler: Arc<dyn Handler>)
             Err(_) => Resp::text(500, "internal error"),
         };
         let mut io = rd.get_mut();
-        write_response(&mut io, &resp)?;
-        if !keep {
+        // A streamed response owns the connection until the client leaves.
+        let streaming = resp.stream.is_some();
+        write_response(&mut io, resp)?;
+        if !keep || streaming {
             return Ok(());
         }
     }
@@ -221,8 +242,19 @@ fn read_request(rd: &mut std::io::BufReader<Tls>, peer: SocketAddr) -> std::io::
     }))
 }
 
-fn write_response(tls: &mut Tls, resp: &Resp) -> std::io::Result<()> {
-    debug_assert!(!resp.body.is_empty() || resp.status == 204);
+fn write_response(tls: &mut Tls, resp: Resp) -> std::io::Result<()> {
+    debug_assert!(!resp.body.is_empty() || resp.status == 204 || resp.stream.is_some());
+    if let Some(writer) = resp.stream {
+        let mut head = String::from("HTTP/1.1 200 OK\r\n");
+        for (k, v) in &resp.headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("connection: close\r\n\r\n");
+        tls.write_all(head.as_bytes())?;
+        tls.flush()?;
+        writer(&mut *tls);
+        return Ok(());
+    }
     let status_text = match resp.status {
         200 => "OK",
         201 => "Created",

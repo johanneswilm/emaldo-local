@@ -34,7 +34,9 @@ use crate::bridge::state::Bridge;
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
+const MANIFEST: &[u8] = include_bytes!("../../static/manifest.webmanifest");
+const SW_JS: &[u8] = include_bytes!("../../static/sw.js");
+const ICON_SVG: &[u8] = include_bytes!("../../static/icon.svg");
 
 struct Session {
     user: String,
@@ -155,7 +157,6 @@ impl Handler for Ui {
         // LAN so Home Assistant can be pointed at it.
         match path {
             "/app.js" => return Resp::bytes("application/javascript", APP_JS),
-            "/style.css" => return Resp::bytes("text/css", STYLE_CSS),
             "/ca.pem" => {
                 let ca = std::fs::read_to_string(self.bridge.state_dir.join("ca.pem"))
                     .unwrap_or_else(|_| "no generated CA (an external certificate is in use)".into());
@@ -165,45 +166,17 @@ impl Handler for Ui {
             _ => {}
         }
 
-        // No user yet: only the setup form is served.
-        if cfg.users.is_empty() {
-            if matches!(path, "/" | "/index.html") {
-                return Resp::bytes("text/html; charset=utf-8", SETUP_HTML);
-            }
-            if path == "/setup" && req.method == "POST" {
-                let b = Ui::body_json(req);
-                let user = b.get("user").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                let pass = b.get("password").and_then(|v| v.as_str()).unwrap_or("");
-                if user.is_empty() || user.len() > 32 {
-                    return Resp::text(400, "username must be 1-32 characters");
-                }
-                if pass.len() < 10 {
-                    return Resp::text(400, "password must be at least 10 characters");
-                }
-                let u = new_user(pass);
-                let _ = self.bridge.cfg.update(|c| {
-                    c.users.insert(user.clone(), u);
-                });
-                self.bridge
-                    .note(Level::Warn, "ui", format!("operator user `{user}` created"));
-                let sid = self.issue(&user);
-                return self.with_cookie(
-                    Resp::json(serde_json::to_vec(&json!({"ok": true})).unwrap()),
-                    &sid,
-                );
-            }
-            if path.starts_with("/api/") {
-                return Resp::text(428, "no operator user configured: open / and set one");
-            }
-            return Resp::bytes("text/html; charset=utf-8", SETUP_HTML);
+        // One page for both roles. The three sign-in entry points are the
+        // only unauthenticated JSON: the page asks who is signed in and which
+        // role is running before it shows anything.
+        if path == "/api/role" {
+            return Resp::json(role_probe(&cfg.users, self.cookie(req).is_some()));
         }
-
-        // Login is the only unauthenticated API.
-        if path == "/login" && req.method == "POST" {
+        if path == "/api/login" && req.method == "POST" {
             let b = Ui::body_json(req);
             let user = b.get("user").and_then(|v| v.as_str()).unwrap_or("");
             let pass = b.get("password").and_then(|v| v.as_str()).unwrap_or("");
-            let found = self.bridge.cfg.get().users.get(user).cloned();
+            let found = cfg.users.get(user).cloned();
             match found {
                 Some(u) if verify_user(&u, pass) => {
                     let sid = self.issue(user);
@@ -220,23 +193,51 @@ impl Handler for Ui {
                 }
             }
         }
-
-        if matches!(path, "/" | "/index.html") && self.cookie(req).is_none() {
-            return Resp::bytes("text/html; charset=utf-8", LOGIN_HTML);
-        }
-
-        let Some((sid, session)) = self.cookie(req) else {
-            if path.starts_with("/api/") {
-                return Resp::text(401, "not signed in");
+        if path == "/api/setup" && req.method == "POST" {
+            // First run only: the operator picks the password, nothing ships
+            // with a default.
+            if !cfg.users.is_empty() {
+                return Resp::text(403, "an operator user already exists");
             }
-            return Resp::bytes("text/html; charset=utf-8", LOGIN_HTML);
-        };
-
+            let b = Ui::body_json(req);
+            let user = b.get("user").and_then(|v| v.as_str()).unwrap_or("operator").trim().to_string();
+            let pass = b.get("password").and_then(|v| v.as_str()).unwrap_or("");
+            if user.is_empty() || user.len() > 32 {
+                return Resp::text(400, "username must be 1-32 characters");
+            }
+            if pass.len() < 10 {
+                return Resp::text(400, "password must be at least 10 characters");
+            }
+            let u = new_user(pass);
+            let _ = self.bridge.cfg.update(|c| {
+                c.users.insert(user.clone(), u);
+            });
+            self.bridge
+                .note(Level::Warn, "ui", format!("operator user `{user}` created"));
+            let sid = self.issue(&user);
+            return self.with_cookie(
+                Resp::json(serde_json::to_vec(&json!({"ok": true})).unwrap()),
+                &sid,
+            );
+        }
         if matches!(path, "/" | "/index.html") {
             return Resp::bytes("text/html; charset=utf-8", INDEX);
         }
+        if path == "/sw.js" {
+            return Resp::bytes("text/javascript", SW_JS);
+        }
+        if path == "/manifest.webmanifest" || path == "/manifest.json" {
+            return Resp::bytes("application/manifest+json", MANIFEST);
+        }
+        if path == "/icon.svg" {
+            return Resp::bytes("image/svg+xml", ICON_SVG);
+        }
 
-        if path == "/logout" {
+        let Some((sid, session)) = self.cookie(req) else {
+            return Resp::text(401, "not signed in");
+        };
+
+        if path == "/api/logout" {
             self.sessions.lock().unwrap().remove(&sid);
             return Resp::json(b"{\"ok\":true}".to_vec());
         }
@@ -271,9 +272,30 @@ impl Handler for Ui {
                         }),
                     );
                 }
+                // The page reads `role` and `telemetry` from either role;
+                // the vendor snapshot is what this role adds.
+                if let Some(obj) = snap.as_object_mut() {
+                    obj.insert("role".into(), json!("bridge"));
+                }
                 Resp::json(serde_json::to_vec(&snap).unwrap())
             }
             ("GET", "/api/schema") => Resp::json(serde_json::to_vec(&schema()).unwrap()),
+            // Shared surface: the same paths answer in both roles, so one page
+            // can serve either. The driver role implements them in web.rs.
+            ("GET", "/api/history") => {
+                let dir = std::path::PathBuf::from(&self.bridge.cfg.get().state_dir);
+                Resp::json(serde_json::to_vec(&json!({"samples": crate::history::load(&dir)}))
+                    .unwrap_or_else(|_| b"{\"samples\":[]}".to_vec()))
+            }
+            ("GET", "/api/stream") => self.stream(),
+            ("GET", "/api/events") => Resp::json(
+                serde_json::to_vec(&json!(self.bridge.events(200))).unwrap(),
+            ),
+            ("POST", "/api/role") => self.api_role(&Ui::body_json(req)),
+            ("GET", "/api/role") => Resp::json(role_probe(
+                &cfg.users,
+                self.cookie(req).is_some(),
+            )),
             ("GET", "/api/schedule") => Resp::json(serde_json::to_vec(&self.schedule_view()).unwrap()),
             ("POST", "/api/schedule") => self.api_schedule(&Ui::body_json(req)),
             ("GET", "/api/settings") => Resp::json(
@@ -310,7 +332,7 @@ impl Handler for Ui {
             ("GET", "/api/backups") => Resp::json(serde_json::to_vec(&crate::bridge::mode::list_backups(&self.bridge)).unwrap()),
             ("POST", "/api/backups") => self.api_backup(&Ui::body_json(req)),
             ("POST", "/api/restart") => self.api_restart(&Ui::body_json(req)),
-            ("POST", "/api/password") => self.api_password(&Ui::body_json(req)),
+            ("POST", "/api/password") => self.api_password(&session.user, &Ui::body_json(req)),
             ("POST", "/api/session/extend") => {
                 let sid2 = self.issue(&session.user);
                 let _ = self.sessions.lock().unwrap().remove(&sid);
@@ -326,6 +348,36 @@ impl Handler for Ui {
 // ---------------------------------------------------------------------------
 
 impl Ui {
+    /// Server-sent state frames, the same shape the driver role sends: the
+    /// shared page renders either without knowing which side produced it.
+    fn stream(&self) -> Resp {
+        let telem = self.bridge.telem.clone();
+        Resp::stream(Box::new(move |w: &mut dyn std::io::Write| {
+            let rx = telem.subscribe();
+            loop {
+                let st = match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+                    Ok(st) => st,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if w.write_all(b": ping\n\n").is_err() {
+                            return;
+                        }
+                        w.flush().ok();
+                        continue;
+                    }
+                    Err(_) => return,
+                };
+                let Ok(b) = serde_json::to_vec(&st) else { continue };
+                let mut frame = b"data: ".to_vec();
+                frame.extend_from_slice(&b);
+                frame.extend_from_slice(b"\n\n");
+                if w.write_all(&frame).is_err() {
+                    return;
+                }
+                w.flush().ok();
+            }
+        }))
+    }
+
     fn relay(&self) -> Option<Arc<crate::bridge::relay::Relay>> {
         crate::bridge::relay::relay_of(&self.bridge)
     }
@@ -585,6 +637,14 @@ impl Ui {
             "ack_style",
             "log_max_bytes",
             "log_keep",
+            // Dotted paths reach one field of a section; the page's plan pane
+            // edits the engine through these (see `set_dotted`).
+            "policy.mode",
+            "policy.enabled",
+            "policy.reserve_percent",
+            "policy.charge_limit_w",
+            "policy.discharge_limit_w",
+            "control.writes_enabled",
         ];
         let mut changed: Vec<String> = Vec::new();
         let mut rejected: Vec<String> = Vec::new();
@@ -597,7 +657,9 @@ impl Ui {
                     Ok(v) => v,
                     Err(_) => return false,
                 };
-                cur[*k] = v.clone();
+                if !set_dotted(&mut cur, k, v.clone()) {
+                    return false;
+                }
                 match serde_json::from_value::<crate::bridge::config::Config>(cur) {
                     Ok(updated) => {
                         *c = updated;
@@ -676,9 +738,22 @@ impl Ui {
                     .into_bytes(),
             ),
             "bridge" => {
+                // Under systemd `Restart=` brings the process back. Started by
+                // hand (a dev box, a scratch config) exiting is final, and the
+                // `systemctl restart` would target the host's own unit.
+                // `INVOCATION_ID` alone is not evidence: a shell launched from
+                // a unit passes it down. The unit must be ours, i.e. it must
+                // exec this binary.
+                let unit = self.bridge.cfg.get().bridge_unit.clone();
+                if !unit_runs_this_binary(&unit) {
+                    return Resp::json(
+                        json!({"ok": false, "error": "not running under systemd: restart by hand"})
+                            .to_string()
+                            .into_bytes(),
+                    );
+                }
                 self.bridge
                     .note(Level::Warn, "ui", "restart requested: exiting for systemd");
-                let unit = self.bridge.cfg.get().bridge_unit.clone();
                 let spawned = unit.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -693,8 +768,34 @@ impl Ui {
         }
     }
 
-    fn api_password(&self, body: &Value) -> Resp {
-        let user = body.get("user").and_then(|v| v.as_str()).unwrap_or("");
+    /// Hand the box to the driver role. The bridge unit is disabled so a
+    /// reboot comes back to this role only if the operator re-enables it;
+    /// `mode local` in the driver does the reverse.
+    fn api_role(&self, body: &Value) -> Resp {
+        match body.get("role").and_then(|v| v.as_str()).unwrap_or("") {
+            "driver" => {
+                let ok = std::process::Command::new("systemctl")
+                    .args(["enable", "--now", "emaldo-local-driver.service"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                self.bridge.note(
+                    Level::Warn,
+                    "ui",
+                    format!("role switch to the driver role: {}", if ok { "started" } else { "failed" }),
+                );
+                Resp::json(json!({"ok": ok, "unit": "emaldo-local-driver.service"}).to_string().into_bytes())
+            }
+            other => Resp::json(
+                json!({"ok": false, "error": format!("cannot switch to {other} from the bridge role")})
+                    .to_string()
+                    .into_bytes(),
+            ),
+        }
+    }
+
+    fn api_password(&self, user: &str, body: &Value) -> Resp {
+        // The page does not name the user: the session does.
         let current = body.get("current").and_then(|v| v.as_str()).unwrap_or("");
         let fresh = body.get("new").and_then(|v| v.as_str()).unwrap_or("");
         let Some(u) = self.bridge.cfg.get().users.get(user).cloned() else {
@@ -713,6 +814,61 @@ impl Ui {
         self.bridge.note(Level::Warn, "ui", format!("password changed for {user}"));
         Resp::json(json!({"ok": true}).to_string().into_bytes())
     }
+}
+
+/// Is `unit` a systemd unit that runs *this* binary? A hand-started copy on a
+/// dev box fails the check: the unit either does not exist or points at
+/// another path, and restarting it would touch the host, not us.
+fn unit_runs_this_binary(unit: &str) -> bool {
+    let Ok(me) = std::fs::canonicalize(std::env::current_exe().unwrap_or_default()) else {
+        return false;
+    };
+    let Ok(out) = std::process::Command::new("systemctl")
+        .args(["show", "-p", "ExecStart", unit])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(exec) = text.split("path=").nth(1) else { return false };
+    let path = exec.split(' ').next().unwrap_or("").trim();
+    match std::fs::canonicalize(path) {
+        Ok(p) => p == me,
+        Err(_) => false,
+    }
+}
+
+/// Write `a.b` = `v` into a JSON object tree, creating the section when the
+/// serialised config omitted it. Returns false for a malformed path.
+fn set_dotted(root: &mut Value, key: &str, v: Value) -> bool {
+    match key.split_once('.') {
+        None => {
+            root[key] = v;
+            true
+        }
+        Some((section, field)) => {
+            let Some(obj) = root.as_object_mut() else { return false };
+            let entry = obj
+                .entry(section.to_string())
+                .or_insert_with(|| Value::Object(Default::default()));
+            let Some(inner) = entry.as_object_mut() else { return false };
+            inner.insert(field.to_string(), v);
+            true
+        }
+    }
+}
+
+/// What the shared page asks before it shows anything: who may sign in and
+/// which role answers. Kept identical in the driver (`web.rs`), where the
+/// role is always "driver".
+fn role_probe(users: &std::collections::BTreeMap<String, crate::bridge::config::User>, authed: bool) -> Vec<u8> {
+    json!({
+        "role": "bridge",
+        "setup_required": users.is_empty(),
+        "authed": authed,
+    })
+    .to_string()
+    .into_bytes()
 }
 
 fn arr(body: &Value, key: &str) -> Vec<u8> {
@@ -773,21 +929,4 @@ fn config_view(c: &crate::bridge::config::Config) -> Value {
     })
 }
 
-const SETUP_HTML: &str = r#"<!doctype html><meta charset=utf-8><title>emaldo-local setup</title>
-<link rel=stylesheet href=/style.css>
-<main class=card><h1>Set the first operator user</h1>
-<p class=muted>The bridge has no password yet. Nothing else is served until one is set.</p>
-<form method=post action=/setup><label>User <input name=user required autocomplete=username></label>
-<label>Password (min 10 characters) <input name=password type=password required minlength=10 autocomplete=new-password></label>
-<button type=submit>Create user</button></form></main>"#;
 
-const LOGIN_HTML: &str = r#"<!doctype html><meta charset=utf-8><title>emaldo-local sign in</title>
-<link rel=stylesheet href=/style.css>
-<main class=card><h1>emaldo-local</h1>
-<form id=f><label>User <input name=user required autocomplete=username></label>
-<label>Password <input name=password type=password required autocomplete=current-password></label>
-<button type=submit>Sign in</button></form>
-<p id=msg class=muted></p>
-<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();
-const f=e.target;const r=await fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:f.user.value,password:f.password.value})});
-if(r.ok){location='/';}else{document.getElementById('msg').textContent='Sign in failed';}});</script></main>"#;

@@ -44,8 +44,8 @@ pub struct MqttConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebConfig {
-    /// Default: 0.0.0.0:8443 (TLS). LAN-only by deployment; the driver
-    /// binds exactly this address.
+    /// Default: 0.0.0.0:4443 (TLS), the address the bridge role uses too.
+    /// LAN-only by deployment; the server binds exactly this address.
     #[serde(default = "default_listen")]
     pub listen_addr: String,
     /// PEM paths. Empty = generate a self-signed cert on first start and
@@ -54,6 +54,17 @@ pub struct WebConfig {
     pub tls_cert: String,
     #[serde(default)]
     pub tls_key: String,
+    /// Operator boundary, the same rule the bridge role applies: a peer
+    /// outside `lan_cidrs` is refused before any route runs. Loopback is
+    /// always allowed, which keeps the local probe scripts working.
+    #[serde(default = "default_true")]
+    pub lan_only: bool,
+    #[serde(default = "default_lan_cidrs")]
+    pub lan_cidrs: Vec<String>,
+}
+
+fn default_lan_cidrs() -> Vec<String> {
+    vec!["192.168.0.0/16".into(), "172.16.0.0/12".into()]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -435,7 +446,9 @@ impl Default for SolarConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathsConfig {
-    /// Override for all state files. Empty = config file's directory.
+    /// Override for all state files. Empty = the directory both roles share,
+    /// `/root/emaldo-local`, so the 48-hour chart survives a role switch
+    /// (the bridge role already writes its state there).
     pub state_dir: String,
     /// Delete per-day price cache files older than this many days.
     pub price_cache_days: u64,
@@ -486,7 +499,9 @@ fn default_unique_prefix() -> String {
     "emaldo-local".into()
 }
 fn default_listen() -> String {
-    "0.0.0.0:8443".into()
+    // The same address the bridge role serves its page on: one page, one URL,
+    // whichever role is running.
+    "0.0.0.0:4443".into()
 }
 fn default_serial_port() -> String {
     "/dev/ttymxc2".into()
@@ -553,6 +568,8 @@ impl Default for WebConfig {
     fn default() -> Self {
         WebConfig {
             listen_addr: default_listen(),
+            lan_only: true,
+            lan_cidrs: default_lan_cidrs(),
             tls_cert: String::new(),
             tls_key: String::new(),
         }

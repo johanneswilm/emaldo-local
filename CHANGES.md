@@ -6,6 +6,50 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# One page, one port, one auth model (2026-11-27)
+
+The two operator UIs are one document (`app/src/web/index.html`), embedded by
+both roles; panes carry `data-pane="bridge|driver"` and the page asks
+`GET /api/role` before showing anything. The driver's old page (47 KB in
+`app/static/`) and the bridge's standalone setup/sign-in pages are deleted.
+
+What the page now assumes of both roles, and what was added to make it true:
+
+- `GET /api/status`, `/api/stream` (SSE), `/api/history`, `/api/events`,
+  `/api/role`, `POST /api/setup|login|logout|password` answer in both roles;
+  `/api/status` carries a `role` tag. The driver's `/api/v1/*` routes are gone
+  (they had no caller left).
+- One auth model: session cookie `emaldo_sid`, `x-emaldo-local` on every POST,
+  PBKDF2-HMAC-SHA256 at 100 000 iterations (`util::hash_password` now matches
+  the bridge's), and the driver applies the bridge's LAN gate
+  (`web.lan_only`, `web.lan_cidrs`) before the TLS handshake.
+- One address: the driver default listen port moved `:8443` → `:4443`.
+- `POST /api/role` hands the box to the other unit (`systemctl enable --now
+  emaldo-local[-driver]`; the units `Conflicts=` each other, so the switch is
+  one command from either side).
+- `emaldo-local` with no role word now runs `auto`: bridge when
+  `/root/bin/app` is running, driver otherwise (`detect_role`). An explicit
+  `run`/`bridge`/`driver` still wins.
+- `POST /api/config` in the bridge role accepts dotted paths
+  (`policy.mode`, `policy.reserve_percent`, `policy.charge_limit_w`,
+  `policy.discharge_limit_w`, `control.writes_enabled`); before, the plan
+  pane's "Apply policy" wrote nothing because the whitelist dropped them.
+- History reads the shared `paths.state_dir` in both roles.
+
+Safety fix found on a dev box: the bridge's pin-repair path called
+`systemctl restart monitor.service` on any host whose `vendor_db_dir` was
+simply missing, which raises a polkit prompt on the operator's desktop.
+`restart_vendor_app` now requires the vendor db directory or the unit files,
+and the UI's self-restart requires the configured unit to actually exec this
+binary (an inherited `INVOCATION_ID` is not evidence).
+
+Tests: 135 (3 new: dotted config write, restart refusal off-unit, vendor
+restart skip). Surface probed by hand on both roles: role probe, setup,
+login, status, SSE frame, history, password change, LAN gate drop
+(`exit 35` off-LAN), restart refusal.
+
+---
+
 # The optimizer runs in the bridge role too (2026-11-26)
 
 Cost-aware control no longer needs the Modbus side of the house. The bridge role

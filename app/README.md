@@ -5,7 +5,7 @@
 | role | how you start it | what it is |
 |---|---|---|
 | **bridge** | `emaldo-local run --config /root/emaldo-local/config.json` (unit `emaldo-local.service`, `Before=monitor.service`) | the vendor front: REST on `:443`, E2E relay `:1050/:1051`, local resolver `:53`, control socket `:1052`, operator UI `:4443`; the vendor Go app stays the hardware controller with no cloud egress. Details: [`BRIDGE.md`](BRIDGE.md), operations: [`OPERATIONS.md`](OPERATIONS.md) |
-| **driver** | `emaldo-local driver [--config PATH]` (unit `emaldo-driver.service`) | this driver: Modbus/CAN/MCU/meter telemetry, TLS web UI `:8443`, MQTT/Home Assistant discovery; the vendor app and its supervisor are parked when it controls the hardware |
+| **driver** | `emaldo-local driver [--config PATH]` (unit `emaldo-local-driver.service`) | this driver: Modbus/CAN/MCU/meter telemetry, TLS web UI `:4443`, MQTT/Home Assistant discovery; the vendor app and its supervisor are parked when it controls the hardware |
 
 The role is chosen by the leading word — `run|mode|certs|config|lte|version` go
 to the bridge, `driver` (or any driver flag) to the driver — before any TLS
@@ -110,7 +110,7 @@ HiSolar 0x0FA0×43 / 0x0FAF×18 blocks through 0x1012, then prints JSON.
 queues (it sends no user frames). `--can-probe` passively reassembles DIN
 pages and decodes the BAK battery TLV.
 
-First boot: open `https://<device-ip>:8443/`, set the admin password and
+First boot: open `https://<device-ip>:4443/`, set the admin password and
 MQTT broker in the setup wizard. The TLS cert is self-generated on first
 start and persisted next to the config (`web-cert.pem` / `web-key.pem`,
 0600) — replace via `web.tls_cert`/`web.tls_key` if you have your own.
@@ -133,7 +133,7 @@ topic_prefix = "emaldo/powercore"
 ha_discovery = true
 
 [web]
-listen_addr = "0.0.0.0:8443"
+listen_addr = "0.0.0.0:4443"
 
 [hardware]
 simulate = false         # synthetic telemetry; never on a real install
@@ -195,24 +195,35 @@ bus master would collide. Two supported modes:
 The vendor identity (`/root/.device_id`) is read (read-only) for a stable
 device id; it is never regenerated or overwritten.
 
-## Web API (all auth-required after setup; TLS)
+## Web API (one surface for both roles; TLS on `:4443`)
 
-| route | what |
-|---|---|
-| `GET /` | embedded UI: status, device tree, raw registers, events, config view |
-| `POST /api/v1/setup` | first boot only: admin password + broker |
-| `POST /api/v1/login` | → bearer token + session cookie (30 d) |
-| `GET /api/v1/state` | full state incl. `raw` register windows and `can.batteries` |
-| `GET /api/v1/events` | event ring (last 200) |
-| `GET /api/v1/config` / `PUT` | masked config / update (atomic save) |
-| `GET /api/v1/stream` | SSE state stream (15 s keepalive) |
-| `POST /api/v1/walk` | read-only slave walk 1–10, 240–250 (result in `raw.slave_walk`) |
-| `POST /api/v1/cmd` | Phase-2 commands: `set_mode`, `set_charge_limit`, `set_discharge_limit`, `set_reserve`, `set_grid_limit`, `set_override`, `write_register` (gated), `read_register` (read-only), `rollback`, `walk` |
+Both roles serve the same page (`src/web/index.html`) and the same routes;
+a route that needs the hardware the other role owns answers 404/409 there,
+never with a second URL. Session cookie `emaldo_sid`, CSRF header
+`x-emaldo-local` on every POST, LAN gate `web.lan_only`/`web.lan_cidrs`
+(bridge: `lan_only`/`lan_cidrs`).
+
+| route | what | role |
+|---|---|---|
+| `GET /` | the UI (panes marked `data-pane=bridge|driver`) | both |
+| `GET /api/role` | `{role, authed, setup_required}` — unauthenticated | both |
+| `POST /api/setup` | first boot only: operator password | both |
+| `POST /api/login` | → `emaldo_sid` cookie | both |
+| `GET /api/status` | state with a `role` tag | both |
+| `GET /api/stream` | SSE state stream (15 s keepalive) | both |
+| `GET /api/history` | `{samples}` 48-hour series (`paths.state_dir`) | both |
+| `GET /api/events` | event ring | both |
+| `GET|POST /api/config` | masked config / whole-document save | both (different schema) |
+| `POST /api/password` | change the operator password (PBKDF2, 100k) | both |
+| `POST /api/role` | hand over to the other systemd unit | both |
+| `POST /api/walk` | read-only slave walk 1–10, 240–250 (result in `raw.slave_walk`) | driver |
+| `POST /api/cmd` | Phase-2 commands: `set_mode`, `set_charge_limit`, `set_discharge_limit`, `set_reserve`, `set_grid_limit`, `set_override`, `write_register` (gated), `read_register` (read-only), `rollback`, `walk` | driver |
+| `/api/schedule`, `/api/settings/*`, `/api/mode`, `/api/lte`, `/api/backups`, `/api/restart`, `/api/refresh`, `/api/logs`, `/api/relay` | vendor-front verb (see `BRIDGE.md`) | bridge |
 
 All writes pass the controller gates: writable table (HiSolar
 0x0FD3..0x0FF6), range, rate limits, `writes_enabled`, pre-write
 snapshot, read-back verify. Journal: `writes.log` (JSON lines) next to
-the config. Rollback: `POST /api/v1/cmd {"cmd":"rollback"}` or
+the config. Rollback: `POST /api/cmd {"cmd":"rollback"}` or
 `emaldo-local driver --rollback`.
 
 ## MQTT / Home Assistant
@@ -260,7 +271,7 @@ interfere with them.
 ## Live-hardware status (2026-11-25)
 
 **Read-only on the live battery** (`bus_enabled=false`, writes dry-run,
-passive CAN), serving the PWA web UI on `:8443`. Validated live:
+passive CAN), serving the PWA web UI on `:4443`. Validated live:
 
 - **CAN/BMS** — active BMS polling of the 3 packs (`hardware.can_poll`) gives
   SOC, cell voltages, pack voltage/current, temps, cycles, health. Live:

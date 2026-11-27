@@ -40,6 +40,13 @@ fi
 UNIT_SRC=$(dirname "$NEW")/emaldo-local.service
 [ -f "$UNIT_SRC" ] || UNIT_SRC=$(dirname "$0")/emaldo-local.service
 [ -f "$UNIT_SRC" ] || { echo "no unit file next to this script ($UNIT_SRC)" >&2; exit 1; }
+# The driver role gets its own unit (Conflicts= with the bridge); installing
+# it disabled keeps the choice explicit: `systemctl enable --now
+# emaldo-local-driver` switches roles, `systemctl enable --now emaldo-local`
+# switches back.
+DRIVER_UNIT_SRC=$(dirname "$NEW")/emaldo-local-driver.service
+[ -f "$DRIVER_UNIT_SRC" ] || DRIVER_UNIT_SRC=$(dirname "$0")/emaldo-local-driver.service
+DRIVER_UNIT=/etc/systemd/system/emaldo-local-driver.service
 
 mkdir -p /root/emaldo-local/state /root/emaldo-local/logs /root/emaldo-local/backups
 
@@ -93,6 +100,10 @@ fi
 "$BIN" --config "$CONF" certs | sed -n '1,40p'
 
 cp "$UNIT_SRC" "$UNIT"
+if [ -n "$DRIVER_UNIT_SRC" ] && [ -f "$DRIVER_UNIT_SRC" ]; then
+    cp "$DRIVER_UNIT_SRC" "$DRIVER_UNIT"
+      printf 'driver unit installed (disabled): systemctl enable --now emaldo-local-driver\n'
+fi
 systemctl daemon-reload
 systemctl enable emaldo-local.service >/dev/null 2>&1
 systemctl start emaldo-local.service

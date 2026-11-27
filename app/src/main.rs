@@ -59,6 +59,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 enum Role {
     Bridge,
     Driver,
+    /// No role word and no bridge command: decided at start-up (see
+    /// [`detect_role`]).
+    Auto,
 }
 
 const BRIDGE_COMMANDS: [&str; 8] = [
@@ -84,6 +87,7 @@ fn role_of(argv: &[String]) -> Role {
             i += 2;
             continue;
         }
+        // A driver switch (`--mcu-probe`) is not a command word; skip it.
         if w.starts_with('-') && !BRIDGE_COMMANDS.contains(&w) {
             i += 1;
             continue;
@@ -92,9 +96,38 @@ fn role_of(argv: &[String]) -> Role {
     }
     match argv.get(i).map(String::as_str) {
         Some("driver") => Role::Driver,
+        Some("auto") => Role::Auto,
         Some(w) if BRIDGE_COMMANDS.contains(&w) => Role::Bridge,
-        _ => Role::Driver,
+        _ => Role::Auto,
     }
+}
+
+/// No command word: run whichever role the machine needs. The vendor app is
+/// the hardware controller while it runs, so its presence means the bridge
+/// (stand in front of its cloud path); without it the hardware is ours.
+fn detect_role(argv: &[String]) -> Role {
+    let explicit = argv
+        .iter()
+        .any(|a| a == "bridge" || a == "run" || BRIDGE_COMMANDS.contains(&a.as_str()));
+    if explicit {
+        return Role::Bridge;
+    }
+    if vendor_app_running() {
+        eprintln!("emaldo-local: vendor app running -> bridge role");
+        Role::Bridge
+    } else {
+        eprintln!("emaldo-local: vendor app not running -> driver role");
+        Role::Driver
+    }
+}
+
+/// `pgrep -f /root/bin/app`, the same check the mode switch uses.
+fn vendor_app_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", "/root/bin/app"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// The bridge's own argument list: everything except a leading `bridge` word.
@@ -112,7 +145,11 @@ fn main() {
     // Dispatch before any TLS provider is installed: each role installs the
     // crypto provider it is built and tested with.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if let Role::Bridge = role_of(&argv) {
+    let role = match role_of(&argv) {
+        Role::Auto => detect_role(&argv),
+        r => r,
+    };
+    if let Role::Bridge = role {
         let code = bridge::run::cli(bridge_args(&argv));
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
     }
@@ -587,7 +624,7 @@ fn main() {
 
     if dump_state {
         // Read-only snapshot: run the configured telemetry sources (passive
-        // CAN) for a few seconds and print the same JSON as /api/v1/state.
+        // CAN) for a few seconds and print the same JSON as /api/status.
         let c = store.get();
         if c.hardware.can_poll {
             can_poll::start(c.hardware.can_iface.clone(), telem.clone());
@@ -968,7 +1005,7 @@ fn main() {
     }
 
     if store.get().admin.password_hash.is_empty() {
-        eprintln!("FIRST BOOT: open https://<device-ip>:8443/ to run the setup wizard");
+        eprintln!("FIRST BOOT: open https://<device-ip>:4443/ to run the setup wizard");
     }
     telem.add_event("info", "main", format!("emaldo-local {VERSION} up"));
     eprintln!(
@@ -1018,9 +1055,13 @@ mod role_tests {
             role_of(&a("bridge mode vendor")),
             Role::Bridge
         ));
-        assert!(matches!(role_of(&a("--mcu-probe")), Role::Driver));
+        // A driver switch alone leaves the role open: Auto decides at start-up.
+        assert!(matches!(role_of(&a("--mcu-probe")), Role::Auto));
         assert!(matches!(role_of(&a("driver --config x")), Role::Driver));
-        assert!(matches!(role_of(&a("")), Role::Driver));
+        // No command word at all: the start-up probe decides.
+        assert!(matches!(role_of(&a("")), Role::Auto));
+        assert!(matches!(role_of(&a("--config /c.json")), Role::Auto));
+        assert!(matches!(role_of(&a("auto")), Role::Auto));
     }
 
     #[test]

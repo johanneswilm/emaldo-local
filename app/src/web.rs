@@ -16,7 +16,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-static INDEX_HTML: &[u8] = include_bytes!("../static/index.html");
+// One page for both roles; the bridge embeds the very same file.
+static INDEX_HTML: &[u8] = include_bytes!("web/index.html");
 static MANIFEST: &[u8] = include_bytes!("../static/manifest.webmanifest");
 static SW_JS: &[u8] = include_bytes!("../static/sw.js");
 static ICON_SVG: &[u8] = include_bytes!("../static/icon.svg");
@@ -25,6 +26,7 @@ pub struct WebServer {
     cfg: Arc<ConfigStore>,
     telem: Arc<TelemStore>,
     sessions: Mutex<HashMap<String, Instant>>,
+    started: Instant,
     on_config_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     on_cmd: Mutex<Option<Arc<dyn Fn(&str, &serde_json::Value) -> Result<String, String> + Send + Sync>>>,
     tls: Option<Arc<rustls::ServerConfig>>,
@@ -40,6 +42,7 @@ impl WebServer {
             cfg,
             telem,
             sessions: Mutex::new(HashMap::new()),
+            started: Instant::now(),
             on_config_change: Mutex::new(None),
             on_cmd: Mutex::new(None),
             tls,
@@ -64,7 +67,16 @@ impl WebServer {
             .name("web".into())
             .spawn(move || loop {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
+                        // Same boundary as the bridge role: an operator page is
+                        // for the LAN, and the CELLULAR address counts as
+                        // outside it.
+                        let web = me.cfg.get().web.clone();
+                        if web.lan_only && !crate::bridge::config::lan_allowed(&web.lan_cidrs, peer.ip()) {
+                            me.telem.add_event("warn", "web", format!("refused {peer}: outside lan_cidrs"));
+                            drop(stream);
+                            continue;
+                        }
                         let me = me.clone();
                         std::thread::spawn(move || me.handle_conn(stream));
                     }
@@ -155,144 +167,159 @@ impl WebServer {
             ("GET", "/icon.svg") => {
                 let _ = respond(stream, 200, "image/svg+xml", ICON_SVG);
             }
-            ("GET", "/api/v1/me") => {
-                // Returns auth status; 200 with {authed:bool}. Never reveals data.
-                if self.cfg.get().admin.password_hash.is_empty() {
-                    let _ = respond(stream, 200, "application/json", br#"{"setup_required":true,"authed":false}"#);
-                } else {
-                    let authed = self.authed(&headers);
-                    let _ = respond(stream, 200, "application/json",
-                        if authed { br#"{"authed":true}"# as &[u8] } else { br#"{"authed":false}"# });
-                }
+            // Shared surface: the same paths answer in both roles so one page
+            // serves either. The bridge role implements them in bridge/ui.rs.
+            ("GET", "/api/config") => self.api_config(stream, &headers, b"{}"),
+            ("POST", "/api/config") => self.api_config(stream, &headers, &body),
+            ("GET", "/api/role") => {
+                let body = serde_json::json!({
+                    "role": "driver",
+                    "setup_required": self.cfg.get().admin.password_hash.is_empty(),
+                    "authed": self.authed(&headers),
+                });
+                let _ = respond_json(stream, 200, &body);
             }
-            ("POST", "/api/v1/logout") => {
-                let _ = self.handle_logout(stream, &headers);
-            }
-            ("GET", "/api/v1/day") => {
-                // Read-only daily summary for API/HA consumers. Auth: bearer or cookie.
+            ("POST", "/api/login") => self.handle_login(stream, &body),
+            ("POST", "/api/setup") => self.handle_setup(stream, &body),
+            ("GET", "/api/status") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
-                let _ = respond_json(stream, 200, &self.day_summary());
+                // Same envelope the bridge role answers: the state under
+                // `telemetry`, itself under the role tag, so one page can
+                // render either.
+                let mut v = serde_json::to_value(self.telem.current()).unwrap_or(serde_json::json!({}));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("role".into(), serde_json::json!("driver"));
+                    obj.insert("uptime_s".into(), serde_json::json!(self.started.elapsed().as_secs()));
+                }
+                let _ = respond_json(stream, 200, &v);
             }
-            ("GET", "/api/v1/history") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let samples = crate::history::load(&self.cfg.dir());
-                let _ = respond_json(stream, 200, &serde_json::json!({ "samples": samples }));
-            }
-            ("GET", "/api/v1/broker") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let _ = respond_json(stream, 200, &self.discover_broker());
-            }
-            ("POST", "/api/v1/setup") => self.handle_setup(stream, &body),
-            ("POST", "/api/v1/login") => self.handle_login(stream, &body),
-            ("GET", "/api/v1/config") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let masked = config::Store::masked(&self.cfg.get());
-                let _ = respond_json(stream, 200, &masked);
-            }
-            ("PUT", "/api/v1/config") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                self.handle_config_put(stream, &body);
-            }
-            ("POST", "/api/v1/config") => {
-                // Settings change: requires a valid session AND the password
-                // again (confirm_password in the JSON body).
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let v: serde_json::Value = match serde_json::from_slice(&body) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        let _ = respond(stream, 400, "application/json", br#"{"error":"bad json"}"#);
-                        return;
-                    }
-                };
-                let pw = v.get("confirm_password").and_then(|x| x.as_str()).unwrap_or("");
-                if !self.check_password(pw) {
-                    let _ = respond(stream, 401, "application/json", br#"{"error":"password required"}"#);
-                    return;
-                }
-                let cfg_val = v.get("config").cloned().unwrap_or(serde_json::Value::Null);
-                let bytes = serde_json::to_vec(&cfg_val).unwrap_or_default();
-                self.handle_config_put(stream, &bytes);
-            }
-            ("GET", "/api/v1/state") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let _ = respond_json(stream, 200, &self.telem.current());
-            }
-            ("GET", "/api/v1/events") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let _ = respond_json(stream, 200, &self.telem.events());
-            }
-            ("POST", "/api/v1/walk") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                // Read-only diagnostic: walk slave ids on the bus.
-                match self.on_cmd.lock().unwrap().clone() {
-                    Some(f) => match f("walk", &serde_json::Value::Null) {
-                        Ok(msg) => {
-                            let _ = respond(stream, 202, "application/json", format!(r#"{{"ok":true,"note":"{msg}"}}"#).as_bytes());
-                        }
-                        Err(e) => {
-                            let _ = respond(stream, 409, "application/json", format!(r#"{{"error":"{e}"}}"#).as_bytes());
-                        }
-                    },
-                    None => {
-                        let _ = respond(stream, 409, "application/json", br#"{"error":"bus not available"}"#);
-                    }
-                }
-            }
-            ("POST", "/api/v1/cmd") => {
-                if !self.check_auth(stream, &headers) {
-                    return;
-                }
-                let req: serde_json::Value = match serde_json::from_slice(&body) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        let _ = respond(stream, 400, "application/json", br#"{"error":"bad json"}"#);
-                        return;
-                    }
-                };
-                let cmd = req["cmd"].as_str().unwrap_or("").to_string();
-                let args = req["args"].clone();
-                match self.on_cmd.lock().unwrap().clone() {
-                    Some(f) => match f(&cmd, &args) {
-                        Ok(msg) => {
-                            let _ = respond_json(stream, 200, &serde_json::json!({"ok": true, "result": msg}));
-                        }
-                        Err(e) => {
-                            let _ = respond_json(stream, 400, &serde_json::json!({"error": e}));
-                        }
-                    },
-                    None => {
-                        let _ = respond(stream, 409, "application/json", br#"{"error":"command handler not ready"}"#);
-                    }
-                }
-            }
-            ("GET", "/api/v1/stream") => {
+            ("GET", "/api/stream") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 self.handle_sse(stream);
             }
+            ("GET", "/api/events") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let _ = respond_json(stream, 200, &self.telem.events());
+            }
+            ("GET", "/api/history") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let samples = crate::history::load(&self.history_dir());
+                let _ = respond_json(stream, 200, &serde_json::json!({ "samples": samples }));
+            }
+            ("POST", "/api/role") => {
+                // Hand the box to the other role, the same one-command switch
+                // the bridge exposes: enable the target unit (Conflicts=
+                // stops the other) and let systemd do the transition.
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let target = match req["role"].as_str().unwrap_or("") {
+                    "bridge" => "emaldo-local.service",
+                    "driver" => "emaldo-local-driver.service",
+                    other => {
+                        let _ = respond(stream, 400, "application/json",
+                            format!(r#"{{"error":"unknown role {other}"}}"#).as_bytes());
+                        return;
+                    }
+                };
+                let out = std::process::Command::new("systemctl")
+                    .args(["enable", "--now", target])
+                    .output();
+                let ok = out.map(|o| o.status.success()).unwrap_or(false);
+                self.telem.add_event(if ok { "warn" } else { "error" }, "mode",
+                    format!("role switch to {target}: {}", if ok { "started" } else { "failed" }));
+                let msg = serde_json::json!({"ok": ok, "unit": target});
+                let _ = respond_json(stream, 200, &msg);
+                if ok {
+                    std::thread::sleep(Duration::from_millis(500));
+                    std::process::exit(0);
+                }
+            }
+            ("GET", "/api/broker") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let _ = respond_json(stream, 200, &self.discover_broker());
+            }
+            ("GET", "/api/day") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let _ = respond_json(stream, 200, &self.day_summary());
+            }
+            ("POST", "/api/walk") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                match self.on_cmd.lock().unwrap().clone() {
+                    Some(f) => {
+                        // The driver's cmd hook takes (cmd, args); a walk is sync, so
+                        // hand it the armed command and report the acceptance.
+                        match f("walk", &serde_json::Value::Null) {
+                            Ok(msg) => { let _ = respond_json(stream, 200, &serde_json::json!({"ok": true, "result": msg})); }
+                            Err(e) => { let _ = respond_json(stream, 400, &serde_json::json!({"error": e})); }
+                        }
+                    }
+                    None => { let _ = respond(stream, 409, "application/json", br#"{"error":"command handler not ready"}"#); }
+                }
+            }
+            ("POST", "/api/cmd") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let cmd = req["cmd"].as_str().unwrap_or("").to_string();
+                let args = req["args"].clone();
+                match self.on_cmd.lock().unwrap().clone() {
+                    Some(f) => match f(&cmd, &args) {
+                        Ok(msg) => { let _ = respond_json(stream, 200, &serde_json::json!({"ok": true, "result": msg})); }
+                        Err(e) => { let _ = respond_json(stream, 400, &serde_json::json!({"error": e})); }
+                    },
+                    None => { let _ = respond(stream, 409, "application/json", br#"{"error":"command handler not ready"}"#); }
+                }
+            }
+            ("POST", "/api/password") => {
+                if !self.check_auth(stream, &headers) {
+                    return;
+                }
+                self.handle_password(stream, &body);
+            }
+            ("POST", "/api/logout") => self.handle_logout(stream, &headers),
             _ => {
                 let _ = respond(stream, 404, "application/json", br#"{"error":"not found"}"#);
             }
         }
+    }
+
+    /// Where the 48-hour series lives: the role that recorded it does not
+    /// matter, so both read the shared `paths.state_dir` when set.
+    fn history_dir(&self) -> std::path::PathBuf {
+        let sd = self.cfg.get().paths.state_dir;
+        if sd.is_empty() { self.cfg.dir() } else { std::path::PathBuf::from(sd) }
+    }
+
+    /// The whole config document (secrets masked) for the settings pane, and
+    /// a whole-document save when the request carries `{"config": {...}}`.
+    fn api_config(&self, stream: &mut impl Write, headers: &HashMap<String, String>, body: &[u8]) {
+        if !self.check_auth(stream, headers) {
+            return;
+        }
+        let req: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+        if let Some(c) = req.get("config") {
+            self.handle_config_put(stream, &serde_json::to_vec(c).unwrap_or_default());
+            return;
+        }
+        let masked = config::Store::masked(&self.cfg.get());
+        let _ = respond_json(stream, 200, &masked);
     }
 
     fn authed(&self, headers: &HashMap<String, String>) -> bool {
@@ -307,7 +334,7 @@ impl WebServer {
             if let Some(c) = headers.get("cookie") {
                 for part in c.split(';') {
                     let part = part.trim();
-                    if let Some(v) = part.strip_prefix("emaldo_session=") {
+                    if let Some(v) = part.strip_prefix("emaldo_sid=") {
                         tok = v.to_string();
                     }
                 }
@@ -405,11 +432,46 @@ impl WebServer {
             .insert(tok.clone(), Instant::now() + Duration::from_secs(30 * 24 * 3600));
         let body = format!(r#"{{"token":"{tok}"}}"#);
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: emaldo_session={tok}; Path=/; HttpOnly; SameSite=Lax; Secure\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: emaldo_sid={tok}; Path=/; HttpOnly; SameSite=Strict; Secure\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
         let _ = stream.write_all(resp.as_bytes());
+    }
+
+    /// Change the admin password: current password required, minimum length
+    /// the same as first-run setup.
+    fn handle_password(&self, stream: &mut impl Write, body: &[u8]) {
+        let req: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = respond(stream, 400, "application/json", br#"{"error":"bad json"}"#);
+                return;
+            }
+        };
+        let cur = req["current"].as_str().unwrap_or("");
+        let fresh = req["new"].as_str().unwrap_or("");
+        if !self.check_password(cur) {
+            let _ = respond(stream, 401, "application/json", br#"{"error":"current password does not match"}"#);
+            return;
+        }
+        if fresh.len() < 8 {
+            let _ = respond(stream, 400, "application/json", br#"{"error":"new password must be at least 8 characters"}"#);
+            return;
+        }
+        let mut cfg = self.cfg.get();
+        let salt = util::new_salt();
+        cfg.admin.password_salt = salt.clone();
+        cfg.admin.password_hash = util::hash_password(fresh, &salt);
+        match self.cfg.save(&cfg) {
+            Ok(()) => {
+                self.telem.add_event("warn", "auth", "admin password changed");
+                let _ = respond(stream, 200, "application/json", br#"{"ok":true}"#);
+            }
+            Err(e) => {
+                let _ = respond(stream, 500, "application/json", format!(r#"{{"error":"save failed: {e}"}}"#).as_bytes());
+            }
+        }
     }
 
     /// Verify the admin password against the stored hash.
@@ -428,7 +490,7 @@ impl WebServer {
         if tok.is_empty() {
             if let Some(c) = headers.get("cookie") {
                 for part in c.split(';') {
-                    if let Some(v) = part.trim().strip_prefix("emaldo_session=") {
+                    if let Some(v) = part.trim().strip_prefix("emaldo_sid=") {
                         tok = v.to_string();
                     }
                 }
@@ -437,7 +499,7 @@ impl WebServer {
         if !tok.is_empty() {
             self.sessions.lock().unwrap().remove(&tok);
         }
-        let resp = "HTTP/1.1 200 OK\r\nSet-Cookie: emaldo_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
+        let resp = "HTTP/1.1 200 OK\r\nSet-Cookie: emaldo_sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
         let _ = stream.write_all(resp.as_bytes());
     }
 

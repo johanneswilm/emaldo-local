@@ -4,43 +4,150 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>emaldo-local</title>
-<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
 </head>
 <body>
 <header>
   <h1>emaldo-local</h1>
-  <nav>
+  <nav id="nav">
     <button data-tab="overview" class="on">Overview</button>
-    <button data-tab="schedule">Schedule</button>
-    <button data-tab="settings">Settings</button>
-    <button data-tab="system">System</button>
-    <button data-tab="logs">Logs</button>
+    <button data-tab="history" data-pane="history">History</button>
+    <button data-tab="plan" data-pane="plan">Plan</button>
+    <button data-tab="schedule" data-pane="schedule">Schedule</button>
+    <button data-tab="settings" data-pane="settings">Settings</button>
+    <button data-tab="system" data-pane="system">System</button>
+    <button data-tab="logs" data-pane="logs">Logs</button>
   </nav>
   <div id="mode" class="badge">…</div>
 </header>
 
 <main>
-<section id="overview">
-  <div class="grid">
-    <div class="card" id="t-soc"><h2>Battery</h2><div class="big" id="soc">–</div><div id="soc-sub" class="muted"></div></div>
-    <div class="card" id="t-power"><h2>Power</h2><div id="power"></div></div>
-    <div class="card" id="t-today"><h2>Today</h2><div id="today"></div></div>
-    <div class="card" id="t-conn"><h2>Connectivity</h2><div id="conn"></div></div>
+<!-- ------------------------------------------------------------ sign in -->
+<section id="setup" hidden>
+  <div class="card">
+    <h2>First-run setup</h2>
+    <p class="muted">Set the operator password. Everything below stays editable in Settings.</p>
+    <label id="su-user-field">Operator name <input id="su_user" value="operator" autocomplete="username"></label>
+    <label>Password (min 10 chars) <input id="su_pw" type="password" autocomplete="new-password"></label>
+    <label>Device name <input id="su_name" value="Power Core"></label>
+    <label>MQTT broker (optional) <input id="su_url" placeholder="mqtt://192.168.1.10:1883"></label>
+    <p><button id="do-setup" class="primary">Finish setup</button> <span id="su-msg" class="muted small"></span></p>
   </div>
-  <div class="grid">
-    <div class="card"><h2>Alarms / status</h2><div id="alarms" class="muted">no data yet</div></div>
-    <div class="card"><h2>Temperatures</h2><div id="temps" class="muted">no data yet</div></div>
-    <div class="card"><h2>Relay sessions</h2><div id="sessions" class="muted">no data yet</div></div>
-  </div>
-  <p><button id="refresh" class="primary">Refresh from module</button> <span id="refresh-msg" class="muted"></span></p>
 </section>
 
-<section id="schedule" hidden>
+<section id="login" hidden>
   <div class="card">
+    <h2>Log in</h2>
+    <label id="cred-field">User <input id="li_user" autocomplete="username"></label>
+    <label>Password <input id="li_pw" type="password" autocomplete="current-password"></label>
+    <p><button id="do-login" class="primary">Log in</button> <span id="li-msg" class="muted small"></span></p>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ overview -->
+<section id="overview" hidden>
+  <div class="grid">
+    <div class="card"><h2>Battery</h2><div class="big" id="soc">–</div><div id="soc-sub" class="muted small"></div></div>
+    <div class="card"><h2>Power</h2><div id="power"></div></div>
+    <div class="card"><h2>Today</h2><div id="today"></div></div>
+    <div class="card"><h2>Connectivity</h2><div id="conn"></div></div>
+    <div class="card" data-pane="bridge"><h2>Alarms / status</h2><div id="alarms" class="muted small">no data yet</div></div>
+    <div class="card" data-pane="bridge"><h2>Temperatures</h2><div id="temps" class="muted small">no data yet</div></div>
+    <div class="card" data-pane="bridge"><h2>Relay sessions</h2><div id="sessions" class="muted small">no data yet</div></div>
+  </div>
+  <div class="card" data-pane="bridge">
+    <h2>Device tree</h2>
+    <div class="tree" id="s_tree">–</div>
+  </div>
+  <div class="card" data-pane="driver">
+    <h2>Battery registers</h2>
+    <div id="d_sources" class="small"></div>
+  </div>
+  <p data-pane="bridge"><button id="refresh" class="primary">Refresh from module</button> <span id="refresh-msg" class="muted small"></span></p>
+</section>
+
+<!-- ------------------------------------------------------------ history -->
+<section id="history" hidden>
+  <div class="card">
+    <h2>History · last 48 hours</h2>
+    <div class="legend small">
+      <span><i style="background:var(--battery)"></i>SOC</span>
+      <span><i style="background:var(--grid)"></i>Grid</span>
+      <span><i style="background:var(--solar)"></i>PV</span>
+      <span><i style="background:var(--load)"></i>Load</span>
+    </div>
+    <svg id="histchart" class="chart" viewBox="0 0 720 200" preserveAspectRatio="none" onclick="fsChart(this)"></svg>
+    <div class="muted small" id="hist_note">Building history…</div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ plan -->
+<section id="plan" hidden>
+  <div class="card">
+    <h2>Policy &amp; control <span class="pill" id="c_writes">…</span></h2>
+    <div class="row">
+      <div><div class="muted small">Mode</div><div class="big" id="c_mode">–</div></div>
+      <div><div class="muted small">Setpoint</div><div class="big" id="c_setpoint">–</div></div>
+      <div><div class="muted small">Writes</div><div class="big" id="c_wcount">–</div></div>
+    </div>
+    <p class="muted small" id="c_modehelp"></p>
+    <p class="muted small" id="c_reason"></p>
+    <p class="muted small" id="c_last"></p>
+    <div id="planner_wrap">
+      <div class="legend">
+        <span>48-hour cost plan</span>
+        <span><i style="background:var(--solar)"></i>PV</span>
+        <span><i style="background:var(--grid)"></i>Price</span>
+        <span><i style="background:var(--battery)"></i>Charge (up)</span>
+        <span><i style="background:var(--load)"></i>Discharge (down)</span>
+      </div>
+      <svg id="planner" class="chart" viewBox="0 0 720 220" preserveAspectRatio="none" onclick="fsChart(this)"></svg>
+      <div class="muted small" id="planner_note"></div>
+    </div>
+    <div class="row">
+      <div><label>Mode</label>
+        <select id="p_mode">
+          <option value="auto">Limits &amp; schedule</option>
+          <option value="optimize">Cost Optimizer</option>
+          <option value="idle">Idle</option>
+          <option value="charge">Charge</option>
+          <option value="discharge">Discharge</option>
+        </select>
+      </div>
+      <div><label>Charge limit (W)</label><input id="p_charge" type="number" value="0"></div>
+      <div><label>Discharge limit (W)</label><input id="p_discharge" type="number" value="0"></div>
+      <div><label>Reserve (%)</label><input id="p_reserve" type="number" value="20"></div>
+    </div>
+    <p>
+      <button id="apply-policy" class="primary">Apply policy</button>
+      <button id="undo-change">Undo my last change</button>
+      <span id="p-msg" class="muted small"></span>
+    </p>
+    <p class="muted small" data-pane="driver"><b>Apply policy</b> sends the mode and limits to the battery; each
+      change is checked and rate-limited, and with writes off it only records what would happen.
+      <b>Undo my last change</b> puts back the inverter limits that were in place before this software first
+      changed them.</p>
+    <p class="muted small" data-pane="bridge">In bridge mode the module owns the hardware: the engine writes the
+      96-slot override table the vendor app and Home Assistant already use, so the limits below are recorded in
+      this installation's config and the plan is what reaches the module.</p>
+    <p class="muted small" id="c_links"></p>
+  </div>
+  <div class="card" data-pane="driver">
+    <h2>Diagnostics</h2>
+    <p class="muted small">Read-only bus scan: walks slave ids 1–10 and 240–250 with a 1-register read.</p>
+    <button id="do-walk">Run slave walk</button> <span id="walk-msg" class="muted small"></span>
+    <table id="s_raw"><tr><th>block</th><th>value</th></tr></table>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ schedule -->
+<section id="schedule" hidden>
+  <div class="card" data-pane="bridge">
     <h2>Day schedule (96 quarter-hour slots)</h2>
-    <p class="muted">Written to the module as the vendor <code>set_override</code> command (0x1a) — the same
-    command Home Assistant's optimizer uses. Slot 0 is 00:00 local; slot <i>n</i> is <i>n</i>·15 minutes after midnight.
-    A second set of 96 covers the following day, which is what the vendor app does.</p>
+    <p class="muted small">Written to the module as the vendor <code>set_override</code> command (0x1a) — the same
+      command Home Assistant's optimizer uses. Slot 0 is 00:00 local; slot <i>n</i> is <i>n</i>·15 minutes after
+      midnight. A second set of 96 covers the following day, which is what the vendor app does.</p>
     <div class="row">
       <label>High marker % <input id="ov-high" type="number" min="0" max="100" value="72"></label>
       <label>Low marker % <input id="ov-low" type="number" min="0" max="100" value="20"></label>
@@ -53,103 +160,172 @@
     <div id="slots" class="slots"></div>
     <p><button id="save-schedule" class="primary">Write schedule to module</button>
       <button id="reload-schedule">Re-read</button>
-      <span id="sched-msg" class="muted"></span></p>
+      <span id="sched-msg" class="muted small"></span></p>
   </div>
 </section>
 
+<!-- ------------------------------------------------------------ settings -->
 <section id="settings" hidden>
-  <div class="card">
-    <h2>Work mode and reserve</h2>
-    <p class="muted">E2E 0x19. The high/low markers ride along on every write, so they are read back first.</p>
+  <div class="card" data-pane="bridge">
+    <h2>Work mode and limits (vendor commands)</h2>
+    <p class="muted small">Sent as the module's own settings commands, the ones the vendor app writes.</p>
     <div class="row">
       <label>Work mode
         <select id="rs-mode">
-          <option value="1">price tracking</option>
-          <option value="2">scheduled</option>
-          <option value="3">AI adapter</option>
+          <option value="0">self-use</option>
+          <option value="1">time-of-use</option>
+          <option value="2">backup</option>
         </select>
       </label>
       <label>Smart (high) % <input id="rs-smart" type="number" min="0" max="100"></label>
       <label>Emergency (low) % <input id="rs-emergency" type="number" min="0" max="100"></label>
       <label>Sync weekday/weekend <input id="rs-sync" type="checkbox"></label>
     </div>
-    <p><button id="save-reserve" class="primary">Write work mode</button> <span id="rs-msg" class="muted"></span></p>
-  </div>
-  <div class="grid">
-    <div class="card">
-      <h2>Export limit (selling protection, 0x5e)</h2>
-      <label><input id="sp-on" type="checkbox"> enabled</label>
+    <p><button id="save-reserve" class="primary">Write work mode</button> <span id="rs-msg" class="muted small"></span></p>
+    <div class="row">
+      <label><input id="sp-on" type="checkbox"> Selling protection</label>
       <label>Grid import threshold kWh <input id="sp-kwh" type="number" min="0" max="100" value="0"></label>
-      <p><button id="save-sp">Write</button> <span id="sp-msg" class="muted"></span></p>
     </div>
-    <div class="card">
-      <h2>Manual selling target (0x80)</h2>
-      <label><input id="ms-on" type="checkbox"> enabled</label>
+    <p><button id="save-sp">Write protection</button> <span id="sp-msg" class="muted small"></span></p>
+    <div class="row">
+      <label><input id="ms-on" type="checkbox"> Manual selling</label>
       <label>Target kWh <input id="ms-kwh" type="number" min="0" max="100" value="0"></label>
-      <p><button id="save-ms">Write</button> <span id="ms-msg" class="muted"></span></p>
     </div>
-    <div class="card">
-      <h2>Emergency charge window (0x01)</h2>
-      <label><input id="ec-on" type="checkbox"> enabled</label>
+    <p><button id="save-ms">Write manual selling</button> <span id="ms-msg" class="muted small"></span></p>
+    <div class="row">
+      <label><input id="ec-on" type="checkbox"> Emergency charge</label>
       <label>Start <input id="ec-start" type="datetime-local"></label>
       <label>End <input id="ec-end" type="datetime-local"></label>
-      <p><button id="save-ec">Write</button> <span id="ec-msg" class="muted"></span></p>
     </div>
+    <p><button id="save-ec">Write emergency charge</button> <span id="ec-msg" class="muted small"></span></p>
   </div>
-  <div class="card">
+  <div class="card" data-pane="bridge">
     <h2>Read-only in this protocol</h2>
-    <ul id="readonly" class="muted"></ul>
+    <ul id="readonly" class="muted small"></ul>
+  </div>
+
+  <div class="card" data-pane="driver">
+    <h2>Settings</h2>
+    <p class="muted small">Changes are written to this installation's config and applied where possible; a few
+      hardware fields take effect after a restart. Secrets are never shown.</p>
+    <h3>MQTT / Home Assistant</h3>
+    <div class="row">
+      <label><input id="cfg_mqtt_on" type="checkbox"> Publish to MQTT</label>
+      <button id="discover-broker" class="ghost">Auto-detect broker</button>
+    </div>
+    <div id="cfg_mqtt_box">
+      <div class="row">
+        <div><label>Broker URL</label><input id="cfg_mqtt_url" placeholder="mqtt://192.168.1.10:1883"></div>
+        <div><label>Topic prefix</label><input id="cfg_mqtt_prefix"></div>
+        <div><label>HA discovery</label><select id="cfg_mqtt_disc"><option value="true">on</option><option value="false">off</option></select></div>
+        <div><label>Discovery prefix</label><input id="cfg_mqtt_dprefix"></div>
+      </div>
+      <p class="muted small" id="cfg_mqtt_hint"></p>
+    </div>
+    <h3>Prices</h3>
+    <div class="row">
+      <div><label>Enabled</label><select id="cfg_prices_enabled"><option value="true">on</option><option value="false">off</option></select></div>
+      <div><label>Area</label><input id="cfg_prices_area" placeholder="SE4"></div>
+      <div><label>Currency</label><input id="cfg_prices_currency" placeholder="EUR"></div>
+      <div><label>TZ offset (s)</label><input id="cfg_prices_tz" type="number" value="3600"></div>
+      <div><label>Refresh (s)</label><input id="cfg_prices_refresh" type="number" value="21600"></div>
+    </div>
+    <h3>PV array</h3>
+    <div class="row">
+      <div><label>Forecast enabled</label><select id="cfg_solar_enabled"><option value="true">on</option><option value="false">off</option></select></div>
+      <div><label>Latitude</label><input id="cfg_solar_lat" type="number" step="0.00001"></div>
+      <div><label>Longitude</label><input id="cfg_solar_lon" type="number" step="0.00001"></div>
+      <div><label>Performance ratio</label><input id="cfg_solar_pr" type="number" step="0.01" value="0.8"></div>
+    </div>
+    <p class="muted small">One row per string (panels × Wp, tilt°, azimuth° 90=E/180=S/270=W, bifacial).</p>
+    <table id="cfg_solar_strings"><tr><th>name</th><th>panels</th><th>Wp</th><th>tilt°</th><th>az°</th><th>bifacial</th><th></th></tr></table>
+    <button id="add-string" class="ghost">+ add string</button>
+    <h3>Battery / hardware</h3>
+    <div class="row">
+      <div><label>Hardware profile</label><select id="cfg_profile"><option value="powercore2">Power Core 2.0</option></select></div>
+      <div><label>Reserve (%)</label><input id="cfg_reserve" type="number" value="20"></div>
+      <div><label>Optimizer: min price spread (EUR/kWh)</label><input id="cfg_opt_spread" type="number" step="0.005" value="0.03"></div>
+      <div><label>Optimizer: round-trip efficiency</label><input id="cfg_opt_eta" type="number" step="0.01" value="0.9"></div>
+      <div><label>Optimizer: max charge to SOC (%)</label><input id="cfg_opt_max" type="number" value="100"></div>
+      <div><label>CAN listen (BMS)</label><select id="cfg_can"><option value="true">on</option><option value="false">off</option></select></div>
+      <div><label>CAN active poll (takeover)</label><select id="cfg_can_poll"><option value="false">off</option><option value="true">on</option></select></div>
+      <div><label>Grid meter</label><select id="cfg_meter"><option value="true">on</option><option value="false">off</option></select></div>
+      <div><label>Poll interval (s)</label><input id="cfg_poll" type="number" value="5"></div>
+      <div><label>Device name</label><input id="cfg_device_name"></div>
+      <div><label>Display enabled</label><select id="cfg_display"><option value="true">on</option><option value="false">off</option></select></div>
+    </div>
+    <p class="muted small">Ports, baud, slave ids and sysfs paths are fixed by the profile; only change the profile
+      for a different model.</p>
+    <p><button id="save-settings" class="primary">Save settings</button>
+      <button id="reload-config">Reload</button> <span id="cfg_msg" class="muted small"></span></p>
+    <details><summary class="muted small">Raw configuration (read-only)</summary><pre id="s_cfg" class="mono small">–</pre></details>
+  </div>
+
+  <div class="card">
+    <h2>Password</h2>
+    <label>Current <input id="pw-cur" type="password" autocomplete="current-password"></label>
+    <label>New (min 10) <input id="pw-new" type="password" autocomplete="new-password"></label>
+    <p><button id="save-pw">Change</button> <span id="pw-msg" class="muted small"></span></p>
   </div>
 </section>
 
+<!-- ------------------------------------------------------------ system -->
 <section id="system" hidden>
   <div class="card">
+    <h2>Role</h2>
+    <p class="muted small">Bridge: the vendor app stays the hardware controller and this service fronts its cloud.
+      Driver: this service replaces the vendor app on the Modbus/CAN/MCU buses and the vendor supervisor is parked.
+      Either direction is one unit command (<code>systemctl enable --now emaldo-local[-driver]</code>) and the page
+      comes back on the same address and port.</p>
+    <div id="role-state" class="mono small"></div>
+    <p><button id="switch-role-all" class="ghost">Switch to the other role</button> <span id="role-msg" class="muted small"></span></p>
+  </div>
+  <div class="card" data-pane="bridge">
     <h2>Operating mode</h2>
-    <p class="muted">Local: the vendor domains resolve to this box and the vendor app runs against the bridge.
-      Vendor: the pins are removed and the bridge's cloud leg passes traffic through, so the app resumes its
-      original cloud path. Either switch is one command and reversible; the app is never disabled.</p>
+    <p class="muted small">Local: the vendor domains resolve to this box and the vendor app runs against the
+      built-in bridge. Vendor: the pins are removed and the bridge's cloud leg passes traffic through, so the app
+      resumes its original cloud path. Either switch is one command and reversible; the app is never disabled.</p>
     <div id="mode-state" class="mono small"></div>
     <p><button id="go-local" class="primary">Switch to local</button>
       <button id="go-vendor">Switch to vendor</button>
       <button id="restart-app">Restart vendor app</button>
-      <button id="restart-bridge">Restart bridge</button>
-      <span id="sys-msg" class="muted"></span></p>
+      <button id="restart-service">Restart this service</button>
+      <span id="sys-msg" class="muted small"></span></p>
   </div>
-  <div class="card">
+  <div class="card" data-pane="bridge">
     <h2>Cellular (LTE)</h2>
-    <p class="muted">The vendor app dials the built-in LTE modem as a fallback path. While the unit runs local,
-      that path is closed (modem unbound from USB, pppd stopped, interface down) because it is the only way to
-      reach the vendor cloud and the radio is not paid for. Restoring puts the modem back on the bus; the app
-      redials by itself.</p>
+    <p class="muted small">The vendor app dials the built-in LTE modem as a fallback path. While the unit runs
+      local that path is closed (modem unbound from USB, pppd stopped, interface down) because it is the only way
+      to reach the vendor cloud. Restoring puts the modem back on the bus; the app redials by itself.</p>
     <div id="lte-state" class="mono small"></div>
     <p><button id="lte-off">Close LTE path</button>
       <button id="lte-on">Restore modem</button>
-      <span id="lte-msg" class="muted"></span></p>
+      <span id="lte-msg" class="muted small"></span></p>
   </div>
-  <div class="card">
+  <div class="card" data-pane="bridge">
     <h2>Vendor state backup (/root/db)</h2>
     <p><button id="mk-backup">Create backup</button></p>
     <table id="backups"><tr><th>name</th><th>bytes</th><th>when</th><th></th></tr></table>
   </div>
   <div class="card">
-    <h2>Bridge configuration</h2>
+    <h2>Configuration</h2>
     <div id="config"></div>
-    <p><button id="save-config">Save</button> <span id="cfg-msg" class="muted"></span></p>
-    <p class="muted">Home Assistant connects to <code id="ha-info"></code> and must trust <a href="/ca.pem">/ca.pem</a>
-      (set <code>ca_file</code> in the <code>emaldo_local</code> entry to that certificate).</p>
+    <p><button id="save-config">Save</button> <span id="cfg-msg2" class="muted small"></span></p>
+    <p class="muted small" data-pane="bridge">Home Assistant connects to <code id="ha-info"></code> and must trust
+      <a href="/ca.pem">/ca.pem</a> (set <code>ca_file</code> in the <code>emaldo_local</code> entry to that
+      certificate).</p>
   </div>
   <div class="card">
-    <h2>Password</h2>
-    <label>Current <input id="pw-cur" type="password" autocomplete="current-password"></label>
-    <label>New (min 10) <input id="pw-new" type="password" autocomplete="new-password"></label>
-    <p><button id="save-pw">Change</button> <span id="pw-msg" class="muted"></span></p>
+    <h2>Events</h2>
+    <pre id="s_events" class="mono small">–</pre>
   </div>
 </section>
 
+<!-- ------------------------------------------------------------ logs -->
 <section id="logs" hidden>
   <div class="card">
-    <input id="logq" placeholder="filter (substring)">
-    <button id="log-refresh">Refresh</button>
+    <h2>Log</h2>
+    <p><input id="logq" placeholder="filter (substring)"> <button id="log-refresh">Refresh</button></p>
     <pre id="log" class="mono small"></pre>
   </div>
 </section>

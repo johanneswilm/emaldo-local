@@ -74,7 +74,7 @@ The optional `mqtt` block (same shape as the driver's `[mqtt]` TOML section:
 the plant over MQTT/Home Assistant discovery from the module's E2E reports —
 see [README.md](README.md) (MQTT / Home Assistant). Empty `broker_url`, the
 default, publishes nothing. Only one role should publish at a time: with the
-bridge publishing, `emaldo-driver.service` must be stopped, or both write the
+bridge publishing, `emaldo-local-driver.service` must be stopped, or both write the
 same topics.
 
 ### Cost-aware control in this role

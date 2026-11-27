@@ -305,7 +305,7 @@ layout/pclntab).
 - [~] SOC register: candidate byte 0x36 in the 0x0FA0 block, scale /10 —
       unconfirmed on live (the driver's live SOC comes from the BMS over
       CAN type 3; see below).
-- [~] Slave ids: walk tooling done (`POST /api/v1/walk`, verified on the
+- [~] Slave ids: walk tooling done (`POST /api/walk`, verified on the
       bench). Inverter slave = 1, b-sensor slave = 1.
 - [x] BMS frame format: our packs are **BAK** (CAN type-7 TLV), decoded
       and live-validated; BST ASCII remains for other hardware.

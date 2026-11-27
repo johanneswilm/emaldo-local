@@ -26,7 +26,7 @@ Done:
   installed. Existing systemd unit lines and docs keep working unchanged.
 - Deploy assets moved to `app/deploy/`; the ARMv7 artifact is one file,
   installed at `/root/emaldo-local/emaldo-local` and run by both units on the
-  live box (`emaldo-local.service` → `run`, `emaldo-driver.service` → `driver`).
+  live box (`emaldo-local.service` → `run`, `emaldo-local-driver.service` → `driver`).
 - MQTT path fixed on the way: retained QoS 1 discovery configs + availability,
   retained last will, re-publish after every CONNACK (Home Assistant had zero
   entities because the configs were never replayed to a subscribing HA).
@@ -35,7 +35,7 @@ Done:
   `Bridge::record_power_flow`) into the same `telemetry::State` the driver
   builds from the bus, and publishes it plus MQTT discovery under the shared
   `[mqtt]` settings — the bridge role now has its own publisher (`mqtt` block in
-  `config.json`). Proof on the live box with `emaldo-driver.service` stopped: 8
+  `config.json`). Proof on the live box with `emaldo-local-driver.service` stopped: 8
   discovery configs, retained `online`, and in Home Assistant
   `sensor.power_core_live_battery_soc` 73.0 %, `battery_temperature` 24.95 degC,
   `battery_power` 800 W, `load_net_power`, `grid_net_power`, `pv_power` and the
@@ -148,15 +148,17 @@ path (`Store::masked`) and merged back on write.
 
 ## One web API, one UI
 
-Driver's `/api/v1/*` surface is the base (it has SSE, day/history charts, PWA
-assets and the polished UI). Bridge-only capabilities are added under the same
-prefix and advertised by `GET /api/v1/me`:
+Both roles serve one document (`src/web/index.html`, embedded by `web.rs` and
+`bridge/ui.rs`) and one unversioned surface; panes are marked
+`data-pane="bridge|driver"` and the page hides what the running role cannot
+serve. `GET /api/role` answers before sign-in:
 
 ```json
-{"authed":true,"mode":"bridge","setup_required":false,
- "capabilities":["vendor_mode","lte","relay_sessions","schedule","settings",
-                 "backups","logs","prices","solar","optimizer","display"]}
+{"authed":true,"role":"bridge","setup_required":false}
 ```
+
+The role's presence is the capability statement: a pane whose route the role
+does not implement is hidden, never served by a second URL.
 
 New routes (from bridge `ui.rs`): `GET/POST /api/v1/schedule`,
 `GET /api/v1/settings`, `POST /api/v1/settings/{reserve,selling_protection,
