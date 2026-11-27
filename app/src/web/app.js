@@ -102,27 +102,32 @@ function applyRolePanes() {
 // ---------------------------------------------------------------- auth
 
 // The driver role stores one admin password; the bridge keeps a user map.
-let CREDS = { user: "admin" };
+// The user name is whatever the operator typed - never a remembered value,
+// which is how a form default silently overrode the input.
 
 async function loadCreds() {
-  const r = await call("/api/v1/config");
-  const j = r.j || {};
-  const names = j.users;
-  CREDS.user = ROLE === "bridge" && Array.isArray(names) && names.length ? names[0] : "admin";
+  // Shows/hides the user field and offers a default name; the submit path
+  // reads the input itself.
   const field = $("cred-field");
   if (field) field.hidden = ROLE !== "bridge";
+  if (ROLE !== "bridge") return;
+  const r = await call("/api/v1/config");
+  const names = ((r.j || {}).users) || [];
   const u = $("li_user");
-  if (u) u.value = CREDS.user;
+  if (u && !u.value && Array.isArray(names) && names.length === 1) u.value = names[0];
 }
 
 async function boot() {
   const r = await call("/api/v1/role");
   const j = r.j || {};
-  if (j.setup_required) { show("setup"); return; }
-  if (!j.authed) { show("login"); return; }
+  // The role decides which sign-in fields exist, so it is known before any
+  // card is shown - otherwise the login card was rendered without a user
+  // field and the submit fell back to a default name.
   ROLE = j.role || "";
   applyRolePanes();
   await loadCreds();
+  if (j.setup_required) { show("setup"); return; }
+  if (!j.authed) { show("login"); return; }
   startApp();
 }
 
@@ -139,9 +144,10 @@ async function doSetup() {
 }
 
 async function doLogin() {
-  const r = await call("/api/v1/login", { user: CREDS.user, password: $("li_pw").value });
+  const user = ($("li_user") && $("li_user").value.trim()) || "admin";
+  const r = await call("/api/v1/login", { user, password: $("li_pw").value });
   if (r.ok) { $("li_pw").value = ""; boot(); }
-  else msg("li-msg", "unknown user or wrong password", "warn");
+  else msg("li-msg", r.status === 401 ? "unknown user or wrong password" : ("log in failed: HTTP " + r.status), "warn");
 }
 
 async function doLogout() {

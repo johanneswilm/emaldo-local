@@ -886,6 +886,23 @@ fn the_page_is_one_document_for_both_roles() {
 }
 
 #[test]
+fn the_login_form_sends_the_typed_user_not_a_default() {
+    // Regression: `doLogin` posted a remembered user, and `boot()` returned
+    // before the role was known, so the login card never showed the field and
+    // every attempt went out as "admin".
+    let js = include_str!("../web/app.js");
+    let body = js.split("async function doLogin()").nth(1).unwrap_or("");
+    let head: String = body.chars().take(400).collect();
+    assert!(head.contains("li_user"), "login must read the user field: {head}");
+    assert!(!head.contains("CREDS.user"), "login must not send a cached user: {head}");
+    let boot = js.split("async function boot()").nth(1).unwrap_or("");
+    let boot_head: String = boot.chars().take(300).collect();
+    let role_at = boot_head.find("ROLE = j.role").unwrap_or(usize::MAX);
+    let card_at = boot_head.find("show(\"login\")").unwrap_or(usize::MAX);
+    assert!(role_at < card_at, "the role must be known before the login card: {boot_head}");
+}
+
+#[test]
 fn the_role_probe_answers_before_login() {
     let (_dir, bridge) = fixture("roleprobe");
     let ui = Ui::new(bridge.clone());
