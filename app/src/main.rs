@@ -7,8 +7,9 @@
 // sysfs, e-ink display, MQTT + Home Assistant discovery, authenticated
 // TLS web UI.
 // Phase 2: policy engine + control writes. ALL bus writes go through
-// control.rs and are OFF by default (control.writes_enabled=false);
-// flip at runtime via config/API when the controlled window comes.
+// control.rs. They are ON by default in the driver role (it owns the bus);
+// `--read-only` or control.writes_enabled=false makes them journaled
+// WOULD-WRITEs. The bridge role keeps them off: the vendor app controls.
 // No OTA, no vendor cloud, vendor app and identity files untouched.
 
 #[allow(dead_code)] // exercised once the BMS frame layout is captured (docs/REGISTERS.md)
@@ -50,7 +51,7 @@ mod web;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// One version string for both roles: the crate version from Cargo.toml.
+/// One version string for both roles: the crate version.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Which role the argv selects. The bridge keeps its own command words (they
@@ -159,6 +160,7 @@ fn main() {
     // One config file for both roles, the path the bridge already uses.
     let mut cfg_path = PathBuf::from("/root/emaldo-local/config.json");
     let mut rollback_mode = false;
+    let mut read_only = false;
     let mut mcu_probe = false;
     let mut mcu_port: Option<String> = None;
     let mut mcu_timeout_ms: Option<u64> = None;
@@ -191,6 +193,8 @@ fn main() {
                 }
             }
             "--rollback" => rollback_mode = true,
+            // The driver writes by default; this makes a run observe only.
+            "--read-only" => read_only = true,
             "--mcu-probe" => mcu_probe = true,
             "--mcu-raw-dump" => {
                 mcu_raw_dump = Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(5));
@@ -701,6 +705,14 @@ fn main() {
     // Single write controller for the whole process (its worker thread
     // serializes every bus write).
     let ctrl = control::Controller::new(store.clone(), telem.clone(), bus.clone(), state_dir.clone());
+
+    // --read-only: same run, writes journaled as WOULD-WRITE. Applied to the
+    // in-memory config only, so the file keeps what the operator chose.
+    if read_only {
+        let mut cfg = store.get();
+        cfg.control.writes_enabled = false;
+        store.set_runtime(cfg);
+    }
 
     // --rollback: one-command restore of the pre-write register snapshot.
     // Opens the bus exclusively (the vendor app must be stopped), restores,

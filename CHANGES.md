@@ -6,6 +6,19 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# Driver writes by default, --read-only (2026-11-27, last)
+
+The driver role owns the bus it runs on, so `control.writes_enabled` now
+defaults to **on** there; `emaldo-local driver --read-only` (in-memory only, the
+file keeps the operator's choice) or `control.writes_enabled=false` makes every
+write a journaled WOULD-WRITE. The bridge role keeps the gate **off** in its own
+constructor: there the vendor app controls and only the E2E override table
+moves the battery. A config file that predates the gate reads as closed.
+
+Tests: 144 (2 new: role defaults, absent gate in an old document).
+
+---
+
 # JSON only, with comments (2026-11-27, last)
 
 The TOML reader, the `toml` dependency and the standalone-install migration are

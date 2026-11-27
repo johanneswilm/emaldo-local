@@ -240,12 +240,18 @@ impl Default for OptimizerConfig {
 }
 
 /// Phase-2 write control. THE MASTER SWITCH for bus writes is
-/// `writes_enabled` — off by default; flip at runtime via the config API
-/// or file (no restart needed; the controller re-reads config per write).
+/// `writes_enabled`. In the **driver** role it defaults to on (that role owns
+/// the hardware it runs on); `emaldo-local driver --read-only` or
+/// `control.writes_enabled=false` turns every write into a journaled
+/// WOULD-WRITE. The **bridge** role keeps it off: there the vendor app is the
+/// controller and only the E2E override table moves the battery. The
+/// controller re-reads the config per write, so the switch needs no restart.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ControlConfig {
-    /// false = dry-run: every write is validated + journaled as
-    /// WOULD-WRITE but nothing reaches the bus.
+    /// false = read-only: every write is validated + journaled as
+    /// WOULD-WRITE but nothing reaches the bus. Absent in the file, the
+    /// default depends on the role (driver: true, `app::main` applies it;
+    /// the serde default stays false for the bridge's own `Default`).
     #[serde(default)]
     pub writes_enabled: bool,
     /// Register units per watt for power setpoints (vendor register
@@ -324,7 +330,8 @@ impl Default for PolicyConfig {
 impl Default for ControlConfig {
     fn default() -> Self {
         ControlConfig {
-            writes_enabled: false,
+            // The driver's default; the bridge constructor sets `false`.
+            writes_enabled: true,
             power_scale: default_power_scale(),
             min_write_interval_ms: default_min_write_ms(),
             max_writes_per_minute: default_max_writes(),
@@ -1222,6 +1229,23 @@ mod shared_doc_tests {
         let text = shared::rewrite_owned(base, &doc);
         assert_eq!(shared::parse(&text).unwrap(), doc, "{text}");
         assert!(!text.contains("\"gone\""), "{text}");
+    }
+
+    #[test]
+    fn the_driver_writes_by_default_and_the_bridge_does_not() {
+        // The driver owns the hardware it runs on; the bridge leaves the
+        // register path to the vendor app.
+        assert!(ControlConfig::default().writes_enabled);
+        assert!(!crate::bridge::config::Config::default().control.writes_enabled);
+    }
+
+    #[test]
+    fn an_absent_gate_reads_as_closed_from_the_shared_document() {
+        // A file that predates the gate must not silently enable bus writes
+        // in the bridge: the bridge constructor applies its own default.
+        let text = r#"{"control": {"power_scale": 10}}"#;
+        let cfg: Config = serde_json::from_value(shared::parse(text).unwrap()).unwrap();
+        assert!(!cfg.control.writes_enabled);
     }
 
     #[test]

@@ -20,9 +20,10 @@ A lean Rust driver that replaces the vendor's Go module application
 (`/root/bin/app`) as the hardware controller of an Emaldo Power Core 2.0.
 Phase 1 (read-only telemetry, display, MQTT/HA, TLS web UI) is validated
 on the emulator and live. Phase 2 (policy engine + control writes) is
-implemented and bench-validated; **bus writes are a runtime option and
-OFF by default** (`control.writes_enabled=false`) — with writes off every
-command is validated and journaled as a dry-run. No OTA, no vendor cloud,
+implemented and bench-validated; **bus writes are ON by default in the driver
+role** (it owns the bus) and OFF in the bridge role (the vendor app controls).
+`--read-only` or `control.writes_enabled=false` turns every command into a
+validated, journaled dry-run instead. No OTA, no vendor cloud,
 vendor app and identity files untouched.
 
 Context and constraints: register map status and live-hardware findings are
@@ -296,7 +297,8 @@ confirmation (`../docs/ISSUES.md` #1).
 The housekeeping MCU (`/dev/mcu1`) Bmtp read set is recovered and
 bench-validated, but its inverter telemetry is silent on this unit; the live
 inverter path is Modbus RTU on the CH9344 ports (see
-`../docs/REGISTERS.md`). `control.writes_enabled=false` on the live unit.
+`../docs/REGISTERS.md`). The live unit runs the bridge; a driver run on it
+must use `--read-only` until the register map is confirmed on that bus.
 Restore-after-window: `systemctl start monitor.service monitor-dog.service`.
 
 ## Limitations / known unknowns

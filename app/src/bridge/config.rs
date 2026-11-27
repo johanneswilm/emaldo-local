@@ -204,7 +204,13 @@ impl Default for Config {
             control_port: 1052,
             mqtt: crate::config::MqttConfig::default(),
             policy: crate::config::PolicyConfig::default(),
-            control: crate::config::ControlConfig::default(),
+            control: crate::config::ControlConfig {
+                // Bridge role: the vendor app owns the hardware, so the
+                // register write path stays dry-run regardless of the
+                // driver's default.
+                writes_enabled: false,
+                ..crate::config::ControlConfig::default()
+            },
             prices: crate::config::PricesConfig::default(),
             solar: crate::config::SolarConfig::default(),
             ui_bind: "0.0.0.0".into(),
