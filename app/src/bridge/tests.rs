@@ -886,6 +886,22 @@ fn the_page_is_one_document_for_both_roles() {
 }
 
 #[test]
+fn the_page_keeps_the_flow_diagram_and_charts() {
+    // The graphical layer (energy-flow hero, battery fill, charts, device
+    // tree) was lost once in a refactor; these ids are what draw it.
+    let html = include_str!("../web/index.html");
+    let js = include_str!("../web/app.js");
+    for id in ["v_pv", "v_grid", "v_bat", "v_load", "v_soc", "bat_fill", "soc_bar", "s_tree", "histchart", "planner", "a_pv"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "markup lost #{id}");
+    }
+    assert!(html.contains("class=\"flow\""), "the energy-flow svg is gone");
+    assert!(html.contains("<style>"), "the stylesheet must ship with the page");
+    for f in ["renderHero", "renderHistory", "renderPlanner", "treeGroup"] {
+        assert!(js.contains(&format!("function {f}")), "renderer lost: {f}");
+    }
+}
+
+#[test]
 fn the_login_form_sends_the_typed_user_not_a_default() {
     // Regression: `doLogin` posted a remembered user, and `boot()` returned
     // before the role was known, so the login card never showed the field and

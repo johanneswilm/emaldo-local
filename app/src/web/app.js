@@ -62,6 +62,48 @@ function ago(ts, now) {
   return d < 60 ? d + " s ago" : Math.round(d / 60) + " min ago";
 }
 
+// ---------------------------------------------------------------- hero
+
+function setArc(id, active) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle("active", !!active);
+}
+
+/// Drive the flow diagram. Same element ids as the original driver page:
+/// v_pv / v_grid / v_bat / v_load / v_soc, bat_fill, soc_bar, s_meta.
+function renderHero(pv, grid, bat, load, soc, meta) {
+  if (!$("v_pv")) return;
+  const f = (w) => (w === undefined || w === null ? "–" : fmtkW(w));
+  $("v_pv").textContent = f(pv);
+  $("v_grid").textContent = f(grid);
+  $("v_bat").textContent = f(bat);
+  $("v_load").textContent = f(load);
+  $("v_soc").textContent = soc == null ? "–" : soc.toFixed(0) + " % charged";
+  $("v_bat").setAttribute("class", "node-val " + (bat > 50 ? "charge" : bat < -50 ? "draw" : "node-val"));
+
+  const top = 152, bot = 208, h = bot - top;
+  const frac = Math.max(0, Math.min(1, (soc || 0) / 100));
+  $("bat_fill").setAttribute("y", String(bot - h * frac));
+  $("bat_fill").setAttribute("height", String(Math.max(0, h * frac)));
+  const bar = $("soc_bar");
+  if (bar) bar.style.width = Math.max(0, Math.min(100, soc || 0)) + "%";
+
+  setArc("a_pv", pv > 20);
+  setArc("a_grid", Math.abs(grid) > 20);
+  setArc("a_bat", Math.abs(bat) > 20);
+  setArc("a_load", load > 20);
+  const m = $("s_meta");
+  if (m) m.textContent = meta || "";
+}
+
+/// Collapsible device rows (the original page's tree look).
+function treeGroup(title, inner, open) {
+  return '<details class="dt-grp"' + (open === false ? "" : " open") + '><summary>' + esc(title) + "</summary>" + inner + "</details>";
+}
+function treeRow(k, v) {
+  return '<div class="dt-row"><span class="dt-k">' + esc(k) + '</span><span class="dt-v">' + v + "</span></div>";
+}
+
 // Charts: 1:1 geometry so axis text is not stretched.
 function chartWidth(svg, fb) { const w = svg && svg.clientWidth ? svg.clientWidth : fb; return Math.max(260, Math.round(w)); }
 function chartHeight(svg, fb) { const h = svg && svg.clientHeight ? svg.clientHeight : fb; return Math.max(160, Math.round(h)); }
@@ -241,6 +283,17 @@ function renderBridge(s) {
     ["API hits", Object.values(s.hits || {}).reduce((a, n) => a + n, 0)],
   ]);
 
+  // Hero: the vendor module's own numbers.
+  const ev = pf ? (pf.ev_w || 0) : 0;
+  renderHero(
+    pf ? pf.solar_w : null,
+    pf ? pf.grid_w : null,
+    pf ? pf.battery_w : null,
+    pf ? (pf.addition_load_w || 0) + (pf.other_load_w || 0) : null,
+    first ? first.soc : null,
+    pf ? "updated " + ago(tele.power_flow.ts, s.now) + (ev ? " · EV " + kw(ev) : "") : "no power read yet",
+  );
+
   renderBridgeExtras(s);
   renderPolicy(s.optimizer || { policy: { mode: (s.mode_status && s.mode_status.mode) || "" } }, s);
 }
@@ -264,6 +317,26 @@ function renderBridgeExtras(s) {
   $("temps").innerHTML = first
     ? kv([["BMS", first.bms_temp_c + " °C"], ["electrode A", first.electrode_a_temp_c + " °C"], ["electrode B", first.electrode_b_temp_c + " °C"]])
     : '<span class="muted">no read yet</span>';
+
+  const treeEl = $("s_tree");
+  if (treeEl) {
+    let t = treeGroup("Battery",
+      treeRow("State of charge", "<b>" + (first ? first.soc + " %" : "–") + "</b>") +
+      treeRow("Power", first ? fmtkW(first.current_ma * first.voltage_mv / 1e6) : "–") +
+      treeRow("Voltage / current", first ? (first.voltage_mv / 1000).toFixed(2) + " V · " + (first.current_ma / 1000).toFixed(1) + " A" : "–") +
+      treeRow("Energy", first ? Math.round(first.current_energy_wh) + " / " + first.full_energy_wh + " Wh" : "–"));
+    const items = (bat && bat.items) || [];
+    if (items.length) {
+      t += treeGroup("Packs (" + items.length + ")",
+        items.map((x) => treeRow("Pack " + (x.slot != null ? x.slot : "?"),
+          (x.soc || 0) + "% · " + ((x.voltage_mv || 0) / 1000).toFixed(2) + " V · " + (x.soh || 0) + "% SOH")).join(""), false);
+    }
+    t += treeGroup("Vendor front",
+      treeRow("app seen", ago(s.app_last_seen, s.now)) +
+      treeRow("logins", s.logins) +
+      treeRow("relay frames", s.relay && s.relay.frames));
+    treeEl.innerHTML = t;
+  }
 
   const sess = (s.relay && s.relay.sessions) || [];
   $("sessions").innerHTML = sess.length
@@ -323,6 +396,39 @@ function renderDriverState(st) {
     ["packs", st.battery.modules ? st.battery.modules + " via CAN BMS" : "none"],
     ["inverters", (st.inverters || []).map((i) => i.index + (i.running ? "✓" : "✗")).join(" ") || "–"],
   ]);
+
+  renderHero(pv, grid, bat, load, soc,
+    "updated " + new Date((st.updated_at || 0) * 1000).toLocaleTimeString() +
+    " · MCU " + (st.mcu && st.mcu.present ? "present" : "absent") +
+    (st.faults && st.faults.length ? " · FAULTS: " + st.faults.join(", ") : ""));
+
+  // Device tree, the same grouping the original page had.
+  let tree = "";
+  tree += treeGroup("Battery",
+    treeRow("State of charge", "<b>" + (st.battery.soc_percent || 0).toFixed(1) + " %</b>") +
+    treeRow("Power", fmtkW(st.battery.power_w)) +
+    treeRow("Voltage / current", (st.battery.voltage_v || 0).toFixed(2) + " V · " + (st.battery.current_a || 0).toFixed(1) + " A") +
+    treeRow("Temperature", (st.battery.temp_c || 0).toFixed(1) + " °C") +
+    treeRow("Remaining", Math.round(st.battery.remaining_wh || 0) + " / " + Math.round(st.battery.capacity_wh || 0) + " Wh") +
+    treeRow("Health / cycles", (st.battery.soh_percent || 0).toFixed(0) + " % · " + (st.battery.cycle_count || 0)));
+  const packs = (st.can && st.can.batteries) || [];
+  if (packs.length) {
+    tree += treeGroup("Packs (" + packs.length + ")",
+      packs.map((x) => treeRow("Pack " + x.cabinet + "·" + x.position,
+        (x.soc_percent || 0) + "% · " + ((x.voltage_mv || 0) / 1000).toFixed(2) + " V · " +
+        ((x.current_ma || 0) / 1000).toFixed(2) + " A")).join(""), false);
+  }
+  let inv = (st.inverters || []).map((i) => treeRow("Inverter " + i.index, i.running ? "running" : "off")).join("");
+  inv += treeRow("MCU", (st.mcu && st.mcu.present) ? "present" : "absent");
+  tree += treeGroup("Inverters &amp; MCU", inv);
+  let src = treeRow("Grid meter", st.meter && st.meter.available
+    ? (st.meter.import_kwh || 0).toFixed(2) + " kWh in · " + (st.meter.export_kwh || 0).toFixed(2) + " kWh out" : "absent");
+  if (st.prices && st.prices.area) src += treeRow("Prices", st.prices.area + " · now " +
+    (st.prices.next_slots && st.prices.next_slots[0] ? st.prices.next_slots[0].eur_kwh.toFixed(3) + " " + (st.prices.currency || "") : "–"));
+  if (st.solar && st.solar.kwp) src += treeRow("PV forecast", st.solar.kwp.toFixed(2) + " kWp · " + (st.solar.today_kwh || 0).toFixed(1) + " kWh today");
+  tree += treeGroup("Sources", src);
+  const stEl = $("s_tree");
+  if (stEl) stEl.innerHTML = tree;
 
   const badge = $("mode");
   badge.textContent = "direct control · driver";
