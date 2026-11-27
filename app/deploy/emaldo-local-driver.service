@@ -9,7 +9,7 @@ Before=emaldo-local.service
 
 [Service]
 Type=simple
-ExecStart=/root/emaldo-local/emaldo-local driver --config /root/emaldo-local.toml
+ExecStart=/root/emaldo-local/emaldo-local driver --config /root/emaldo-local/config.json
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15

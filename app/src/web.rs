@@ -169,9 +169,9 @@ impl WebServer {
             }
             // Shared surface: the same paths answer in both roles so one page
             // serves either. The bridge role implements them in bridge/ui.rs.
-            ("GET", "/api/config") => self.api_config(stream, &headers, b"{}"),
-            ("POST", "/api/config") => self.api_config(stream, &headers, &body),
-            ("GET", "/api/role") => {
+            ("GET", "/api/v1/config") => self.api_config(stream, &headers, b"{}"),
+            ("POST", "/api/v1/config") => self.api_config(stream, &headers, &body),
+            ("GET", "/api/v1/role") => {
                 let body = serde_json::json!({
                     "role": "driver",
                     "setup_required": self.cfg.get().admin.password_hash.is_empty(),
@@ -179,9 +179,9 @@ impl WebServer {
                 });
                 let _ = respond_json(stream, 200, &body);
             }
-            ("POST", "/api/login") => self.handle_login(stream, &body),
-            ("POST", "/api/setup") => self.handle_setup(stream, &body),
-            ("GET", "/api/status") => {
+            ("POST", "/api/v1/login") => self.handle_login(stream, &body),
+            ("POST", "/api/v1/setup") => self.handle_setup(stream, &body),
+            ("GET", "/api/v1/status") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
@@ -195,26 +195,26 @@ impl WebServer {
                 }
                 let _ = respond_json(stream, 200, &v);
             }
-            ("GET", "/api/stream") => {
+            ("GET", "/api/v1/stream") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 self.handle_sse(stream);
             }
-            ("GET", "/api/events") => {
+            ("GET", "/api/v1/events") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 let _ = respond_json(stream, 200, &self.telem.events());
             }
-            ("GET", "/api/history") => {
+            ("GET", "/api/v1/history") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 let samples = crate::history::load(&self.history_dir());
                 let _ = respond_json(stream, 200, &serde_json::json!({ "samples": samples }));
             }
-            ("POST", "/api/role") => {
+            ("POST", "/api/v1/role") => {
                 // Hand the box to the other role, the same one-command switch
                 // the bridge exposes: enable the target unit (Conflicts=
                 // stops the other) and let systemd do the transition.
@@ -244,19 +244,19 @@ impl WebServer {
                     std::process::exit(0);
                 }
             }
-            ("GET", "/api/broker") => {
+            ("GET", "/api/v1/broker") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 let _ = respond_json(stream, 200, &self.discover_broker());
             }
-            ("GET", "/api/day") => {
+            ("GET", "/api/v1/day") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 let _ = respond_json(stream, 200, &self.day_summary());
             }
-            ("POST", "/api/walk") => {
+            ("POST", "/api/v1/walk") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
@@ -272,7 +272,7 @@ impl WebServer {
                     None => { let _ = respond(stream, 409, "application/json", br#"{"error":"command handler not ready"}"#); }
                 }
             }
-            ("POST", "/api/cmd") => {
+            ("POST", "/api/v1/cmd") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
@@ -287,13 +287,13 @@ impl WebServer {
                     None => { let _ = respond(stream, 409, "application/json", br#"{"error":"command handler not ready"}"#); }
                 }
             }
-            ("POST", "/api/password") => {
+            ("POST", "/api/v1/password") => {
                 if !self.check_auth(stream, &headers) {
                     return;
                 }
                 self.handle_password(stream, &body);
             }
-            ("POST", "/api/logout") => self.handle_logout(stream, &headers),
+            ("POST", "/api/v1/logout") => self.handle_logout(stream, &headers),
             _ => {
                 let _ = respond(stream, 404, "application/json", br#"{"error":"not found"}"#);
             }

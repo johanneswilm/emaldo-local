@@ -55,7 +55,7 @@ Since 2026-11-26 the two approaches are **one Rust package** (`app/`, binary
 | role | command | what it does |
 |---|---|---|
 | **bridge** | `emaldo-local run --config /root/emaldo-local/config.json` | keeps the **stock vendor app** as hardware controller and intercepts its cloud: vendor REST on `:443`, E2E relay `:1050/:1051`, local resolver `:53`, control socket `:1052`, operator UI `:4443`; `mode local` pins the vendor names in a managed `/etc/hosts` block, adds `prohibit` routes for vendor + public-DNS addresses, closes cellular; `mode vendor` undoes all of it. Details: [`app/BRIDGE.md`](app/BRIDGE.md), operations: [`app/OPERATIONS.md`](app/OPERATIONS.md) |
-| **driver** | `emaldo-local driver --config /root/emaldo-local.toml` | becomes the hardware controller itself: Modbus inverter, CAN BMS, b-sensor grid meter, MCU link, Nordpool prices + Open-Meteo PV forecast, on-box planner, PWA web UI on `:8443`, MQTT/Home Assistant discovery. Bus writes are a runtime option, **off by default** |
+| **driver** | `emaldo-local driver --config /root/emaldo-local/config.json` | becomes the hardware controller itself: Modbus inverter, CAN BMS, b-sensor grid meter, MCU link, Nordpool prices + Open-Meteo PV forecast, on-box planner, PWA web UI on `:8443`, MQTT/Home Assistant discovery. Bus writes are a runtime option, **off by default** |
 
 On the live Power Core both roles currently run side by side from one artifact
 (`/root/emaldo-local/emaldo-local`): the bridge unit `emaldo-local.service`

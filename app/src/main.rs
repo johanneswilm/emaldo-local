@@ -158,11 +158,18 @@ fn main() {
 
     // One config file for both roles; the driver-era path is still honoured so
     // an existing install keeps working untouched.
-    let mut cfg_path = PathBuf::from("/root/emaldo-local.toml");
-    if !cfg_path.exists() {
-        let legacy = PathBuf::from("/root/emaldo-driver.toml");
-        if legacy.exists() {
-            cfg_path = legacy;
+    // One file for both roles, the path the bridge already uses. A standalone
+    // driver install (TOML) is folded into it once, on first start.
+    let mut cfg_path = PathBuf::from("/root/emaldo-local/config.json");
+    for legacy in ["/root/emaldo-local.toml", "/root/emaldo-driver.toml"] {
+        let p = PathBuf::from(legacy);
+        if p.exists() {
+            match crate::config::shared::migrate(&cfg_path, &p) {
+                Ok(true) => eprintln!("merged {legacy} into {}", cfg_path.display()),
+                Ok(false) => {}
+                Err(e) => eprintln!("config migration failed ({legacy}): {e}"),
+            }
+            break;
         }
     }
     let mut rollback_mode = false;

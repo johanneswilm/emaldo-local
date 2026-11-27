@@ -469,9 +469,9 @@ fn ui_requires_setup_then_authentication() {
 
     // Nothing but the shared page and the setup probe until an operator
     // exists (no default password). The page itself carries the setup form.
-    let r = ui.handle(&req("GET", "/api/status", b"", lan, &[]));
+    let r = ui.handle(&req("GET", "/api/v1/status", b"", lan, &[]));
     assert_eq!(r.status, 401, "data answered before any user was configured");
-    let probe: Value = serde_json::from_slice(&ui.handle(&req("GET", "/api/role", b"", lan, &[])).body).unwrap();
+    let probe: Value = serde_json::from_slice(&ui.handle(&req("GET", "/api/v1/role", b"", lan, &[])).body).unwrap();
     assert_eq!(probe["setup_required"], json!(true));
     assert_eq!(probe["role"], json!("bridge"));
     assert_eq!(ui.handle(&req("GET", "/", b"", lan, &[])).status, 200);
@@ -480,23 +480,23 @@ fn ui_requires_setup_then_authentication() {
 
     // The internet is never served, whatever the port forwarding looks like.
     assert_eq!(ui.handle(&req("GET", "/", b"", internet, &[])).status, 403);
-    assert_eq!(ui.handle(&req("GET", "/api/status", b"", internet, &[])).status, 403);
+    assert_eq!(ui.handle(&req("GET", "/api/v1/status", b"", internet, &[])).status, 403);
 
     // Weak passwords are refused; then the user exists and a session is issued.
     let weak = body_json(&json!({"user": "op", "password": "short"}));
-    assert_eq!(ui.handle(&req("POST", "/api/setup", &weak, lan, &[])).status, 400);
+    assert_eq!(ui.handle(&req("POST", "/api/v1/setup", &weak, lan, &[])).status, 400);
     let good = body_json(&json!({"user": "op", "password": "correct battery horse"}));
-    let r = ui.handle(&req("POST", "/api/setup", &good, lan, &[]));
+    let r = ui.handle(&req("POST", "/api/v1/setup", &good, lan, &[]));
     assert_eq!(r.status, 200);
     let cookie = session_cookie(&r).expect("setup did not issue a session cookie");
 
     // Unauthenticated and wrong-credential attempts.
-    assert_eq!(ui.handle(&req("GET", "/api/status", b"", lan, &[])).status, 401);
+    assert_eq!(ui.handle(&req("GET", "/api/v1/status", b"", lan, &[])).status, 401);
     let bad = body_json(&json!({"user": "op", "password": "nope nope nope"}));
-    assert_eq!(ui.handle(&req("POST", "/api/login", &bad, lan, &[])).status, 401);
+    assert_eq!(ui.handle(&req("POST", "/api/v1/login", &bad, lan, &[])).status, 401);
 
     // Status works with the session; the UI is the only audience.
-    let r = ui.handle(&req("GET", "/api/status", b"", lan, &[("cookie", &cookie)]));
+    let r = ui.handle(&req("GET", "/api/v1/status", b"", lan, &[("cookie", &cookie)]));
     assert_eq!(r.status, 200);
     let snap: Value = serde_json::from_slice(&r.body).unwrap();
     assert_eq!(snap["operator"], json!("op"));
@@ -504,11 +504,11 @@ fn ui_requires_setup_then_authentication() {
 
     // State changes need the custom header (a cross-origin form cannot set it).
     let cfgbody = body_json(&json!({"timezone": "Europe/Berlin"}));
-    let nohdr = ui.handle(&req("POST", "/api/config", &cfgbody, lan, &[("cookie", &cookie)]));
+    let nohdr = ui.handle(&req("POST", "/api/v1/config", &cfgbody, lan, &[("cookie", &cookie)]));
     assert_eq!(nohdr.status, 403, "POST without the guard header was accepted");
     let ok = ui.handle(&req(
         "POST",
-        "/api/config",
+        "/api/v1/config",
         &cfgbody,
         lan,
         &[("cookie", &cookie), ("x-emaldo-local", "1")],
@@ -523,13 +523,13 @@ fn ui_requires_setup_then_authentication() {
     let badtype = body_json(&json!({"session_hours": "not a number"}));
     let out = handle_json(
         &ui,
-        req("POST", "/api/config", &badtype, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")]),
+        req("POST", "/api/v1/config", &badtype, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")]),
     );
     assert_eq!(out["rejected"], json!(["session_hours"]));
     assert_eq!(bridge.cfg.get().session_hours, Config::default().session_hours);
 
     // The capability map tells the UI what is read-only.
-    let out = handle_json(&ui, req("GET", "/api/schema", b"", lan, &[("cookie", &cookie)]));
+    let out = handle_json(&ui, req("GET", "/api/v1/schema", b"", lan, &[("cookie", &cookie)]));
     let writable: Vec<&str> = out["writable"]
         .as_array()
         .unwrap()
@@ -579,7 +579,7 @@ fn ui_schedule_write_maps_to_the_module_command() {
     bridge.cfg.update(|c| c.users = users).unwrap();
     let r = ui.handle(&req(
         "POST",
-        "/api/login",
+        "/api/v1/login",
         &body_json(&json!({"user": "op", "password": "correct battery horse"})),
         lan,
         &[],
@@ -592,7 +592,7 @@ fn ui_schedule_write_maps_to_the_module_command() {
     let body = body_json(&json!({"high": 80, "low": 25, "enable": 1, "slots": slots}));
     let r = ui.handle(&req(
         "POST",
-        "/api/schedule",
+        "/api/v1/schedule",
         &body,
         lan,
         &[("cookie", &cookie), ("x-emaldo-local", "1")],
@@ -608,7 +608,7 @@ fn ui_schedule_write_maps_to_the_module_command() {
     let body = body_json(&json!({"high": 20, "low": 60, "slots": slots}));
     let out = handle_json(
         &ui,
-        req("POST", "/api/schedule", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")]),
+        req("POST", "/api/v1/schedule", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")]),
     );
     assert_eq!(out["ok"], json!(false));
     assert!(out["error"].as_str().unwrap().contains("markers"));
@@ -618,7 +618,7 @@ fn ui_schedule_write_maps_to_the_module_command() {
     let body = body_json(&json!({"high": 80, "low": 25, "slots": short}));
     let out = handle_json(
         &ui,
-        req("POST", "/api/schedule", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")]),
+        req("POST", "/api/v1/schedule", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")]),
     );
     assert!(out["error"].as_str().unwrap().contains("96 or 192"));
 
@@ -890,12 +890,12 @@ fn the_role_probe_answers_before_login() {
     let (_dir, bridge) = fixture("roleprobe");
     let ui = Ui::new(bridge.clone());
     let lan: SocketAddr = "192.168.50.21:40011".parse().unwrap();
-    let p: Value = serde_json::from_slice(&ui.handle(&req("GET", "/api/role", b"", lan, &[])).body).unwrap();
+    let p: Value = serde_json::from_slice(&ui.handle(&req("GET", "/api/v1/role", b"", lan, &[])).body).unwrap();
     assert_eq!(p["role"], json!("bridge"));
     assert_eq!(p["authed"], json!(false));
     assert_eq!(p["setup_required"], json!(true));
     // The stream is a session endpoint, not an open one.
-    assert_eq!(ui.handle(&req("GET", "/api/stream", b"", lan, &[])).status, 401);
+    assert_eq!(ui.handle(&req("GET", "/api/v1/stream", b"", lan, &[])).status, 401);
 }
 
 #[test]
@@ -922,7 +922,7 @@ fn dotted_config_keys_reach_policy_fields() {
     bridge.cfg.update(|c| c.users = users).unwrap();
     let cookie = session_cookie(&ui.handle(&req(
         "POST",
-        "/api/login",
+        "/api/v1/login",
         &body_json(&json!({"user": "op", "password": "correct battery horse"})),
         lan,
         &[],
@@ -931,7 +931,7 @@ fn dotted_config_keys_reach_policy_fields() {
 
     let body = body_json(&json!({"policy.mode": "idle", "policy.reserve_percent": 33.5}));
     let out: Value = serde_json::from_slice(
-        &ui.handle(&req("POST", "/api/config", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")])).body,
+        &ui.handle(&req("POST", "/api/v1/config", &body, lan, &[("cookie", &cookie), ("x-emaldo-local", "1")])).body,
     )
     .unwrap();
     assert!(out["rejected"].as_array().unwrap().is_empty(), "rejected: {out}");
@@ -954,7 +954,7 @@ fn a_restart_request_outside_systemd_is_refused() {
     bridge.cfg.update(|c| c.users = users).unwrap();
     let cookie = session_cookie(&ui.handle(&req(
         "POST",
-        "/api/login",
+        "/api/v1/login",
         &body_json(&json!({"user": "op", "password": "correct battery horse"})),
         lan,
         &[],
@@ -964,7 +964,7 @@ fn a_restart_request_outside_systemd_is_refused() {
     // so the guard fires regardless of INVOCATION_ID in the environment.
 
     let out: Value = serde_json::from_slice(
-        &ui.handle(&req("POST", "/api/restart", &body_json(&json!({"target": "bridge"})), lan,
+        &ui.handle(&req("POST", "/api/v1/restart", &body_json(&json!({"target": "bridge"})), lan,
             &[("cookie", &cookie), ("x-emaldo-local", "1")])).body,
     )
     .unwrap();

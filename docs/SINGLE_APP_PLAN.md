@@ -42,7 +42,7 @@ Done:
   two daily totals, all from the module's E2E reports.
 - Proof: emulator `mode local` run with the merged binary — module login,
   `module E2E session is live`, UI auth + CSRF rejection,
-  `POST /api/schedule` → `{"ok":true,"slots":96}` with the markers reading back
+  `POST /api/v1/schedule` → `{"ok":true,"slots":96}` with the markers reading back
   from the module, `mode vendor`/`mode local` hosts round-trip. Live box: both
   units active on the single artifact, egress pins reported correctly
   (8 prohibit routes), bridge RSS 3.8 MB, driver RSS 3.1 MB, 110 tests.
@@ -117,7 +117,7 @@ for free, and publishes the same MQTT topics as the driver role.
 
 ## One config file
 
-`/root/emaldo-local.toml` (0600), TOML like the driver's today:
+`/root/emaldo-local/config.json` (0600), the bridge's JSON plus a `driver` table:
 
 ```toml
 mode = "bridge"            # or "driver"
@@ -151,7 +151,7 @@ path (`Store::masked`) and merged back on write.
 Both roles serve one document (`src/web/index.html`, embedded by `web.rs` and
 `bridge/ui.rs`) and one unversioned surface; panes are marked
 `data-pane="bridge|driver"` and the page hides what the running role cannot
-serve. `GET /api/role` answers before sign-in:
+serve. `GET /api/v1/role` answers before sign-in:
 
 ```json
 {"authed":true,"role":"bridge","setup_required":false}
@@ -249,7 +249,7 @@ writes (0x5B/0x18/0x5F equivalents in the register map), schedule/override
 - HA's MQTT entry points at the HAOS add-on (`core-mosquitto`), reachable from
   the LAN at `192.168.50.68:1883` (`192.168.50.68:8883` is TLS and demands a
   client certificate). Broker user/password are the ones HA itself uses; they now
-  live in `/root/emaldo-driver.toml` (0600) — not in git.
+  live in the `driver` table of the shared config (0600) — not in git.
 - Three live findings behind the bridge telemetry work, each with a test:
   - The pack/cabinet reads (`0x06`, `0x0D`, `0x04`) never answered inside
     `CMD_TIMEOUT` (2.5 s) — they cross the module's own CAN side. `e2e` now has

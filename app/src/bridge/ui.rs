@@ -169,10 +169,10 @@ impl Handler for Ui {
         // One page for both roles. The three sign-in entry points are the
         // only unauthenticated JSON: the page asks who is signed in and which
         // role is running before it shows anything.
-        if path == "/api/role" {
+        if path == "/api/v1/role" {
             return Resp::json(role_probe(&cfg.users, self.cookie(req).is_some()));
         }
-        if path == "/api/login" && req.method == "POST" {
+        if path == "/api/v1/login" && req.method == "POST" {
             let b = Ui::body_json(req);
             let user = b.get("user").and_then(|v| v.as_str()).unwrap_or("");
             let pass = b.get("password").and_then(|v| v.as_str()).unwrap_or("");
@@ -193,7 +193,7 @@ impl Handler for Ui {
                 }
             }
         }
-        if path == "/api/setup" && req.method == "POST" {
+        if path == "/api/v1/setup" && req.method == "POST" {
             // First run only: the operator picks the password, nothing ships
             // with a default.
             if !cfg.users.is_empty() {
@@ -237,7 +237,7 @@ impl Handler for Ui {
             return Resp::text(401, "not signed in");
         };
 
-        if path == "/api/logout" {
+        if path == "/api/v1/logout" {
             self.sessions.lock().unwrap().remove(&sid);
             return Resp::json(b"{\"ok\":true}".to_vec());
         }
@@ -248,7 +248,7 @@ impl Handler for Ui {
         }
 
         match (req.method.as_str(), path) {
-            ("GET", "/api/status") => {
+            ("GET", "/api/v1/status") => {
                 let mut snap = self.bridge.snapshot();
                 if let Some(obj) = snap.as_object_mut() {
                     obj.insert("mode_status".into(), crate::bridge::mode::status(&self.bridge));
@@ -279,36 +279,36 @@ impl Handler for Ui {
                 }
                 Resp::json(serde_json::to_vec(&snap).unwrap())
             }
-            ("GET", "/api/schema") => Resp::json(serde_json::to_vec(&schema()).unwrap()),
+            ("GET", "/api/v1/schema") => Resp::json(serde_json::to_vec(&schema()).unwrap()),
             // Shared surface: the same paths answer in both roles, so one page
             // can serve either. The driver role implements them in web.rs.
-            ("GET", "/api/history") => {
+            ("GET", "/api/v1/history") => {
                 let dir = std::path::PathBuf::from(&self.bridge.cfg.get().state_dir);
                 Resp::json(serde_json::to_vec(&json!({"samples": crate::history::load(&dir)}))
                     .unwrap_or_else(|_| b"{\"samples\":[]}".to_vec()))
             }
-            ("GET", "/api/stream") => self.stream(),
-            ("GET", "/api/events") => Resp::json(
+            ("GET", "/api/v1/stream") => self.stream(),
+            ("GET", "/api/v1/events") => Resp::json(
                 serde_json::to_vec(&json!(self.bridge.events(200))).unwrap(),
             ),
-            ("POST", "/api/role") => self.api_role(&Ui::body_json(req)),
-            ("GET", "/api/role") => Resp::json(role_probe(
+            ("POST", "/api/v1/role") => self.api_role(&Ui::body_json(req)),
+            ("GET", "/api/v1/role") => Resp::json(role_probe(
                 &cfg.users,
                 self.cookie(req).is_some(),
             )),
-            ("GET", "/api/schedule") => Resp::json(serde_json::to_vec(&self.schedule_view()).unwrap()),
-            ("POST", "/api/schedule") => self.api_schedule(&Ui::body_json(req)),
-            ("GET", "/api/settings") => Resp::json(
+            ("GET", "/api/v1/schedule") => Resp::json(serde_json::to_vec(&self.schedule_view()).unwrap()),
+            ("POST", "/api/v1/schedule") => self.api_schedule(&Ui::body_json(req)),
+            ("GET", "/api/v1/settings") => Resp::json(
                 serde_json::to_vec(&self.bridge.telemetry("settings").map(|s| s.value).unwrap_or(json!({})))
                     .unwrap(),
             ),
-            ("POST", "/api/settings/reserve") => self.api_reserve(&Ui::body_json(req)),
-            ("POST", "/api/settings/selling_protection") => self.api_selling(&Ui::body_json(req)),
-            ("POST", "/api/settings/manual_selling") => self.api_manual_selling(&Ui::body_json(req)),
-            ("POST", "/api/settings/emergency_charge") => self.api_emergency(&Ui::body_json(req)),
-            ("POST", "/api/settings/thirdparty_pv") => self.api_pv(&Ui::body_json(req)),
-            ("POST", "/api/refresh") => self.api_refresh(&Ui::body_json(req)),
-            ("GET", "/api/logs") => {
+            ("POST", "/api/v1/settings/reserve") => self.api_reserve(&Ui::body_json(req)),
+            ("POST", "/api/v1/settings/selling_protection") => self.api_selling(&Ui::body_json(req)),
+            ("POST", "/api/v1/settings/manual_selling") => self.api_manual_selling(&Ui::body_json(req)),
+            ("POST", "/api/v1/settings/emergency_charge") => self.api_emergency(&Ui::body_json(req)),
+            ("POST", "/api/v1/settings/thirdparty_pv") => self.api_pv(&Ui::body_json(req)),
+            ("POST", "/api/v1/refresh") => self.api_refresh(&Ui::body_json(req)),
+            ("GET", "/api/v1/logs") => {
                 let n = req
                     .query_param("n")
                     .and_then(|v| v.parse::<usize>().ok())
@@ -323,17 +323,17 @@ impl Handler for Ui {
                     .unwrap(),
                 )
             }
-            ("GET", "/api/relay") => Resp::json(serde_json::to_vec(&self.bridge.relay_status()).unwrap()),
-            ("GET", "/api/config") => Resp::json(serde_json::to_vec(&config_view(&cfg)).unwrap()),
-            ("POST", "/api/config") => self.api_config(&Ui::body_json(req)),
-            ("GET", "/api/mode") => Resp::json(serde_json::to_vec(&crate::bridge::mode::status(&self.bridge)).unwrap()),
-            ("POST", "/api/mode") => self.api_mode(&Ui::body_json(req)),
-            ("POST", "/api/lte") => self.api_lte(&Ui::body_json(req)),
-            ("GET", "/api/backups") => Resp::json(serde_json::to_vec(&crate::bridge::mode::list_backups(&self.bridge)).unwrap()),
-            ("POST", "/api/backups") => self.api_backup(&Ui::body_json(req)),
-            ("POST", "/api/restart") => self.api_restart(&Ui::body_json(req)),
-            ("POST", "/api/password") => self.api_password(&session.user, &Ui::body_json(req)),
-            ("POST", "/api/session/extend") => {
+            ("GET", "/api/v1/relay") => Resp::json(serde_json::to_vec(&self.bridge.relay_status()).unwrap()),
+            ("GET", "/api/v1/config") => Resp::json(serde_json::to_vec(&config_view(&cfg)).unwrap()),
+            ("POST", "/api/v1/config") => self.api_config(&Ui::body_json(req)),
+            ("GET", "/api/v1/mode") => Resp::json(serde_json::to_vec(&crate::bridge::mode::status(&self.bridge)).unwrap()),
+            ("POST", "/api/v1/mode") => self.api_mode(&Ui::body_json(req)),
+            ("POST", "/api/v1/lte") => self.api_lte(&Ui::body_json(req)),
+            ("GET", "/api/v1/backups") => Resp::json(serde_json::to_vec(&crate::bridge::mode::list_backups(&self.bridge)).unwrap()),
+            ("POST", "/api/v1/backups") => self.api_backup(&Ui::body_json(req)),
+            ("POST", "/api/v1/restart") => self.api_restart(&Ui::body_json(req)),
+            ("POST", "/api/v1/password") => self.api_password(&session.user, &Ui::body_json(req)),
+            ("POST", "/api/v1/session/extend") => {
                 let sid2 = self.issue(&session.user);
                 let _ = self.sessions.lock().unwrap().remove(&sid);
                 self.with_cookie(Resp::json(json!({"ok": true}).to_string().into_bytes()), &sid2)

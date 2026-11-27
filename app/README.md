@@ -55,7 +55,7 @@ it, and isolating the vendor (cloud + remote tunnel), with rollback, is in
 | `src/control.rs` | write controller: gates, journal, snapshot/rollback (FC16 setpoints) |
 | `src/commands.rs` | shared REST/MQTT command dispatch |
 | `src/history.rs` | 48 h rolling history (`history.jsonl`) for the dashboard |
-| `src/config.rs` | TOML config at `/root/emaldo-local.toml` (the driver-era `/root/emaldo-driver.toml` is still read if the new name is absent), atomic writes, masked secrets |
+| `src/config.rs` | the shared `/root/emaldo-local/config.json`: the bridge's keys at the top, this role's structs under `driver` (a standalone TOML is folded in once on first start, kept as `*.pre-merge`), atomic writes, masked secrets |
 | `src/telemetry.rs` | state store, event ring (200), subscriber fan-out, derived load |
 | `src/mqtt.rs` | MQTT 3.1.1 client (QoS 0/1, TLS, reconnect), single I/O thread |
 | `src/discovery.rs` | HA discovery + state topics |
@@ -93,7 +93,7 @@ so prefer IP literals for the MQTT broker.
 ## Run
 
 ```bash
-emaldo-driver [--config /root/emaldo-driver.toml]   # default path shown
+emaldo-local driver [--config /root/emaldo-local/config.json]   # default path shown
 
 # read-only diagnostics (never write setpoints; safe to run while the
 # vendor app owns the MCU only if the port is free):
@@ -115,7 +115,7 @@ MQTT broker in the setup wizard. The TLS cert is self-generated on first
 start and persisted next to the config (`web-cert.pem` / `web-key.pem`,
 0600) — replace via `web.tls_cert`/`web.tls_key` if you have your own.
 
-### Configuration (`/root/emaldo-local.toml`)
+### Configuration (`/root/emaldo-local/config.json`, `driver` section)
 
 Deliberately **not** `/root/config.toml` — that file belongs to the vendor
 app and stays untouched. The config is a TOML tree of sections `device`,
@@ -206,24 +206,24 @@ never with a second URL. Session cookie `emaldo_sid`, CSRF header
 | route | what | role |
 |---|---|---|
 | `GET /` | the UI (panes marked `data-pane=bridge|driver`) | both |
-| `GET /api/role` | `{role, authed, setup_required}` — unauthenticated | both |
-| `POST /api/setup` | first boot only: operator password | both |
-| `POST /api/login` | → `emaldo_sid` cookie | both |
-| `GET /api/status` | state with a `role` tag | both |
-| `GET /api/stream` | SSE state stream (15 s keepalive) | both |
-| `GET /api/history` | `{samples}` 48-hour series (`paths.state_dir`) | both |
-| `GET /api/events` | event ring | both |
-| `GET|POST /api/config` | masked config / whole-document save | both (different schema) |
-| `POST /api/password` | change the operator password (PBKDF2, 100k) | both |
-| `POST /api/role` | hand over to the other systemd unit | both |
-| `POST /api/walk` | read-only slave walk 1–10, 240–250 (result in `raw.slave_walk`) | driver |
-| `POST /api/cmd` | Phase-2 commands: `set_mode`, `set_charge_limit`, `set_discharge_limit`, `set_reserve`, `set_grid_limit`, `set_override`, `write_register` (gated), `read_register` (read-only), `rollback`, `walk` | driver |
-| `/api/schedule`, `/api/settings/*`, `/api/mode`, `/api/lte`, `/api/backups`, `/api/restart`, `/api/refresh`, `/api/logs`, `/api/relay` | vendor-front verb (see `BRIDGE.md`) | bridge |
+| `GET /api/v1/role` | `{role, authed, setup_required}` — unauthenticated | both |
+| `POST /api/v1/setup` | first boot only: operator password | both |
+| `POST /api/v1/login` | → `emaldo_sid` cookie | both |
+| `GET /api/v1/status` | state with a `role` tag | both |
+| `GET /api/v1/stream` | SSE state stream (15 s keepalive) | both |
+| `GET /api/v1/history` | `{samples}` 48-hour series (`paths.state_dir`) | both |
+| `GET /api/v1/events` | event ring | both |
+| `GET|POST /api/v1/config` | masked config / whole-document save | both (different schema) |
+| `POST /api/v1/password` | change the operator password (PBKDF2, 100k) | both |
+| `POST /api/v1/role` | hand over to the other systemd unit | both |
+| `POST /api/v1/walk` | read-only slave walk 1–10, 240–250 (result in `raw.slave_walk`) | driver |
+| `POST /api/v1/cmd` | Phase-2 commands: `set_mode`, `set_charge_limit`, `set_discharge_limit`, `set_reserve`, `set_grid_limit`, `set_override`, `write_register` (gated), `read_register` (read-only), `rollback`, `walk` | driver |
+| `/api/v1/schedule`, `/api/v1/settings/*`, `/api/v1/mode`, `/api/v1/lte`, `/api/v1/backups`, `/api/v1/restart`, `/api/v1/refresh`, `/api/v1/logs`, `/api/v1/relay` | vendor-front verb (see `BRIDGE.md`) | bridge |
 
 All writes pass the controller gates: writable table (HiSolar
 0x0FD3..0x0FF6), range, rate limits, `writes_enabled`, pre-write
 snapshot, read-back verify. Journal: `writes.log` (JSON lines) next to
-the config. Rollback: `POST /api/cmd {"cmd":"rollback"}` or
+the config. Rollback: `POST /api/v1/cmd {"cmd":"rollback"}` or
 `emaldo-local driver --rollback`.
 
 ## MQTT / Home Assistant

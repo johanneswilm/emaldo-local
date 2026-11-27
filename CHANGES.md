@@ -6,6 +6,38 @@ current state of any subsystem read `docs/` (`REGISTERS.md`, `ISSUES.md`,
 
 ---
 
+# One config file, versioned API (2026-11-27, later)
+
+**API is versioned again**: every route lives under `/api/v1/` in both roles
+(`/api/v1/role`, `/api/v1/status`, `/api/v1/stream`, …) and the page calls only
+that prefix, so a future break lands as `v2` beside `v1` instead of on top of
+it.
+
+**One config file**: `/root/emaldo-local/config.json` holds the bridge's keys
+at the top level and the driver's struct under `driver`. Neither role rewrites
+the other's keys:
+
+- `config::shared::merge_driver_doc` keeps every top-level key when the driver
+  saves; `bridge::config::Store::document` keeps the `driver` table when the
+  bridge saves. Both write 0600 atomically with the usual `.bak`.
+- `config::shared::classify` tells a shared JSON document from a pre-merge
+  TOML file; a standalone driver install is folded in once at start-up
+  (`shared::migrate`), the old files kept as `config.json.pre-merge` /
+  `emaldo-local.toml.pre-merge`.
+- `emaldo-local-driver.service` now runs `driver --config
+  /root/emaldo-local/config.json`; the driver's default path is that file and
+  the 48-hour history lives in the shared `paths.state_dir`.
+
+Proof, both roles on one scratch file: driver started from a document with 61
+bridge keys, bound the `driver.web` address, saved `device.name`; the file then
+still had all 61 keys (users, mode, ports). The bridge loaded it, wrote
+`policy.reserve_percent`, and the `driver` table survived unchanged.
+
+Tests: 137 (2 new: cross-key preservation on driver save, TOML→shared
+migration).
+
+---
+
 # One page, one port, one auth model (2026-11-27)
 
 The two operator UIs are one document (`app/src/web/index.html`), embedded by

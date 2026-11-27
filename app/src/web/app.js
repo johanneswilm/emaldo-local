@@ -105,7 +105,7 @@ function applyRolePanes() {
 let CREDS = { user: "admin" };
 
 async function loadCreds() {
-  const r = await call("/api/config");
+  const r = await call("/api/v1/config");
   const j = r.j || {};
   const names = j.users;
   CREDS.user = ROLE === "bridge" && Array.isArray(names) && names.length ? names[0] : "admin";
@@ -116,7 +116,7 @@ async function loadCreds() {
 }
 
 async function boot() {
-  const r = await call("/api/role");
+  const r = await call("/api/v1/role");
   const j = r.j || {};
   if (j.setup_required) { show("setup"); return; }
   if (!j.authed) { show("login"); return; }
@@ -133,19 +133,19 @@ async function doSetup() {
     device_name: $("su_name").value,
     broker_url: $("su_url").value,
   };
-  const r = await call("/api/setup", body);
+  const r = await call("/api/v1/setup", body);
   if (r.ok) { $("su_pw").value = ""; msg("su-msg", "created — log in"); show("login"); $("li_user").value = body.user; }
   else msg("su-msg", "failed: " + ((r.j && r.j.error) || ("HTTP " + r.status)), "warn");
 }
 
 async function doLogin() {
-  const r = await call("/api/login", { user: CREDS.user, password: $("li_pw").value });
+  const r = await call("/api/v1/login", { user: CREDS.user, password: $("li_pw").value });
   if (r.ok) { $("li_pw").value = ""; boot(); }
   else msg("li-msg", "unknown user or wrong password", "warn");
 }
 
 async function doLogout() {
-  await get("/api/logout", {});
+  await get("/api/v1/logout", {});
   if (es) { es.close(); es = null; }
   clearInterval(timer);
   timer = null;
@@ -166,7 +166,7 @@ async function startApp() {
 /// Both roles answer `/api/status`; the bridge wraps the vendor front's
 /// snapshot, the driver answers its telemetry state directly.
 async function loadStatus() {
-  const r = await call("/api/status");
+  const r = await call("/api/v1/status");
   if (r.status === 401) { show("login"); return; }
   if (!r.ok || !r.j) return;
   if (ROLE === "bridge") renderBridge(r.j);
@@ -176,7 +176,7 @@ async function loadStatus() {
 
 function startStream() {
   if (es) es.close();
-  es = new EventSource("/api/stream");
+  es = new EventSource("/api/v1/stream");
   es.onmessage = (ev) => {
     let st = null;
     try { st = JSON.parse(ev.data); } catch (e) { return; }
@@ -406,7 +406,7 @@ function renderPlanner(st) {
 // ---------------------------------------------------------------- history
 
 async function loadHistory() {
-  const r = await call("/api/history");
+  const r = await call("/api/v1/history");
   if (!r.ok || !r.j) return;
   HIST = r.j.samples || r.j || [];
   renderHistory();
@@ -446,7 +446,7 @@ const ACTIONS = ["none", "idle", "charge-low", "charge-high", "charge-100", "dis
 function slotSelects() { return Array.from($("slots").querySelectorAll("select")); }
 
 async function loadSchedule() {
-  const r = await call("/api/schedule");
+  const r = await call("/api/v1/schedule");
   const j = r.j || {};
   if (!r.ok) { msg("sched-msg", j.error || ("HTTP " + r.status), "warn"); return; }
   $("ov-high").value = j.high;
@@ -469,7 +469,7 @@ async function saveSchedule() {
   const slots = slotSelects().map((s) => s.value);
   if (!slots.length) { msg("sched-msg", "no slots loaded", "warn"); return; }
   msg("sched-msg", "writing…");
-  const r = await call("/api/schedule", { high: +$("ov-high").value, low: +$("ov-low").value, enable: $("ov-enable").checked ? 1 : 0, slots });
+  const r = await call("/api/v1/schedule", { high: +$("ov-high").value, low: +$("ov-low").value, enable: $("ov-enable").checked ? 1 : 0, slots });
   const j = r.j || {};
   msg("sched-msg", r.ok && j.ok ? `written (${j.result.slots} slots)` : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
   if (r.ok && j.ok) loadSchedule();
@@ -487,7 +487,7 @@ function fillSettingsForm(tele) {
 }
 
 async function loadSchema() {
-  const r = await call("/api/schema");
+  const r = await call("/api/v1/schema");
   const j = r.j || {};
   if (!j.read_only) return;
   $("readonly").innerHTML = j.read_only.map((x) => `<li><b>${esc(x.name)}</b> (${esc(x.key)}) — ${esc(x.reason)}</li>`).join("");
@@ -501,16 +501,16 @@ async function postSetting(path, body, id, okText) {
 }
 
 function wireBridgeSettings() {
-  $("save-reserve").addEventListener("click", () => postSetting("/api/settings/reserve",
+  $("save-reserve").addEventListener("click", () => postSetting("/api/v1/settings/reserve",
     { mode: +$("rs-mode").value, smart: +$("rs-smart").value, emergency: +$("rs-emergency").value, sync: $("rs-sync").checked ? 1 : 0, enable: 0 }, "rs-msg"));
-  $("save-sp").addEventListener("click", () => postSetting("/api/settings/selling_protection",
+  $("save-sp").addEventListener("click", () => postSetting("/api/v1/settings/selling_protection",
     { on: $("sp-on").checked ? 1 : 0, threshold_kwh: +$("sp-kwh").value }, "sp-msg"));
-  $("save-ms").addEventListener("click", () => postSetting("/api/settings/manual_selling",
+  $("save-ms").addEventListener("click", () => postSetting("/api/v1/settings/manual_selling",
     { on: $("ms-on").checked ? 1 : 0, target_kwh: +$("ms-kwh").value }, "ms-msg"));
   $("save-ec").addEventListener("click", () => {
     const s = $("ec-start").value ? Math.floor(new Date($("ec-start").value).getTime() / 1000) : 0;
     const e = $("ec-end").value ? Math.floor(new Date($("ec-end").value).getTime() / 1000) : 0;
-    postSetting("/api/settings/emergency_charge", { on: $("ec-on").checked ? 1 : 0, start: s, end: e }, "ec-msg");
+    postSetting("/api/v1/settings/emergency_charge", { on: $("ec-on").checked ? 1 : 0, start: s, end: e }, "ec-msg");
   });
   $("save-schedule").addEventListener("click", saveSchedule);
   $("reload-schedule").addEventListener("click", loadSchedule);
@@ -518,14 +518,14 @@ function wireBridgeSettings() {
   $("bulk").innerHTML = '<option value="">choose action…</option>' + ACTIONS.map((a) => `<option value="${a}">${a}</option>`).join("");
   $("refresh").addEventListener("click", async () => {
     msg("refresh-msg", "reading…");
-    const r = await call("/api/refresh", { what: "all" });
+    const r = await call("/api/v1/refresh", { what: "all" });
     const j = r.j || {};
     msg("refresh-msg", r.ok && j.ok ? "read " + new Date().toLocaleTimeString() : (j.error || "failed"), r.ok && j.ok ? "" : "warn");
     loadStatus();
   });
   $("go-local").addEventListener("click", async () => {
     msg("sys-msg", "switching…");
-    const r = await call("/api/mode", { mode: "local" });
+    const r = await call("/api/v1/mode", { mode: "local" });
     const j = r.j || {};
     msg("sys-msg", r.ok && j.ok ? "local mode active" : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
     loadSystem(); loadStatus();
@@ -533,7 +533,7 @@ function wireBridgeSettings() {
   $("go-vendor").addEventListener("click", async () => {
     if (!confirm("Switch to vendor mode? The bridge's cloud leg will pass traffic through and the vendor app restarts against its original cloud path.")) return;
     msg("sys-msg", "switching…");
-    const r = await call("/api/mode", { mode: "vendor" });
+    const r = await call("/api/v1/mode", { mode: "vendor" });
     const j = r.j || {};
     msg("sys-msg", r.ok && j.ok ? "vendor mode active" : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
     loadSystem(); loadStatus();
@@ -541,23 +541,23 @@ function wireBridgeSettings() {
   $("lte-off").addEventListener("click", async () => {
     if (!confirm("Close the LTE path? The modem is unbound from USB and pppd stops; the vendor app cannot dial out until it is restored.")) return;
     msg("lte-msg", "closing…");
-    const r = await call("/api/lte", { on: false }); const j = r.j || {};
+    const r = await call("/api/v1/lte", { on: false }); const j = r.j || {};
     msg("lte-msg", r.ok && j.ok ? "LTE path closed" : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
     loadSystem();
   });
   $("lte-on").addEventListener("click", async () => {
     msg("lte-msg", "restoring…");
-    const r = await call("/api/lte", { on: true }); const j = r.j || {};
+    const r = await call("/api/v1/lte", { on: true }); const j = r.j || {};
     msg("lte-msg", r.ok && j.ok ? "modem bound: the app will redial" : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
     loadSystem();
   });
   $("restart-app").addEventListener("click", async () => {
     if (!confirm("Restart the vendor app (not the SoC)?")) return;
-    const r = await call("/api/restart", { target: "app" }); const j = r.j || {};
+    const r = await call("/api/v1/restart", { target: "app" }); const j = r.j || {};
     msg("sys-msg", r.ok && j.ok ? "app restarted" : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
   });
   $("mk-backup").addEventListener("click", async () => {
-    const r = await call("/api/backups", { action: "create" }); const j = r.j || {};
+    const r = await call("/api/v1/backups", { action: "create" }); const j = r.j || {};
     msg("sys-msg", r.ok && j.ok ? "backup " + j.result.file : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
     loadSystem();
   });
@@ -565,27 +565,27 @@ function wireBridgeSettings() {
     const n = e.target && e.target.dataset && e.target.dataset.restore;
     if (!n) return;
     if (!confirm("Restore " + n + "? The vendor app restarts and its current state is moved aside.")) return;
-    const r = await call("/api/backups", { action: "restore", name: n }); const j = r.j || {};
+    const r = await call("/api/v1/backups", { action: "restore", name: n }); const j = r.j || {};
     msg("sys-msg", r.ok && j.ok ? "restored " + n : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
     loadSystem();
   });
 }
 
 async function loadSystem() {
-  const r = await call("/api/mode");
+  const r = await call("/api/v1/mode");
   const m = r.j || {};
   $("mode-state").textContent = JSON.stringify(m, null, 1);
   const l = m.lte || {};
   $("lte-state").textContent = "modem " + (l.modem || "-") + ": " + (l.modem_bound ? "bound" : "unbound") +
     " · pppd " + (l.pppd ? "running" : "stopped") +
     " · " + (l.interfaces || []).map((i) => i.name + (i.present ? " up" : " down")).join(", ");
-  const c = (await call("/api/config")).j || {};
+  const c = (await call("/api/v1/config")).j || {};
   const fields = [["timezone", "str"], ["log_level", "str"], ["poll_power_flow_s", "int"], ["poll_settings_s", "int"],
     ["chat_rotate_s", "int"], ["session_hours", "int"], ["relay_advertise_host", "str"], ["ack_style", "str"],
     ["log_max_bytes", "int"], ["log_keep", "int"]];
   $("config").innerHTML = fields.map(([k]) => `<label>${k} <input id="cfg-${k}" value="${esc(c[k] === undefined ? "" : c[k])}"></label>`).join("")
     + `<p class="muted small">users: ${esc((c.users || []).join(", "))} · external cert: ${c.external_cert ? "yes" : "generated self-signed"} · api :${c.api_port} · e2e :${c.relay_port}/${c.util_port} · ui :${c.ui_port}</p>`;
-  const b = (await call("/api/backups")).j;
+  const b = (await call("/api/v1/backups")).j;
   $("backups").innerHTML = "<tr><th>name</th><th>bytes</th><th>when</th><th></th></tr>" +
     (Array.isArray(b) ? b.map((x) => `<tr><td class="mono small">${esc(x.name)}</td><td>${x.bytes}</td><td>${new Date((x.mtime || 0) * 1000).toLocaleString()}</td><td><button data-restore="${esc(x.name)}">restore</button></td></tr>`).join("") : "");
 }
@@ -593,7 +593,7 @@ async function loadSystem() {
 // ---------------------------------------------------------------- driver settings
 
 async function loadConfig() {
-  const r = await call("/api/config");
+  const r = await call("/api/v1/config");
   if (!r.ok || typeof r.j !== "object") return;
   CFG = r.j;
   $("s_cfg").textContent = JSON.stringify(CFG, null, 2);
@@ -700,7 +700,7 @@ async function saveSettings() {
     poll_interval_secs: n("cfg_poll", 5), display_enabled: b("cfg_display"),
   });
   c.device = Object.assign(c.device || {}, { name: $("cfg_device_name").value });
-  const r = await call("/api/config", { config: c });
+  const r = await call("/api/v1/config", { config: c });
   const j = r.j || {};
   msg("cfg_msg", r.ok ? "saved" : ("failed: " + (j.error || r.status)), r.ok ? "" : "warn");
   if (r.ok) { CFG = j; $("s_cfg").textContent = JSON.stringify(j, null, 2); }
@@ -709,7 +709,7 @@ async function saveSettings() {
 function wireDriverSettings() {
   $("cfg_mqtt_on").addEventListener("change", () => { $("cfg_mqtt_box").hidden = !$("cfg_mqtt_on").checked; });
   $("discover-broker").addEventListener("click", async () => {
-    const r = await call("/api/broker");
+    const r = await call("/api/v1/broker");
     const j = r.j || {};
     if (j.found) { $("cfg_mqtt_url").value = j.broker_url; msg("cfg_mqtt_hint", "found broker at " + j.candidate); }
     else { if (j.suggested && !$("cfg_mqtt_url").value) $("cfg_mqtt_url").value = j.suggested; msg("cfg_mqtt_hint", "no broker found locally; using a guess — edit if needed", "warn"); }
@@ -719,7 +719,7 @@ function wireDriverSettings() {
   $("reload-config").addEventListener("click", loadConfig);
   $("do-walk").addEventListener("click", async () => {
     msg("walk-msg", "running…");
-    const r = await call("/api/walk", {});
+    const r = await call("/api/v1/walk", {});
     msg("walk-msg", r.ok ? "started — result in Events" : "failed: " + r.status, r.ok ? "" : "warn");
   });
 }
@@ -730,20 +730,20 @@ function applyPolicy() {
   if (ROLE === "bridge") {
     // The bridge engine reads its plan mode from config; the limits are the
     // module's own settings, so they travel as the vendor settings command.
-    postSetting("/api/config", { "policy.mode": mode, "policy.reserve_percent": p.reserve }, "p-msg");
+    postSetting("/api/v1/config", { "policy.mode": mode, "policy.reserve_percent": p.reserve }, "p-msg");
     return;
   }
   msg("p-msg", "applying…");
-  call("/api/cmd", { cmd: "set_mode", args: { mode } })
-    .then(() => call("/api/cmd", { cmd: "set_charge_limit", args: { watts: p.charge } }))
-    .then(() => call("/api/cmd", { cmd: "set_discharge_limit", args: { watts: p.discharge } }))
+  call("/api/v1/cmd", { cmd: "set_mode", args: { mode } })
+    .then(() => call("/api/v1/cmd", { cmd: "set_charge_limit", args: { watts: p.charge } }))
+    .then(() => call("/api/v1/cmd", { cmd: "set_discharge_limit", args: { watts: p.discharge } }))
     .then((r) => msg("p-msg", r.ok ? "applied" : "failed: " + r.status, r.ok ? "" : "warn"));
 }
 
 // ---------------------------------------------------------------- events / logs
 
 async function loadEvents() {
-  const r = await call("/api/events");
+  const r = await call("/api/v1/events");
   if (!r.ok || !Array.isArray(r.j)) return;
   $("s_events").textContent = r.j.map((e) =>
     new Date((e.time || e.ts) * 1000).toLocaleString() + " [" + (e.level || e.lvl) + "] " + (e.source || e.tag) + ": " + (e.message || e.msg)
@@ -754,7 +754,7 @@ async function loadEvents() {
 
 async function loadLogs() {
   const q = encodeURIComponent($("logq").value || "");
-  const r = await call("/api/logs?n=300&q=" + q);
+  const r = await call("/api/v1/logs?n=300&q=" + q);
   const j = r.j || {};
   const lines = (j.lines || []).concat((j.events || []).map((e) => `[ev] ${new Date(e.ts * 1000).toLocaleTimeString()} ${e.lvl} ${e.tag}: ${e.msg}`));
   $("log").textContent = r.ok ? lines.join("\n") : ((j.error || ("HTTP " + r.status)) + " — the driver role writes events, not a log file");
@@ -781,14 +781,14 @@ $("switch-role-all").addEventListener("click", async () => {
   const target = ROLE === "bridge" ? "driver" : "bridge";
   if (!confirm("Hand the box to the " + target + " role? The vendor app is parked for the driver role; the page reloads on the same address.")) return;
   msg("role-msg", "switching…");
-  const r = await call("/api/role", { role: target });
+  const r = await call("/api/v1/role", { role: target });
   const j = r.j || {};
   msg("role-msg", r.ok && j.ok ? "starting " + j.unit : "failed: " + (j.error || r.status), r.ok && j.ok ? "" : "warn");
   if (r.ok && j.ok) setTimeout(() => location.reload(), 6000);
 });
 $("restart-service").addEventListener("click", async () => {
   if (!confirm("Restart this service (the bridge stops for a few seconds)?")) return;
-  await call("/api/restart", { target: "bridge" });
+  await call("/api/v1/restart", { target: "bridge" });
   msg("sys-msg", "restarting…");
   setTimeout(() => location.reload(), 5000);
 });
@@ -798,12 +798,12 @@ $("save-config").addEventListener("click", async () => {
     const k = i.id.slice(4);
     body[k] = /^\d+$/.test(i.value) ? +i.value : i.value;
   });
-  const r = await call("/api/config", body);
+  const r = await call("/api/v1/config", body);
   const j = r.j || {};
   msg("cfg-msg2", r.ok ? "saved" + (j.rejected && j.rejected.length ? " (rejected: " + j.rejected.join(", ") + ")" : "") : "failed: " + (j.error || r.status), r.ok ? "" : "warn");
 });
 $("save-pw").addEventListener("click", async () => {
-  const r = await call("/api/password", { current: $("pw-cur").value, new: $("pw-new").value });
+  const r = await call("/api/v1/password", { current: $("pw-cur").value, new: $("pw-new").value });
   const j = r.j || {};
   msg("pw-msg", r.ok ? "password changed" : "failed: " + (j.error || r.status), r.ok ? "" : "warn");
   $("pw-cur").value = ""; $("pw-new").value = "";

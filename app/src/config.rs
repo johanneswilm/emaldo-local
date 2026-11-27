@@ -706,6 +706,87 @@ pub struct Store {
     path: PathBuf,
 }
 
+/// The shared document: one JSON object, `driver` holding this struct. The
+/// bridge's own fields are the other keys; neither side rewrites the other.
+pub mod shared {
+    use super::Config;
+    use serde_json::Value;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// Why a file is or is not ours to read as the shared document.
+    pub enum Document {
+        /// A shared JSON document, `driver` present or not (empty = defaults).
+        Shared(Value),
+        /// Not JSON: a pre-merge TOML config or an empty file.
+        Legacy,
+    }
+
+    pub fn classify(text: &str) -> Document {
+        match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(_)) => Document::Shared(
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .and_then(|d| d.get("driver").cloned())
+                    .unwrap_or(Value::Object(Default::default())),
+            ),
+            _ => Document::Legacy,
+        }
+    }
+
+    /// Move an existing standalone install onto the shared file: the bridge's
+    /// JSON (or its absence) becomes the document, the merchant TOML's tables
+    /// land under `driver`, and the old files are kept next to it as
+    /// `*.pre-merge`.
+    pub fn migrate(shared: &Path, toml_src: &Path) -> Result<bool, String> {
+        let old_toml = std::fs::read_to_string(toml_src).unwrap_or_default();
+        if old_toml.trim().is_empty() {
+            return Ok(false);
+        }
+        let mut doc: Value = std::fs::read_to_string(shared)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        let cfg: Config =
+            toml::from_str(&old_toml).map_err(|e| format!("parse {}: {e}", toml_src.display()))?;
+        let obj = doc.as_object_mut().ok_or("shared document is not an object")?;
+        obj.insert("driver".into(), serde_json::to_value(&cfg).map_err(|e| e.to_string())?);
+        let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        let tmp = shared.with_extension("tmp");
+        std::fs::write(&tmp, &text).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+        if shared.exists() {
+            let bak = shared.with_extension("pre-merge");
+            std::fs::copy(shared, &bak).map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&tmp, shared).map_err(|e| e.to_string())?;
+        let toml_bak = toml_src.with_extension("toml.pre-merge");
+        let _ = std::fs::rename(toml_src, &toml_bak);
+        Ok(true)
+    }
+
+    /// Rewrite `old` with `driver` replaced by `cfg`, keeping every other key
+    /// (the bridge's mode, ports, users, ...) as it stands.
+    pub fn merge_driver_doc(old: &str, cfg: &Config) -> Result<String, String> {
+        let mut doc: Value = if old.trim().is_empty() {
+            Value::Object(Default::default())
+        } else {
+            match serde_json::from_str(old) {
+                Ok(v) => v,
+                // A legacy TOML file: keep it as the .bak, start the JSON
+                // document with what this role reads.
+                Err(_) => Value::Object(Default::default()),
+            }
+        };
+        let obj = doc.as_object_mut().ok_or("config document is not an object")?;
+        obj.insert(
+            "driver".into(),
+            serde_json::to_value(cfg).map_err(|e| e.to_string())?,
+        );
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+    }
+}
+
 /// The driver's config store answers the policy loop's two sections.
 impl crate::policy::PolicySource for Store {
     fn policy(&self) -> PolicyConfig {
@@ -752,12 +833,26 @@ mod profile_tests {
     }
 }
 
+/// Both roles read one file: JSON (the bridge's format), which also holds a
+/// TOML table under `driver` with this struct. Every save rewrites the whole
+/// document, so the bridge's keys travel through untouched instead of being
+/// dropped by a TOML rewrite.
 impl Store {
     pub fn load(path: &Path) -> Result<Arc<Store>, String> {
-        let mut cfg: Config = match fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        let text = match fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("read {}: {e}", path.display())),
+        };
+        let mut cfg: Config = match shared::classify(&text) {
+            shared::Document::Shared(table) => serde_json::from_value(table)
+                .map_err(|e| format!("parse {} [driver]: {e}", path.display()))?,
+            // A pre-merge TOML file (or an empty one): still read, migrated on
+            // the next save.
+            shared::Document::Legacy if text.trim().is_empty() => Config::default(),
+            shared::Document::Legacy => {
+                toml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?
+            }
         };
         cfg.hardware.resolve();
         Ok(Arc::new(Store {
@@ -781,12 +876,15 @@ impl Store {
         *self.inner.write().unwrap() = cfg;
     }
 
-    /// Atomically writes the config, keeping one .bak.
+    /// Atomically writes the config, keeping one .bak. The bridge's keys in
+    /// the same document are preserved verbatim; our struct goes under
+    /// `driver`.
     pub fn save(&self, cfg: &Config) -> Result<(), String> {
         if let Some(dir) = self.path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let text = toml::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+        let old = fs::read_to_string(&self.path).unwrap_or_default();
+        let text = shared::merge_driver_doc(&old, cfg)?;
         let tmp = self.path.with_extension("tmp");
         {
             let mut f = fs::File::create(&tmp).map_err(|e| e.to_string())?;
@@ -821,5 +919,56 @@ impl Store {
             cfg.mqtt.password = cur.mqtt.password.clone();
         }
         cfg.admin = cur.admin.clone(); // never via API
+    }
+}
+
+#[cfg(test)]
+mod shared_doc_tests {
+    use super::*;
+
+    #[test]
+    fn driver_save_keeps_the_bridges_keys() {
+        let dir = std::env::temp_dir().join(format!("emaldo-shared-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"mode":"local","users":{"op":{"salt":"s","hash":"h","iterations":1}}}"#).unwrap();
+
+        let store = Store::load(&path).unwrap();
+        let mut cfg = store.get();
+        cfg.device.name = "Power Core".into();
+        cfg.policy.reserve_percent = 27.0;
+        store.save(&cfg).unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["mode"], serde_json::json!("local"));
+        assert_eq!(doc["users"]["op"]["hash"], serde_json::json!("h"));
+        assert_eq!(doc["driver"]["device"]["name"], serde_json::json!("Power Core"));
+
+        // Round trip: what we wrote is what the next start reads.
+        let again = Store::load(&path).unwrap().get();
+        assert_eq!(again.device.name, "Power Core");
+        assert_eq!(again.policy.reserve_percent, 27.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_standalone_toml_install_is_migrated_once() {
+        let dir = std::env::temp_dir().join(format!("emaldo-migrate-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let shared = dir.join("config.json");
+        let toml_src = dir.join("emaldo-local.toml");
+        std::fs::write(&shared, r#"{"mode":"local","lan_cidrs":["192.168.0.0/16"]}"#).unwrap();
+        std::fs::write(&toml_src, "[device]\nname = \"Legacy\"\n[web]\nlisten_addr = \"10.0.0.2:4443\"\n").unwrap();
+
+        assert!(shared::migrate(&shared, &toml_src).unwrap());
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+        assert_eq!(doc["mode"], serde_json::json!("local"));
+        assert_eq!(doc["driver"]["device"]["name"], serde_json::json!("Legacy"));
+        assert!(dir.join("config.pre-merge").exists(), "old bridge config must be kept");
+        assert!(!toml_src.exists(), "the TOML is moved aside after migration");
+
+        let cfg = Store::load(&shared).unwrap().get();
+        assert_eq!(cfg.web.listen_addr, "10.0.0.2:4443");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

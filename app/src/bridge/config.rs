@@ -469,13 +469,31 @@ impl<T: serde::de::DeserializeOwned + Serialize + Default> Store<T> {
                 self.inner.conflict.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        let bytes = serde_json::to_vec_pretty(&*self.value.read().unwrap())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let bytes = self.document()?;
         write_atomic(&self.path, &bytes)?;
         self.inner
             .stamp
             .store(stamp_of(&self.path), std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The whole shared document: this role's fields plus whatever the other
+    /// role keeps under its own key (`driver`, see `crate::config::shared`).
+    /// Without this a bridge save would drop the driver's settings and vice
+    /// versa, since neither struct knows the other's fields.
+    fn document(&self) -> std::io::Result<Vec<u8>> {
+        let mut doc: serde_json::Value =
+            serde_json::to_value(&*self.value.read().unwrap())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let other = std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|d| d.get("driver").cloned());
+        if let (Some(obj), Some(other)) = (doc.as_object_mut(), other) {
+            obj.insert("driver".into(), other);
+        }
+        serde_json::to_vec_pretty(&doc)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// True when the file on disk changed since the bridge last read or wrote
